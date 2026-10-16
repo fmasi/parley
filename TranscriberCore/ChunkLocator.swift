@@ -38,13 +38,36 @@ public enum ChunkLocator {
     ///
     /// - Parameter maxDuration: optional cap on the returned range, so callers never size a
     ///   playback buffer from an arbitrarily long diarization segment.
+    ///
+    /// - Parameter chunkOffsets: where the transcript placed each chunk on its wall-clock timeline
+    ///   (seconds from the meeting start, `metadata.chunk_offsets`). When present and one per chunk,
+    ///   they are used instead of laying chunks end to end: after a relaunch or sleep gap, chunks
+    ///   are NOT contiguous, and summing durations would play the wrong audio after the gap. A time
+    ///   inside a gap resolves to nothing.
     public static func locate(
         start: TimeInterval,
         end: TimeInterval,
         chunkDurations: [TimeInterval?],
+        chunkOffsets: [TimeInterval]? = nil,
         maxDuration: TimeInterval? = nil
     ) -> Location? {
         guard start >= 0, end > start, !chunkDurations.isEmpty else { return nil }
+
+        if let offsets = chunkOffsets, offsets.count == chunkDurations.count, offsets.allSatisfy(\.isFinite) {
+            // The chunk with the latest offset at or before `start` (offsets may be out of list
+            // order: a chunk re-indexed after a collision).
+            guard let index = offsets.indices.filter({ offsets[$0] <= start }).max(by: { offsets[$0] < offsets[$1] }),
+                  let duration = chunkDurations[index], duration > 0
+            else { return nil }
+            let localStart = start - offsets[index]
+            guard localStart < duration else { return nil }   // inside a gap
+            var localEnd = min(end - offsets[index], duration)
+            if let maxDuration, localEnd - localStart > maxDuration {
+                localEnd = localStart + maxDuration
+            }
+            guard localEnd > localStart else { return nil }
+            return Location(index: index, start: localStart, end: localEnd)
+        }
 
         var elapsed: TimeInterval = 0
         for (index, duration) in chunkDurations.enumerated() {

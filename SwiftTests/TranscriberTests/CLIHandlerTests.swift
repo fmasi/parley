@@ -2,9 +2,6 @@ import Testing
 import Foundation
 @testable import TranscriberCore
 
-// RED-FIRST-EXEMPT: this file's only change in this PR is the removal of the parseBenchmark test
-// alongside deleting the benchmark subcommand. No regression test is added — the remaining tests
-// are unchanged characterization of existing behaviour, green at the parent.
 struct CLIHandlerTests {
 
     @Test func parseTranscribeMinimal() throws {

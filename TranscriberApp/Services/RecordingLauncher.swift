@@ -33,32 +33,34 @@ final class RecordingLauncher {
         self.calendarService = calendarService
     }
 
-    /// The naming panel flow (moved verbatim from MenuView.promptAndStartRecording).
+    /// The naming panel flow. The panel opens at once and its name field fills in when the calendar
+    /// lookup resolves (#197).
     ///
-    /// `suggestedName` is a title the caller already holds. Meeting sensing warms the calendar lookup
-    /// when the offer appears — on a 10 s budget, because nothing is waiting on it — so "Name it
-    /// first…" must reuse that answer rather than ask again. A second lookup here would not merely
-    /// duplicate work: `CalendarService` serializes lookups, so it would queue behind the warm call
-    /// while its own 1 s deadline was already running, and could return nil having never reached
-    /// EventKit — leaving the naming dialog blank under an island that was showing the title. Passing
-    /// nil (the menu path, and the case where the warm lookup came back empty) keeps the original
-    /// behaviour exactly: look it up here, bounded at 1 s.
+    /// `suggestedName` is a title the caller already holds — meeting sensing warms the lookup when the
+    /// offer appears, so "Name it first…" reuses that answer instead of querying EventKit again.
     func promptAndStart(suggestedName: String? = nil) async {
-        var suggestedName = suggestedName
-        if suggestedName == nil {
-            suggestedName = await calendarService.currentEventTitle(
-                lookaheadMinutes: configManager.config.calendarLookaheadMinutes
-            )
-        }
+        let lookaheadMinutes = configManager.config.calendarLookaheadMinutes
+        let calendarService = calendarService
         SessionNameWindowController.shared.show(
-            suggestedName: suggestedName,
-            lastMicrophoneDeviceId: selectedMicId
+            lastMicrophoneDeviceId: selectedMicId,
+            calendarLookup: {
+                if let suggestedName { return suggestedName }
+                return await calendarService.currentEventTitle(lookaheadMinutes: lookaheadMinutes)
+            }
         ) { [weak self] sessionName, micDeviceId in
             guard let self else { return }
             self.selectedMicId = micDeviceId
             // Captured locally so the task doesn't retain the launcher for the length of a start.
             let coordinator = self.coordinator
-            Task { await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId) }
+            // In flight from THIS turn, before the Task: a crash-protection hand-over must never see the
+            // gap between the dialog closing and the start (L round 7). `startRecording` takes it over.
+            coordinator.announceStart()
+            Task {
+                await coordinator.startRecording(sessionName: sessionName, microphoneDeviceId: micDeviceId)
+                // After the recording is up (never gating it): a missing permission is fixed at the start
+                // of the meeting, not after it (#220).
+                await PermissionRepairWindowController.shared.verify(trigger: .recordStart)
+            }
         }
     }
 

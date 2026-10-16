@@ -28,11 +28,6 @@ private func keepObserving<T>(
 /// `quickStart`/`stopRecording` below is the direct result of a click.
 @MainActor
 final class MeetingPromptPresenter {
-    /// Deliberately longer than the 1 s bound a click gets: nobody is waiting on this lookup. It runs
-    /// when the offer appears — seconds before the user answers — precisely so the first (cold,
-    /// multi-second) EventKit query of a session resolves in time to name the recording (Ruling 7).
-    private static let calendarWarmTimeout: TimeInterval = 10
-
     private let appState: AppState
     private let configManager: ConfigManager
     private let coordinator: RecordingCoordinator
@@ -134,7 +129,7 @@ final class MeetingPromptPresenter {
 
     func stop() {
         // Guard BEFORE hiding, so a rejected stop leaves the offer on screen instead of dismissing it.
-        // The mirror of the coordinator's start guard. `startInFlight` is internal to Core, but a start
+        // The mirror of the coordinator's start guard. `isStartInFlight` is public, but a start
         // in flight has not reached `.recording` yet (the phase flips only once the helper is up), so
         // requiring `.recording` here is that same guard seen from outside: this stop can never race a
         // start, and a click on a stale offer after the recording ended does nothing.
@@ -217,15 +212,13 @@ final class MeetingPromptPresenter {
 
     /// Look the calendar title up as soon as the offer appears, not when Record is clicked: the click
     /// must start a recording immediately, and the name is baked into the filenames at start. Off main
-    /// and bounded, like every other lookup (#197) — only the deadline is longer, because this one
-    /// blocks nothing. The title only decorates the subtitle when it is not carrying the disclosure.
+    /// and unbounded: nothing waits on it, and a late answer is dropped if the offer is gone. The title only decorates the subtitle when it is not carrying the disclosure.
     private func warmCalendar(for app: MeetingApp, decorateSubtitle: Bool) {
         calendarTitle = nil   // never name this meeting after the last one
         Task { [weak self] in
             guard let self else { return }
             let title = await self.calendarService.currentEventTitle(
-                lookaheadMinutes: self.configManager.config.calendarLookaheadMinutes,
-                timeout: Self.calendarWarmTimeout
+                lookaheadMinutes: self.configManager.config.calendarLookaheadMinutes
             )
             // The offer may have been answered or withdrawn while the query ran.
             guard let title, !title.isEmpty, self.state.pendingStart == app else { return }

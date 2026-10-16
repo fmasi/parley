@@ -244,4 +244,113 @@ struct RecordingSentinelTests {
         #expect(next.startedAt == original.startedAt)
         #expect(next.micDeviceUID == original.micDeviceUID)
     }
+
+    // MARK: - Liveness, boot session, stopping (L7, §8.3/§8.9)
+
+    @Test func livenessBootSessionAndStoppingRoundTripAndDefault() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        var s = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        try RecordingSentinel.write(s, directory: dir)
+        let bare = try #require(RecordingSentinel.read(directory: dir))
+        #expect(bare.lastAliveAt == nil && bare.bootSessionUUID == nil && bare.stopping == false)
+        s.lastAliveAt = Date(timeIntervalSinceReferenceDate: 800_000_060)
+        s.bootSessionUUID = "B1"
+        s.stopping = true
+        try RecordingSentinel.write(s, directory: dir)
+        let full = try #require(RecordingSentinel.read(directory: dir))
+        #expect(full.lastAliveAt?.timeIntervalSinceReferenceDate == 800_000_060 && full.bootSessionUUID == "B1" && full.stopping)
+    }
+
+    /// A sentinel written before these fields existed still reads (no `stopping` key → not stopping).
+    @Test func aSentinelWithoutTheNewFieldsReads() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        let json = """
+        {"startedAt":"2026-09-24T10:00:00Z","sessionName":"S","systemAudioPath":"/tmp/s-0.wav",
+         "micAudioPath":"/tmp/s-0_mic.wav","segment":1,"chunkIndex":0}
+        """
+        try json.data(using: .utf8)!.write(to: dir.appendingPathComponent("recording.json"))
+        let s = try #require(RecordingSentinel.read(directory: dir))
+        #expect(s.lastAliveAt == nil && s.bootSessionUUID == nil && !s.stopping)
+    }
+
+    /// L follow-up 42: the quit mark round-trips, defaults to false, and survives a segment advance.
+    @Test func theQuitDuringFinalizeMarkRoundTrips() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        var s = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        #expect(!s.quitDuringFinalize)
+        s.quitDuringFinalize = true
+        try RecordingSentinel.write(s, directory: dir)
+        #expect(RecordingSentinel.read(directory: dir)?.quitDuringFinalize == true)
+        #expect(s.incrementedSegment(systemAudioPath: "/tmp/s-1.wav", micAudioPath: "/tmp/s-1_mic.wav").quitDuringFinalize)
+    }
+
+    /// A crash restart advances the segment: the liveness, the boot session and the stop mark carry over.
+    @Test func incrementedSegmentKeepsLivenessBootSessionAndStopping() {
+        var s = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        s.lastAliveAt = Date(timeIntervalSinceReferenceDate: 800_000_060)
+        s.bootSessionUUID = "B1"
+        s.stopping = true
+        let next = s.incrementedSegment(systemAudioPath: "/tmp/system-1.wav", micAudioPath: "/tmp/mic-1.wav")
+        #expect(next.lastAliveAt == s.lastAliveAt && next.bootSessionUUID == "B1" && next.stopping)
+    }
+
+    /// L review 89: an unreadable pending list is set aside — never read as `[]` and then overwritten, which
+    /// dropped every session it named.
+    @Test func anUnreadablePendingListIsSetAsideNeverOverwritten() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        let garbage = Data("{ not a list".utf8)
+        try garbage.write(to: dir.appendingPathComponent("pending-sessions.json"))
+        let loaded = RecordingSentinel.loadPending(directory: dir)
+        #expect(loaded.sessions.isEmpty)
+        let aside = try #require(loaded.setAside)
+        #expect(try Data(contentsOf: aside) == garbage, "the unreadable list is kept, byte for byte")
+        try RecordingSentinel.writePending([makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))], directory: dir)
+        #expect(try Data(contentsOf: aside) == garbage, "and never overwritten by the next write")
+        #expect(RecordingSentinel.loadPending(directory: dir).setAside == nil, "set aside once")
+    }
+
+    /// L review 166: a list that is unreadable AND cannot be moved aside is never overwritten — the sessions go to a new
+    /// list beside it, which the next load reads too; once the main list is readable again, the new list folds back in.
+    @Test func anUnmovableUnreadableListGetsANewListBesideIt() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        let main = dir.appendingPathComponent("pending-sessions.json")
+        let garbage = Data("{ not a list".utf8)
+        try garbage.write(to: main)
+        try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: main.path)
+        defer { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: main.path) }
+        let held = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        #expect(RecordingSentinel.loadPending(directory: dir).keptUnreadable == main)
+        try RecordingSentinel.writePending([held], directory: dir)
+        #expect(try Data(contentsOf: main) == garbage, "never overwritten")
+        #expect(RecordingSentinel.loadPending(directory: dir).sessions == [held], "the new list is read")
+        let another = RecordingSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_100), sessionName: "Other",
+                                        systemAudioPath: "/tmp/other-0.wav", micAudioPath: "/tmp/other-0_mic.wav")
+        try RecordingSentinel.writePending([held, another], directory: dir)
+        let lists = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("pending-") && $0 != "pending-sessions.json" }
+        #expect(lists.count == 1, "one new list at a time: \(lists)")
+        try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: main.path)
+        try FileManager.default.removeItem(at: main)   // the user fixed it
+        try RecordingSentinel.writePending(RecordingSentinel.readPending(directory: dir), directory: dir)
+        #expect(RecordingSentinel.readPending(directory: dir).count == 2)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("pending-") } == ["pending-sessions.json"])
+    }
+
+    /// L review 196: a main list that becomes readable again (fixed by hand, restored) is folded back — but it never
+    /// overrides a NEWER copy of a session kept in a list beside it meanwhile: the newest copy per session wins.
+    @Test func aFixedMainListNeverOverridesANewerCopyBesideIt() throws {
+        let dir = makeTempDir(); defer { cleanup(dir) }
+        let main = dir.appendingPathComponent("pending-sessions.json")
+        let old = makeSentinel(startedAt: Date(timeIntervalSinceReferenceDate: 800_000_000))
+        try RecordingSentinel.writePending([old], directory: dir)
+        let fixed = try Data(contentsOf: main)
+        try Data("{ not a list".utf8).write(to: main)   // unreadable: the next keeping goes beside it
+        var newer = old
+        newer.heldReason = .stopUnderWay
+        newer.stopCause = .stopInterrupted
+        try RecordingSentinel.writePending([newer], directory: dir)
+        try fixed.write(to: main)   // the main list is readable again — with its OLDER copy
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: main.path)
+        let loaded = RecordingSentinel.readPending(directory: dir)
+        #expect(loaded.count == 1 && loaded.first?.heldReason == .stopUnderWay && loaded.first?.stopCause == .stopInterrupted, "\(loaded)")
+    }
 }

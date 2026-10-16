@@ -122,4 +122,153 @@ struct TranscriptAssemblerTests {
         #expect(parsed?["metadata"] != nil)
         #expect(parsed?["segments"] != nil)
     }
+
+    /// Scan A113: gaps must land in metadata.capture even when no coverage was stamped (a fake or an
+    /// old helper); the `capture` dictionary is created on demand.
+    @Test func captureGapsLandInMetadataCaptureEvenWithoutCoverage() throws {
+        let gap = CaptureGap(start: Date(timeIntervalSince1970: 10), end: Date(timeIntervalSince1970: 14), reason: "app relaunch")
+        let json = TranscriptAssembler.assemble(
+            segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+            diarization: false, dualStream: false, captureGaps: [gap])
+        let capture = try #require((json["metadata"] as? [String: Any])?["capture"] as? [String: Any])
+        let gaps = try #require(capture["gaps"] as? [[String: Any]])
+        #expect(gaps.count == 1 && gaps[0]["reason"] as? String == "app relaunch" && gaps[0]["seconds"] as? Double == 4)
+        #expect(gaps[0]["start"] as? String == "1970-01-01T00:00:10Z")
+    }
+
+    /// #231: the count of echo-flagged segments is written under the name that says what it is, and
+    /// under its old name for one more release. Nothing is written when nothing was flagged.
+    @Test func theEchoCountIsWrittenAsFlaggedAndStillAsRemoved() throws {
+        func metadata(flagged: Int) throws -> [String: Any] {
+            try #require(TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                diarization: false, dualStream: true, echoSegmentsFlagged: flagged)["metadata"] as? [String: Any])
+        }
+        let some = try metadata(flagged: 36)
+        #expect(some["echo_segments_flagged"] as? Int == 36)
+        #expect(some["echo_segments_removed"] as? Int == 36, "kept for one release")
+        let none = try metadata(flagged: 0)
+        #expect(none["echo_segments_flagged"] == nil && none["echo_segments_removed"] == nil)
+    }
+
+    /// #242: the cluster verdicts land in `metadata.echo_clusters` as given; a path that ran no echo
+    /// dedup (nil) leaves the key out, and one that ran it over no local speech writes an empty list.
+    @Test func echoClustersLandInMetadataWhenTheDedupRan() throws {
+        func metadata(_ clusters: [[String: Any]]?) throws -> [String: Any] {
+            try #require(TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                diarization: false, dualStream: clusters != nil, echoClusters: clusters)["metadata"] as? [String: Any])
+        }
+        let entry = EchoDeduplicator.ClusterVerdict(
+            label: "Local Speaker 2", segments: 40, matchedSegments: 36, seconds: 400, matchedSeconds: 360,
+            words: 480, matchedWords: 432, share: 0.9, verdict: .echo, bestEmbeddingSimilarity: 0.68,
+            matchedRemote: ["Remote Speaker 1": 352.8]).metadataDictionary(chunk: 0)
+        let written = try #require(try metadata([entry])["echo_clusters"] as? [[String: Any]])
+        #expect(written.count == 1 && written[0]["label"] as? String == "Local Speaker 2" && written[0]["verdict"] as? String == "echo")
+        #expect(written[0]["share"] as? Double == 0.9 && written[0]["chunk"] as? Int == 0 && written[0]["track"] as? String == "local")
+        #expect(try metadata(nil)["echo_clusters"] == nil)
+        #expect((try metadata([])["echo_clusters"] as? [[String: Any]])?.isEmpty == true)
+    }
+
+    @Test func processingIssuesLandInMetadataWithCounts() throws {
+        let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+            diarization: false, dualStream: false,
+            processingIssues: [["chunk": 0, "code": "asr_failed", "track": "remote"], ["chunk": 0, "code": "stream_empty", "track": "local"], ["chunk": 2, "code": "asr_failed", "track": "remote"]])
+        let m = try #require(json["metadata"] as? [String: Any])
+        #expect((m["processing_issues"] as? [[String: Any]])?.count == 3)
+        #expect(m["processing_issue_count"] as? Int == 2, "stream_empty does not affect content")
+        #expect(m["processing_problem_chunks"] as? Int == 2)
+    }
+
+    @Test func coverageLandsInMetadataCapture() throws {
+        var remote = TrackAccounting(); remote.expectedSeconds = 2736; remote.deliveredSeconds = 0
+        let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                  recovered: false, anomalyCount: 0, remoteCoverage: remote, remoteStatus: "neverDelivered")
+        let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                diarization: false, dualStream: false, provenance: p)
+        let capture = try #require((json["metadata"] as? [String: Any])?["capture"] as? [String: Any])
+        let r = try #require(capture["remote"] as? [String: Any])
+        #expect(r["status"] as? String == "neverDelivered" && r["expected_seconds"] as? Double == 2736)
+        #expect(capture["local"] == nil)
+    }
+
+    /// #295 item 1: the build stamp reaches the transcript of every recording, a clean one included (it keeps no
+    /// `.diag.jsonl`); an unknown build is left out.
+    @Test func theBuildLandsInCaptureProvenance() throws {
+        func stamped(_ build: String?) throws -> [String: Any] {
+            let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                      recovered: false, anomalyCount: 0, build: build)
+            let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                    diarization: false, dualStream: true, provenance: p)
+            return try #require((json["metadata"] as? [String: Any])?["capture_provenance"] as? [String: Any])
+        }
+        #expect(try stamped("release")["build"] as? String == "release")
+        #expect(try stamped(nil)["build"] == nil)
+    }
+
+    /// Review round 1 item 7: a tracked session with no issues says so; an untracked path says nothing.
+    @Test func trackedCleanSessionWritesEmptyProcessingIssues() throws {
+        let tracked = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                   diarization: false, dualStream: false, processingIssues: [])
+        let m = try #require(tracked["metadata"] as? [String: Any])
+        #expect((m["processing_issues"] as? [Any])?.isEmpty == true)
+        #expect(m["processing_issue_count"] as? Int == 0 && m["processing_problem_chunks"] as? Int == 0)
+
+        let untracked = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                     diarization: false, dualStream: false)
+        #expect((untracked["metadata"] as? [String: Any])?["processing_issues"] == nil)
+    }
+
+    @Test func aSessionLevelIssueCountsAsAProblem() throws {
+        let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                diarization: false, dualStream: false,
+                                                processingIssues: [["code": "session_write_failed"]])
+        let m = try #require(json["metadata"] as? [String: Any])
+        #expect(m["processing_issue_count"] as? Int == 1 && m["processing_problem_chunks"] as? Int == 1)
+    }
+
+    @Test func coverageAndGapsShareMetadataCapture() throws {
+        var remote = TrackAccounting(); remote.expectedSeconds = 60; remote.deliveredSeconds = 60
+        let p = CaptureProvenance(engine: "e", systemFormat: nil, micFormat: nil, micDevice: nil, routeChanges: 0, retries: 0,
+                                  recovered: false, anomalyCount: 0, remoteCoverage: remote, remoteStatus: "healthy")
+        let json = TranscriptAssembler.assemble(segments: [], audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil,
+                                                diarization: false, dualStream: false, provenance: p,
+                                                captureGaps: [CaptureGap(start: Date(timeIntervalSince1970: 0), end: Date(timeIntervalSince1970: 5), reason: "sleep")])
+        let capture = try #require((json["metadata"] as? [String: Any])?["capture"] as? [String: Any])
+        #expect(capture["remote"] != nil && (capture["gaps"] as? [Any])?.count == 1)
+    }
+
+    @Test func flagsAreWrittenOnlyWhenSet() throws {
+        let json = TranscriptAssembler.assemble(
+            segments: [LabeledSegment(start: 0, end: 1, speaker: "A", text: "plain", source: "remote"),
+                       LabeledSegment(start: 1, end: 2, speaker: "A", text: "echo", source: "local", echo: true),
+                       LabeledSegment(start: 2, end: 3, speaker: "Unknown", text: "noise", source: "remote", filtered: true),
+                       LabeledSegment(start: 3, end: 4, speaker: "A", text: "again", source: "remote", duplicate: true)],
+            audioPaths: [], outputFormat: "txt", language: "en", numSpeakers: nil, diarization: false, dualStream: true)
+        let segs = try #require(json["segments"] as? [[String: Any]])
+        #expect(segs[0]["filtered"] == nil && segs[0]["echo"] == nil && segs[0]["duplicate"] == nil)
+        #expect(segs[1]["echo"] as? Bool == true && segs[1]["filtered"] == nil)
+        #expect(segs[2]["filtered"] as? Bool == true)
+        #expect(segs[3]["duplicate"] as? Bool == true)
+    }
+
+    /// C-M17: a non-finite time or confidence reached `JSONSerialization`, which raises an uncatchable
+    /// Objective-C exception — every finalize (and every retry) of that session crashed. The segment
+    /// and its words are kept; an unknown time is written as null (never an invented number), an
+    /// unknown confidence is left out.
+    @Test func nonFiniteSegmentNumbersAreWrittenAsUnknownNotCrashed() throws {
+        let json = TranscriptAssembler.assemble(
+            segments: [LabeledSegment(start: .nan, end: .infinity, speaker: "A", text: "kept words", source: "remote", confidence: .nan),
+                       LabeledSegment(start: 1, end: 2, speaker: "A", text: "fine", source: "remote", confidence: 0.9)],
+            audioPaths: [], outputFormat: "json", language: "en", numSpeakers: nil, diarization: false, dualStream: false)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("assembler-nan-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("t.json")
+        try TranscriptAssembler.write(json, to: url)
+        let back = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])?["segments"] as? [[String: Any]])
+        #expect(back.count == 2 && back[0]["text"] as? String == "kept words")
+        #expect(back[0]["start"] is NSNull && back[0]["end"] is NSNull && back[0]["confidence"] == nil)
+        #expect(back[0]["time_unknown"] as? Bool == true && TranscriptAssembler.isFlagged(back[0]), "flagged: every reader skips it")
+        #expect(back[1]["time_unknown"] == nil && !TranscriptAssembler.isFlagged(back[1]))
+        #expect(back[1]["start"] as? Double == 1 && back[1]["confidence"] != nil)
+    }
 }

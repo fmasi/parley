@@ -1,6 +1,7 @@
 # Microphone capture — design & API tradeoff
 
-**Status:** current (since #96). **Last updated:** 2026-06-26.
+**Status:** current (since #96); the HAL listener and auto-follow are implemented (`MicCaptureSession`,
+`MicTargeting`). **Last updated:** 2026-10-09.
 
 ## Context
 
@@ -20,8 +21,8 @@ property listener — not AVFoundation device notifications, and not a buffer wa
 
 - **Capture:** `AVCaptureSession` + `AVCaptureAudioDataOutput`. Lets the user pin a *specific* input device
   (`AVCaptureDeviceInput`), gives `CMSampleBuffer`s with host-clock PTS (used for mic↔system timeline
-  alignment, council HOL-1), and matches the capture-pipeline model we already use for system audio
-  (ScreenCaptureKit).
+  alignment, council HOL-1), and matched the capture-pipeline model system audio used at the time
+  (ScreenCaptureKit; the default is now a Core Audio process tap, #103).
 - **Device-change detection:** `AudioObjectAddPropertyListenerBlock` on `kAudioObjectSystemObject` for
   `kAudioHardwarePropertyDevices` ('dev#', device set changed) and `kAudioHardwarePropertyDefaultInputDevice`
   ('dIn ', default input switched). This is the canonical macOS mechanism (it's the same HAL layer the
@@ -40,8 +41,8 @@ property listener — not AVFoundation device notifications, and not a buffer wa
 
 ## The device-selection philosophy (the direction this serves)
 
-We currently make the user **pick** a mic only because we hadn't had a reliable way to auto-pick the right
-one. The **ideal**: the user never thinks about mic selection — the app **follows the system default input**,
+Originally the user had to **pick** a mic because we had no reliable way to auto-pick the right one. The
+**ideal**, now implemented (`TranscriberCore/MicTargeting.swift`): the user never thinks about mic selection — the app **follows the system default input**,
 which macOS already chooses based on the active route (AirPods when connected, built-in otherwise). Manual
 pinning stays as an **override that should rarely be needed**.
 
@@ -55,6 +56,19 @@ The HAL listener is precisely the mechanism that realises this ideal:
   pinned device vanished, fall back to default (and optionally re-pin when it returns).
 
 So "fix the disconnect bug" and "deliver the auto-pick ideal" are the **same** change.
+
+### The one exclusion: the built-in mic while the lid is closed (#315)
+
+In clamshell mode macOS keeps the built-in mic as the default input, and it delivers full-rate exact zeros.
+So the follow (both the HAL re-evaluation and the recovery loop) treats built-in inputs as **unusable while the
+lid is closed** (`MicTargeting.unusableInputs`, one IOKit read of `AppleClamshellState` per re-evaluation, on
+the monitor or recovery queue, never the audio queue). When the default is unusable, the target is the pin if
+present, else the most recent input **the user chose by hand** that is present and usable
+(`Config.recent_microphone_device_ids`, newest first, at most 3, passed to the helper in `CaptureOptions`; the
+helper adds every switch made during the recording), else the default anyway with the `micDigitalSilence` alarm
+raised at once instead of after 12 s of zeros. The first real audio clears it, as before. With the lid open the
+rule is unchanged. Choosing among inputs the user never selected, or probing inputs for content, is a separate
+feature (v0.10).
 
 ## When to revisit: switch the mic path to `AVAudioEngine`
 
@@ -82,7 +96,7 @@ Until one of those lands, `AVCaptureSession` + Core Audio HAL listener is the co
 
 ## References
 
-- `AudioCaptureHelper/XPC/MicCaptureSession.swift` — the mic session + (to be added) HAL listener.
+- `AudioCaptureHelper/XPC/MicCaptureSession.swift` — the mic session and its HAL listener.
 - `TranscriberCore/AudioDeviceEnumerator.swift` — device enumeration (live `DiscoverySession`).
 - `docs/gotchas.md` — "AVCaptureDevice disconnect notifications don't fire for audio input on macOS."
 - Core Audio: `AudioHardware.h` / `AudioHardwareBase.h` (`kAudioHardwarePropertyDevices`,

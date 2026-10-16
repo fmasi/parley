@@ -28,12 +28,24 @@ public enum MeetingSummarizer {
 
         Logger.transcription.info("Generating summary for '\(metadata.sessionName)' (\(segments.count) segments)")
 
-        let markdown = try await provider.summarize(segments: segments, metadata: metadata)
+        // #138 / C-I6: the transcript testifies BEFORE its content leaves the machine. Stamped only
+        // after a written summary, a request that timed out after sending (the documented -1001
+        // case) left `transcript_transmitted: false` on a transcript that went to a remote endpoint.
+        // If the stamp cannot be written, nothing is sent.
+        try Self.stampDisclosure(.attempted(endpoint: endpoint), into: transcriptPath)
+
+        let response = try await provider.summarizeDetailed(segments: segments, metadata: metadata)
+
+        // Parley's own statement of what was not captured comes first, deterministically: a model
+        // instruction alone is not a guarantee (small local models drop late rules). Then a summary
+        // cut off at the model's output limit, which also reads as complete (P14).
+        let banner = (SummaryPromptBuilder.captureBanner(metadata) ?? "")
+            + (response.truncated ? Self.truncationBanner : "")
 
         // Deterministically stamp the source transcript filename as a footer so
         // the notes can always be traced back to their source — independent of
         // whether the LLM chose to mention it.
-        let body = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = banner + response.markdown.trimmingCharacters(in: .whitespacesAndNewlines)
         let stamped = "\(body)\n\n---\n*Source transcript: `\(transcriptPath.lastPathComponent)`*\n"
 
         let baseName = transcriptPath.deletingPathExtension().lastPathComponent
@@ -41,23 +53,45 @@ public enum MeetingSummarizer {
             .appendingPathComponent(baseName + "-summary.md")
         try stamped.write(to: summaryPath, atomically: true, encoding: .utf8)
 
-        // #138: the content was sent to `endpoint` to produce this summary — update the
-        // transcript's disclosure from its airgapped default so the artifact testifies to it.
+        // #138: the summary exists — the final state of the disclosure stamped above.
         try Self.stampDisclosure(.generated(endpoint: endpoint), into: transcriptPath)
 
         Logger.transcription.info("Summary written to \(summaryPath.lastPathComponent)")
     }
 
+    static let truncationBanner = "> ⚠️ This summary may be incomplete: the model reached its output limit.\n\n"
+
     /// Rewrite the transcript JSON's `metadata.disclosure` block in place (#138), preserving all
     /// other keys. Atomic. A transcript with no readable metadata is left unchanged.
+    ///
+    /// Never un-says a disclosure: once `transcript_transmitted` or `summary_generated` is true it
+    /// stays true, and every host the content was sent to stays in `transcript_transmitted_to` — a
+    /// re-summary on this Mac must not make a transcript that left the machine read "airgapped".
+    /// `summary_endpoint` names the endpoint that generated the summary (changed only by a
+    /// generation), a separate fact (R2b item 6).
     static func stampDisclosure(_ disclosure: SummaryDisclosure, into transcriptPath: URL) throws {
         let data = try Data(contentsOf: transcriptPath)
         guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         var metadata = (json["metadata"] as? [String: Any]) ?? [:]
-        metadata["disclosure"] = disclosure.asMetadataDictionary()
+        let previous = metadata["disclosure"] as? [String: Any]
+        let wasTransmitted = previous?["transcript_transmitted"] as? Bool == true
+        let wasGenerated = previous?["summary_generated"] as? Bool == true
+        let previousEndpoint = previous?["summary_endpoint"] as? String
+        // A disclosure written before the host list existed: its endpoint is where it was sent.
+        let previousHosts = previous?["transcript_transmitted_to"] as? [String]
+            ?? (wasTransmitted ? [previousEndpoint].compactMap { $0 } : [])
+        var hosts = previousHosts
+        for host in disclosure.transcriptTransmittedTo where !hosts.contains(host) { hosts.append(host) }
+        let stamped = SummaryDisclosure(
+            summaryGenerated: disclosure.summaryGenerated || wasGenerated,
+            summaryEndpoint: disclosure.summaryGenerated ? disclosure.summaryEndpoint : (wasGenerated ? previousEndpoint : nil),
+            transcriptTransmitted: disclosure.transcriptTransmitted || wasTransmitted,
+            transcriptTransmittedTo: hosts
+        )
+        metadata["disclosure"] = stamped.asMetadataDictionary()
         json["metadata"] = metadata
         let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-        try out.write(to: transcriptPath, options: .atomic)
+        try DurableFile.replace(transcriptPath, with: out)   // round 4 item 6
     }
 
     /// Convenience: create provider from config + summarize. Never throws; returns a
@@ -65,12 +99,16 @@ public enum MeetingSummarizer {
     /// failing silently (#134).
     public static func summarizeIfConfigured(
         transcriptPath: URL,
-        config: Config
+        config: Config,
+        keychain: KeychainStoring = KeychainStore.shared
     ) async -> SummaryOutcome {
         guard let summary = config.summary, summary.enabled, !summary.endpoint.isEmpty else {
             return .skipped
         }
-        return await runSummary(transcriptPath: transcriptPath, provider: Self.createProvider(from: summary), endpoint: summary.endpoint)
+        // #48: the API key no longer lives on `SummaryConfig` — it's fetched from the Keychain at
+        // the point of use instead of round-tripping through config.json.
+        let apiKey = SummaryAPIKeyStore.load(keychain: keychain)
+        return await runSummary(transcriptPath: transcriptPath, provider: Self.createProvider(from: summary, apiKey: apiKey), endpoint: summary.endpoint)
     }
 
     /// Run a summary with an explicit provider, translating success/failure into a `SummaryOutcome`.
@@ -123,6 +161,13 @@ public enum MeetingSummarizer {
             default:
                 return .failed("Summary request failed: \(error.localizedDescription)")
             }
+        } catch is CancellationError {
+            // Swift's structured-concurrency cancellation (Task.checkCancellation(), app quitting,
+            // the stop path tearing the task down) throws this distinct type — separate from
+            // `URLError.cancelled` above — but it's the same "user did this on purpose" case, so it
+            // gets the same non-`.failed` treatment (#191, same misdirection as #173's URLError case).
+            Logger.transcription.info("Summary cancelled via task cancellation — transcript is untouched")
+            return .cancelled
         } catch {
             // A non-SummaryError, non-URLError here is a file read/write failure (transcript
             // unreadable, summary write failed). CocoaError's description embeds the
@@ -134,13 +179,14 @@ public enum MeetingSummarizer {
         }
     }
 
-    /// Create the appropriate provider from config.
-    public static func createProvider(from summary: SummaryConfig) -> any SummaryProvider {
+    /// Create the appropriate provider from config. `apiKey` is passed in separately (#48) —
+    /// `SummaryConfig` no longer carries it; callers fetch it from `SummaryAPIKeyStore` first.
+    public static func createProvider(from summary: SummaryConfig, apiKey: String) -> any SummaryProvider {
         switch summary.provider {
         case .lmstudio:
             return LMStudioSummaryProvider(
                 endpoint: summary.endpoint,
-                apiKey: summary.apiKey,
+                apiKey: apiKey,
                 model: summary.model,
                 contextLength: summary.contextLength,
                 contextOverheadPercent: summary.contextOverheadPercent,
@@ -150,7 +196,7 @@ public enum MeetingSummarizer {
         case .openai:
             return OpenAISummaryProvider(
                 endpoint: summary.endpoint,
-                apiKey: summary.apiKey,
+                apiKey: apiKey,
                 model: summary.model,
                 requestTimeoutSeconds: summary.requestTimeoutSeconds
             )
@@ -158,6 +204,11 @@ public enum MeetingSummarizer {
     }
 
     // MARK: - Private
+
+    /// Test seam for `parseTranscript(at:)`.
+    static func parseTranscriptForTesting(at path: URL) throws -> ([SummarySegment], SummaryMetadata) {
+        try parseTranscript(at: path)
+    }
 
     private static func parseTranscript(at path: URL) throws -> ([SummarySegment], SummaryMetadata) {
         let data = try Data(contentsOf: path)
@@ -169,27 +220,41 @@ public enum MeetingSummarizer {
 
         let metadata_raw = json["metadata"] as? [String: Any]
         let dualStream = metadata_raw?["dual_stream"] as? Bool ?? false
-        let echoRemoved = metadata_raw?["echo_segments_removed"] as? Int ?? 0
+        // `echo_segments_removed` is the same count under its name before #231 (older transcripts).
+        let echoFlagged = metadata_raw?["echo_segments_flagged"] as? Int ?? metadata_raw?["echo_segments_removed"] as? Int ?? 0
+        let capture = metadata_raw?["capture"] as? [String: Any]
+        let provenance = metadata_raw?["capture_provenance"] as? [String: Any]
+        let gaps = capture?["gaps"] as? [[String: Any]] ?? []
 
-        let segments = rawSegments.map { seg in
-            SummarySegment(
-                start: seg["start"] as? Double ?? 0,
-                end: seg["end"] as? Double ?? 0,
-                speaker: seg["speaker"] as? String ?? "",
+        // Flagged segments (VAD-filtered noise, mic-bleed echo) are kept in the record but are not
+        // what anybody said to the meeting: the model never sees them (P10/P11). Nor does it see a
+        // segment with no usable time (R2b item 5) — never placed at 00:00:00 — and the header says
+        // how many were left out.
+        let echo = EchoNotice.Findings(json: json)
+        let segments = rawSegments.filter { !TranscriptAssembler.isFlagged($0) }.map { seg in
+            let source = seg["source"] as? String ?? ""
+            return SummarySegment(
+                start: seg["start"] as? Double ?? .nan,   // unreachable: flagged when not a Double
+                end: seg["end"] as? Double ?? .nan,
+                speaker: promptSpeaker(seg["speaker"] as? String ?? "", source: source, echo: echo),
                 text: seg["text"] as? String ?? "",
-                source: seg["source"] as? String ?? ""
+                source: source
             )
         }
 
+        // People only (#269): "Unknown" is an absence of attribution, not somebody who attended.
+        // Its lines stay in the prompt; a real summary listed "Local Unknown" as a participant.
         var seen = Set<String>()
         var speakers: [String] = []
         for seg in segments {
-            if !seg.speaker.isEmpty && seen.insert(seg.speaker).inserted {
+            if !seg.speaker.isEmpty && !TranscriptMerger.isUnknown(seg.speaker) && seen.insert(seg.speaker).inserted {
                 speakers.append(seg.speaker)
             }
         }
 
-        let duration = segments.last?.end ?? 0
+        // From every segment, flagged or not: the meeting lasted as long as its last recorded moment
+        // (the latest real end — a segment with no usable time says nothing about it).
+        let duration = rawSegments.compactMap { $0["end"] as? Double }.filter(\.isFinite).max() ?? 0
         let sessionName = path.deletingPathExtension().lastPathComponent
 
         let metadata = SummaryMetadata(
@@ -198,11 +263,78 @@ public enum MeetingSummarizer {
             durationSeconds: duration,
             speakers: speakers,
             dualStream: dualStream,
-            echoSegmentsRemoved: echoRemoved
+            echoSegmentsFlagged: echoFlagged,
+            remoteCapture: captureSideNote(capture?["remote"], provenance: provenance, isRemote: true),
+            localCapture: captureSideNote(capture?["local"], provenance: provenance, isRemote: false),
+            // Written by a build that tracks issues, yet no coverage for either side: say so rather
+            // than let silence read as "complete".
+            coverageNotRecorded: metadata_raw?["processing_issues"] != nil && capture?["remote"] == nil && capture?["local"] == nil,
+            gapCount: gaps.count,
+            gapSeconds: gaps.reduce(0) { $0 + (validSeconds($1["seconds"]) ?? 0) },
+            untimedSegmentCount: rawSegments.filter { !TranscriptAssembler.hasUsableTime($0) }.count,
+            captureReconstructed: provenance?["reconstructed"] as? Bool == true
         )
 
         return (segments, metadata)
     }
+
+    /// The speaker a visible line reaches the model under (#269).
+    ///
+    /// The visible lines of an echo voice — the other side's voice through the loudspeakers, found
+    /// as a speaker of its own on the microphone (`metadata.echo_clusters`) — are what its flagged
+    /// lines left over: a mix of both people's words. They stay in the prompt, under the channel's
+    /// unattributed label ("Local Unknown"), so the model has no label to make a participant of.
+    ///
+    /// Two lines keep the label they have:
+    /// - one on another channel than the echo voice's;
+    /// - one whose label is a name the user also gave to a speaker that is not an echo voice. Those
+    ///   lines cannot be told apart from that person's, and taking the name off all of them would
+    ///   remove someone who attended.
+    private static func promptSpeaker(_ speaker: String, source: String, echo: EchoNotice.Findings) -> String {
+        guard let voice = echo.voice(forRow: speaker), voice.track == source,
+              !echo.names.contains(where: { $0.value == speaker && echo.voice(forRow: $0.key) == nil })
+        else { return speaker }
+        // Through `tagWithSourcePrefix`, so the label is the one the pipeline itself writes.
+        var unattributed = [LabeledSegment(start: 0, end: 0, speaker: SpeakerAssignment.unknownSpeaker, text: "", source: source)]
+        SpeakerAssignment.tagWithSourcePrefix(&unattributed)
+        return unattributed[0].speaker
+    }
+
+    /// One side of `metadata.capture` (§7.2) as a `CaptureSideNote`; nil when the side is absent.
+    /// A side with no readable `status` keeps an empty status, which reads as "unknown" (fail
+    /// closed). Seconds outside any real range become NaN and print as "?".
+    private static func captureSideNote(_ raw: Any?, provenance: [String: Any]?, isRemote: Bool) -> CaptureSideNote? {
+        guard let side = raw as? [String: Any] else { return nil }
+        return CaptureSideNote(
+            status: side["status"] as? String ?? "",
+            deliveredSeconds: validSeconds(side["delivered_seconds"]) ?? .nan,
+            expectedSeconds: validSeconds(side["expected_seconds"]) ?? .nan,
+            exactZeroSeconds: validSeconds(side["exact_zero_seconds"]),
+            // The CONFIRMED-denial field only: `system_audio_unrecovered` is also set by a failed
+            // stream restart, and "permission denied" is a claim Parley must be able to back.
+            permissionDenied: isRemote ? provenance?["system_permission_denied_confirmed"] as? Bool : nil,
+            // This side's own content anomalies — the session-wide `quality_anomaly_count` would
+            // blame one side for the other's faults.
+            anomalyCount: side["content_anomaly_count"] as? Int,
+            exactZeroIsLowerBound: side["exact_zero_seconds_is_lower_bound"] as? Bool == true,
+            coverageIncomplete: side["coverage_incomplete"] as? Bool == true,
+            wrongRateSeconds: wrongRateSeconds(side["rate_drift"]),
+            // The tap's field only (#333): the microphone's exact-zero wording never reads it.
+            exactZeroUnprovenSeconds: isRemote ? validSeconds(side["exact_zero_unproven_seconds"]) : nil,
+            driftEndedByStop: (side["rate_drift"] as? [[String: Any]] ?? [])
+                .contains { $0["ended_by"] as? String == RateDriftWindow.endedByStop },
+            driftsUnannounced: RateDriftWindow.unannounced(inSide: side) > 0
+        )
+    }
+
+    /// The sum of the `affected_seconds` a side's `rate_drift` windows state (#308); nil when none states one.
+    private static func wrongRateSeconds(_ raw: Any?) -> Double? {
+        let values = (raw as? [[String: Any]] ?? []).compactMap { validSeconds($0["affected_seconds"]) }
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+
+    /// A seconds value a recording could have: finite, ≥ 0, under a century. nil otherwise.
+    private static func validSeconds(_ raw: Any?) -> Double? { TrackAccounting.validSeconds(raw) }
 
     /// Determine the canonical recording-start date for the summary (#49).
     ///

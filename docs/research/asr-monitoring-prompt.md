@@ -72,11 +72,11 @@ If nothing significant happened, say so briefly. Do not fabricate news.
 ## Running the Engine Benchmark (manual, when monitoring flags something interesting)
 
 ```bash
-# Run all engines on a test recording
-swift run --package-path tools/engine-benchmark EngineBenchmark ~/Documents/Recordings/2026-04-01/"130007-gustavo part 2.wav"
+# Run all engines on a test recording (RECORDING = the path of a system-audio WAV of your own)
+swift run --package-path tools/engine-benchmark EngineBenchmark "$RECORDING"
 
 # Run specific engines only
-swift run --package-path tools/engine-benchmark EngineBenchmark ~/Documents/Recordings/2026-04-01/"130007-gustavo part 2.wav" --engines fluid,speech
+swift run --package-path tools/engine-benchmark EngineBenchmark "$RECORDING" --engines fluid,speech
 
 # Available engines: whisperkit, whisper-cpp, fluid, speech, mlx
 ```

@@ -1,0 +1,10 @@
+# zizmor: workflow security lint, run by `just workflows` and by just-ci.yml's `workflow-lint: true`
+# (CHEATSHEET R14). REQUIRED in every repo with fmasi/.github callers: without it zizmor reports each
+# `fmasi/...@main` as a high-severity unpinned-uses, and CI fails. Found at .github/zizmor.yml.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # The owner's reusable workflows track @main on purpose (R10: one place to fix).
+        # Setting any policy replaces zizmor's defaults, so every other action must be SHA-pinned.
+        "fmasi/*": ref-pin

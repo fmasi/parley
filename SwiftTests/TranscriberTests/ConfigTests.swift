@@ -15,8 +15,8 @@ struct ConfigTests {
         #expect(config.launchOnStartup == true)
         #expect(config.suppressCaptureWarning == false)
         #expect(config.engine == .resolvedDefault)
-        // SCK is the shipped default — the #103 Core Audio tap is opt-in during phase-2 rollout.
-        #expect(config.systemAudioSource == .screenCaptureKit)
+        // §11.1 (owner decision 2026-09-24): new installs record with the Core Audio tap.
+        #expect(config.systemAudioSource == .coreAudioTap)
     }
 
     @Test func newFieldsRoundTrip() throws {
@@ -55,6 +55,32 @@ struct ConfigTests {
         #expect(config.engine == .resolvedDefault)
         // A config written before #103 has no system_audio_source key — must default to SCK, not throw.
         #expect(config.systemAudioSource == .screenCaptureKit)
+    }
+
+    /// §11.2 review fix 1: unlike `system_audio_source`, a missing `engine` key follows the
+    /// CURRENT default (FluidAudio), not whatever shipped when the config was written — on
+    /// macOS 26+ the old default (SpeechAnalyzer) produces blank transcripts (#223), so pinning
+    /// a legacy config to it would pin a total-loss bug. Pins intent; may pass immediately.
+    @Test func decodesLegacyMissingEngineKeyToTheCurrentDefaultNotThePriorOne() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.engine == .fluidAudio)
+    }
+
+    /// §11.2 review fix 1: an explicit engine choice is never overridden by the default flip —
+    /// only a MISSING key follows the current default. Pins intent; may pass immediately.
+    @Test func decodesExplicitSpeechAnalyzerEngineUnaffectedByTheDefaultFlip() throws {
+        let json = """
+        {"recording_directory":"/tmp","silence_timeout_minutes":5,"silence_detection_enabled":true,\
+        "output_format":"txt","launch_on_startup":true,\
+        "suppress_capture_warning":false,"engine":"speech_analyzer"}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.engine == .speechAnalyzer)
     }
 
     @Test func memberWiseInit() {
@@ -335,30 +361,46 @@ struct ConfigTests {
         config.summary = SummaryConfig(
             enabled: true,
             endpoint: "https://api.openai.com/v1",
-            apiKey: "sk-test",
             model: "gpt-4o-mini"
         )
         let data = try JSONEncoder().encode(config)
         let decoded = try JSONDecoder().decode(Config.self, from: data)
         #expect(decoded.summary?.enabled == true)
         #expect(decoded.summary?.endpoint == "https://api.openai.com/v1")
-        #expect(decoded.summary?.apiKey == "sk-test")
         #expect(decoded.summary?.model == "gpt-4o-mini")
     }
 
-    @Test func summaryConfigSnakeCaseKeys() throws {
+    // #48: `SummaryConfig` no longer has an `apiKey` field at all — the key lives in the
+    // Keychain (`SummaryAPIKeyStore`), never in config.json. Pin the negative: even a
+    // freshly-encoded config must not contain an `api_key` key, so a future regression that
+    // re-adds a plaintext field to `SummaryConfig` fails this test instead of shipping quietly.
+    @Test func summaryConfigNeverWritesAPIKeyToJSON() throws {
         var config = Config.default
         config.summary = SummaryConfig(
             enabled: true,
             endpoint: "http://localhost:11434/v1",
-            apiKey: "",
             model: "llama3"
         )
         let data = try JSONEncoder().encode(config)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let summaryJSON = json["summary"] as? [String: Any]
         #expect(summaryJSON != nil)
-        #expect(summaryJSON?["api_key"] != nil)
+        #expect(summaryJSON?["api_key"] == nil)
+    }
+
+    // A config.json written by a pre-#48 build still has a plaintext `api_key` on disk until
+    // `ConfigManager` migrates it away (ConfigManagerTests). `SummaryConfig` itself must decode
+    // that file without crashing or leaking the value anywhere — it's simply an unknown key to
+    // this decoder.
+    @Test func decodesLegacySummaryConfigWithPlaintextAPIKeyWithoutCrashing() throws {
+        let json = """
+        {"enabled":true,"provider":"openai","endpoint":"https://api.openai.com/v1",\
+        "api_key":"sk-legacy-plaintext","model":"gpt-4o-mini"}
+        """
+        let config = try JSONDecoder().decode(SummaryConfig.self, from: Data(json.utf8))
+        #expect(config.enabled == true)
+        #expect(config.endpoint == "https://api.openai.com/v1")
+        #expect(config.model == "gpt-4o-mini")
     }
 
     @Test func decodesLegacyConfigWithoutSummary() throws {
@@ -448,6 +490,49 @@ struct ConfigTests {
          "output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false}
         """.data(using: .utf8)!
         #expect(try JSONDecoder().decode(Config.self, from: legacy).meetingSensing == .prompt)
+    }
+
+    /// v2 F3: the three capture knobs are optional, snake_case, and absent by default.
+    @Test func captureKnobsRoundTripAndDefaultToNil() throws {
+        var c = Config.default
+        #expect(c.tapAutoStart == nil && c.remoteExactZeroSoftAlarmSeconds == nil && c.debugDropTapFrames == nil)
+        c.tapAutoStart = false
+        c.remoteExactZeroSoftAlarmSeconds = 300
+        c.debugDropTapFrames = true
+        let data = try JSONEncoder().encode(c)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["tap_auto_start"] as? Bool == false)
+        #expect(json["remote_exact_zero_soft_alarm_seconds"] as? Int == 300)
+        #expect(json["debug_drop_tap_frames"] as? Bool == true)
+        #expect(try JSONDecoder().decode(Config.self, from: data) == c)
+    }
+
+    /// #247: `debug_skip_wav_sync` is optional, snake_case and absent by default, like the other
+    /// capture knobs.
+    @Test func debugSkipWavSyncRoundTripsAndDefaultsToNil() throws {
+        var c = Config.default
+        #expect(c.debugSkipWavSync == nil)
+        let untouched = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(c)) as? [String: Any])
+        #expect(untouched["debug_skip_wav_sync"] == nil, "an unset knob is not written")
+        c.debugSkipWavSync = true
+        let data = try JSONEncoder().encode(c)
+        let json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(json["debug_skip_wav_sync"] as? Bool == true)
+        #expect(try JSONDecoder().decode(Config.self, from: data) == c)
+        c.debugSkipWavSync = false
+        let off = try JSONEncoder().encode(c)
+        #expect(try #require(JSONSerialization.jsonObject(with: off) as? [String: Any])["debug_skip_wav_sync"] as? Bool == false)
+        #expect(try JSONDecoder().decode(Config.self, from: off).debugSkipWavSync == false)
+    }
+
+    /// §11.1 (owner decision 2026-09-24): new installs use the Core Audio tap; an existing config.json
+    /// without the key was written by an SCK-era build and stays SCK (no silent change of a live setup).
+    @Test func newInstallsDefaultToTheCoreAudioTapAndOldConfigsKeepSCK() throws {
+        #expect(Config.default.systemAudioSource == .coreAudioTap)
+        let legacy = Data(#"{"recording_directory":"/tmp/r","silence_timeout_minutes":5,"silence_detection_enabled":true,"output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false}"#.utf8)
+        #expect(try JSONDecoder().decode(Config.self, from: legacy).systemAudioSource == .screenCaptureKit)
+        let explicit = Data(#"{"recording_directory":"/tmp/r","silence_timeout_minutes":5,"silence_detection_enabled":true,"output_format":"txt","launch_on_startup":true,"suppress_capture_warning":false,"system_audio_source":"sck"}"#.utf8)
+        #expect(try JSONDecoder().decode(Config.self, from: explicit).systemAudioSource == .screenCaptureKit)
     }
 
 }

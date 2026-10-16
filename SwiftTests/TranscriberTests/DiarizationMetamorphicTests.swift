@@ -103,16 +103,43 @@ import Testing
         let paddedResult = try await Self.diarizer.diarize(audioPath: padded, numSpeakers: nil)
 
         try #require(!baseResult.segments.isEmpty)
+        // Compare TURNS, not raw segments. A pause inside one speaker's turn that is shorter than
+        // the timing tolerance is below the resolution this test claims: the diarizer renders it
+        // as a gap in one file and bridges it in the other, depending on where its frame grid
+        // falls after the shift. Observed: a 0.19s pause split one turn in the unpadded file
+        // (3 segments) and not in the padded one (2), while every boundary still shifted by the
+        // pad to within 0.01s — the property under test held and the count check failed anyway.
+        let baseTurns = Self.turns(baseResult.segments, bridging: Self.shiftTolerance)
+        let paddedTurns = Self.turns(paddedResult.segments, bridging: Self.shiftTolerance)
         // #require (not #expect): if counts differ, zip would silently truncate to the shorter and
         // the shift checks below would pass on a partial set — a false green. Stop here instead.
-        try #require(baseResult.segments.count == paddedResult.segments.count,
-                     "leading silence must not change segmentation, only shift it")
-        for (unshifted, shifted) in zip(baseResult.segments, paddedResult.segments) {
-            #expect(abs(shifted.start - unshifted.start - pad) < 0.25,
-                    "segment start must shift by \(pad)s (got \(unshifted.start) -> \(shifted.start))")
-            #expect(abs(shifted.end - unshifted.end - pad) < 0.25,
-                    "segment end must shift by \(pad)s (got \(unshifted.end) -> \(shifted.end))")
+        try #require(baseTurns.count == paddedTurns.count,
+                     "leading silence must not change who spoke when, only shift it")
+        for (unshifted, shifted) in zip(baseTurns, paddedTurns) {
+            #expect(unshifted.speaker == shifted.speaker,
+                    "the turn at \(unshifted.start)s must keep its speaker")
+            #expect(abs(shifted.start - unshifted.start - pad) < Self.shiftTolerance,
+                    "turn start must shift by \(pad)s (got \(unshifted.start) -> \(shifted.start))")
+            #expect(abs(shifted.end - unshifted.end - pad) < Self.shiftTolerance,
+                    "turn end must shift by \(pad)s (got \(unshifted.end) -> \(shifted.end))")
         }
+    }
+
+    /// The timing tolerance of the padding relation, and so the shortest pause it can tell apart.
+    private static let shiftTolerance = 0.25
+
+    /// Consecutive segments of the same speaker separated by less than `gap` seconds, as one turn.
+    private static func turns(_ segments: [DiarizedSegment], bridging gap: Double) -> [DiarizedSegment] {
+        var out: [DiarizedSegment] = []
+        for segment in segments.sorted(by: { $0.start < $1.start }) {
+            if let last = out.last, last.speaker == segment.speaker, segment.start - last.end < gap {
+                out[out.count - 1] = DiarizedSegment(
+                    start: last.start, end: max(last.end, segment.end), speaker: last.speaker)
+            } else {
+                out.append(segment)
+            }
+        }
+        return out
     }
 
     /// The same file, diarized twice -> the same answer.

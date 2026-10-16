@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import AVFoundation
 import TranscriberCore
 import os
@@ -19,6 +20,19 @@ struct RenameDialog: View {
     @State private var speakerCounts: [String: Int] = [:]  // "local"/"remote" → user-stated count
     @State private var rediarizing: String?                // channel currently being re-detected
     @State private var rediarizeError: String?
+    /// Live progress for the channel in `rediarizing`, so the row shows more than a bare spinner
+    /// on an operation that can take minutes (#203). A local phase list, not
+    /// `TranscriptRediarizer.Progress.Phase` directly: "Rebuilding list" happens here in the
+    /// dialog (re-reading the rewritten transcript into rows), after `rediarize` itself returns,
+    /// so Core has no phase for it.
+    private enum RediarizePhase: Equatable {
+        case decodingAudio
+        case detectingSpeakers
+        case rebuildingList
+    }
+    @State private var rediarizePhase: RediarizePhase?
+    @State private var rediarizeFraction: Double?
+    @State private var rediarizeStartedAt: Date?
     /// One instance for the dialog's lifetime. `FluidAudioDiarizer` caches a loaded manager per
     /// speaker count, and a fresh instance per press would throw that away — re-loading the models
     /// from disk on every Re-detect, including the common "try 2, then try 3" flow.
@@ -26,6 +40,23 @@ struct RenameDialog: View {
     /// Held so Cancel/close can abort a running re-detect. Without it the unstructured Task
     /// outlives the dialog and rewrites the transcript after the user asked it not to.
     @State private var rediarizeTask: Task<Void, Never>?
+    /// The `speaker_names` already saved per channel, loaded ONCE by `RenameWindowController` when
+    /// the dialog was opened, rather than re-read from disk on every "Re-detect" press (#207).
+    /// Refreshed after a successful re-detect, since names may have changed (cleared on this
+    /// channel; untouched on the other).
+    @State private var cachedChannelNames: [String: [String: String]]
+    /// Quiet voices the pipeline merged into a channel's main speaker (`clusters_absorbed`, P7),
+    /// per channel. Read once when the dialog appears; a channel's entry is dropped after it is
+    /// re-detected, since the user has then stated the count and absorption did not run.
+    @State private var absorbedClusters: [String: Int] = [:]
+    /// What the last Re-detect on each channel produced, shown under its row (P5) — so a run that
+    /// found fewer speakers than asked for, or relabeled nothing, says so instead of looking done.
+    @State private var rediarizeOutcomes: [String: TranscriptRediarizer.Outcome] = [:]
+    /// What the echo check recorded in the transcript (#244): which speaker rows it judged to be the
+    /// other side's voice through the loudspeakers, and with what numbers. Loaded with the rows by
+    /// `RenameWindowController` (one read, off the main thread) and again after a re-detect, which
+    /// rewrites it. The copy and the people count are `EchoNotice`'s; nothing is worked out here.
+    @State private var echo: EchoNotice.Findings
 
     let jsonPath: URL
     let onSave: ([String: String]) -> Void
@@ -34,11 +65,15 @@ struct RenameDialog: View {
     init(
         jsonPath: URL,
         speakers: [SpeakerEntry],
+        initialChannelNames: [String: [String: String]] = [:],
+        initialEcho: EchoNotice.Findings = .none,
         onSave: @escaping ([String: String]) -> Void,
         onCancel: @escaping () -> Void = {}
     ) {
         self.jsonPath = jsonPath
         self._speakers = State(initialValue: speakers)
+        self._cachedChannelNames = State(initialValue: initialChannelNames)
+        self._echo = State(initialValue: initialEcho)
         self.onSave = onSave
         self.onCancel = onCancel
     }
@@ -46,16 +81,27 @@ struct RenameDialog: View {
     /// Channels present in this recording, in display order.
     private var channels: [String] {
         var seen: [String] = []
-        for id in speakers.map(\.id) {
-            let channel = id.hasPrefix("Local ") ? "local" : (id.hasPrefix("Remote ") ? "remote" : "")
-            if !channel.isEmpty, !seen.contains(channel) { seen.append(channel) }
+        // Via `channel(of:)`, not the label prefix: once a speaker has been renamed its label is
+        // the name the user typed, not "Remote Speaker 1", so a prefix test finds no channels and the
+        // Re-detect controls disappear entirely — on precisely the transcripts someone has already
+        // invested naming effort in, which are the ones most worth re-detecting.
+        for speaker in speakers {
+            guard let channel = channel(of: speaker) else { continue }
+            if !seen.contains(channel) { seen.append(channel) }
         }
         return seen
     }
 
     private func detectedCount(for channel: String) -> Int {
-        let prefix = channel == "local" ? "Local " : "Remote "
-        return max(1, speakers.filter { $0.id.hasPrefix(prefix) }.count)
+        // `channel(of:)`, not the label prefix — the same reason `channels` above uses it. On a
+        // transcript whose speakers have been renamed, a prefix test matches nothing, the count
+        // floors to 1, and the stepper pre-fills 1 however many speakers were actually detected:
+        // wrong on exactly the recordings #205 made Re-detect reachable for again.
+        //
+        // PEOPLE, not rows (#244): a row judged to be the other side's voice through the
+        // loudspeakers is not somebody on this channel, and a stated count does not include it.
+        // Pre-filling the number of rows offered "2" for the user plus an echo voice.
+        echo.people(on: channel, rows: speakers.filter { self.channel(of: $0) == channel }.map(\.id))
     }
 
     /// Manual override for the diarizer's speaker count (#67).
@@ -99,12 +145,33 @@ struct RenameDialog: View {
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 0)
                         if rediarizing == channel {
-                            ProgressView().controlSize(.small)
+                            rediarizeStatus
                         } else {
-                            Button("Re-detect") { rediarize(channel: channel, count: count) }
+                            Button("Re-detect") { confirmThenRediarize(channel: channel, count: count) }
                                 .font(.caption)
                                 .disabled(rediarizing != nil)
                         }
+                    }
+                    if let absorbed = absorbedClusters[channel], absorbed > 0 {
+                        Text(absorbed == 1
+                             ? "1 quiet voice was merged into the main speaker — set a count and Re-detect to undo"
+                             : "\(absorbed) quiet voices were merged into the main speaker — set a count and Re-detect to undo")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let outcome = rediarizeOutcomes[channel] {
+                        Text(EchoNotice.redetectOutcome(outcome))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let hint = echo.redetectHint(on: channel) {
+                        // Before a re-detect: why the count is one less than the rows above, and
+                        // what a re-detect does with an echo voice (#244).
+                        Text(hint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -118,33 +185,161 @@ struct RenameDialog: View {
         }
     }
 
+    /// Phase + elapsed + (when known) a fraction, plus a Cancel that only aborts THIS operation —
+    /// distinct from the dialog-level Cancel button, which also dismisses the whole panel (#203).
+    /// Cancellation is already handled correctly by `rediarize(channel:count:)` (a `CancellationError`
+    /// is treated as success, not failure); this is what makes it reachable and visible.
+    @ViewBuilder
+    private var rediarizeStatus: some View {
+        HStack(spacing: 6) {
+            if let rediarizeFraction {
+                ProgressView(value: rediarizeFraction).controlSize(.small).frame(width: 50)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                Text(rediarizePhaseLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if let rediarizeStartedAt {
+                    Text(rediarizeStartedAt, style: .timer)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Button("Cancel") { rediarizeTask?.cancel() }
+                .font(.caption2)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var rediarizePhaseLabel: String {
+        switch rediarizePhase {
+        case .none: return "Starting…"
+        case .decodingAudio: return "Splitting audio…"
+        case .detectingSpeakers: return "Detecting speakers…"
+        case .rebuildingList: return "Rebuilding list…"
+        }
+    }
+
+    /// Which channel a row belongs to.
+    ///
+    /// The label prefix answers it until a speaker has been renamed — after that the label IS the
+    /// person's name and carries no prefix, so fall back to the channel its samples were taken
+    /// from. Without the fallback a renamed speaker looks like it belongs to no channel, and the
+    /// warning below would miss exactly the names it exists to protect.
+    /// Precondition: every `SpeakerEntry` in `speakers` has at least one sample. `parseSpeakers`
+    /// populates them before building the entry, so the `nil` return below is unreachable today —
+    /// but a future path that builds entries straight from the JSON would make those speakers
+    /// invisible to the whole Re-detect UI (no channel section, not counted by the stepper), with
+    /// nothing on screen to say so.
+    private func channel(of speaker: SpeakerEntry) -> String? {
+        if speaker.id.hasPrefix("Local ") { return "local" }
+        if speaker.id.hasPrefix("Remote ") { return "remote" }
+        guard let isLocal = speaker.samples.first?.isLocal else { return nil }
+        return isLocal ? "local" : "remote"
+    }
+
+    /// Names a re-detect on this channel would destroy: those already written to the transcript,
+    /// plus any typed into a field but not yet saved. Both are lost, so both have to count.
+    private func hasNamesToLose(on channel: String) -> Bool {
+        let unsaved = speakers.contains { speaker in
+            guard self.channel(of: speaker) == channel else { return false }
+            let typed = speaker.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !typed.isEmpty && typed != speaker.id
+        }
+        if unsaved { return true }
+        // From the cache loaded once when the dialog appeared, not a fresh read of the transcript
+        // (#207) — `recording_directory` can be network- or iCloud-backed, and a synchronous read
+        // on every button press blocks the main thread for as long as the mount takes to answer.
+        return !(cachedChannelNames[channel] ?? [:]).isEmpty
+    }
+
+    /// Ask before clearing names (#202).
+    ///
+    /// Re-detecting produces a new set of clusters, and the names on this channel are dropped
+    /// rather than carried over — carrying them re-points a name at whatever cluster the new run
+    /// emits first, which can be a different person. That trade is defensible but it is not
+    /// guessable, so it is stated in plain words before anything is written. Cancel touches
+    /// nothing: the transcript is only rewritten inside `rediarize`.
+    private func confirmThenRediarize(channel: String, count: Int) {
+        guard hasNamesToLose(on: channel) else {
+            rediarize(channel: channel, count: count)
+            return
+        }
+        let side = channel == "local" ? "this side" : "the other side"
+        let alert = NSAlert()
+        alert.messageText = "Re-detecting will clear the names on \(side)"
+        alert.informativeText =
+            "Working out the speakers again produces a new set of voices, and Parley will not guess "
+            + "which new speaker each existing name belongs to — guessing wrong would put the wrong "
+            + "name on the wrong words. You can name them again straight afterwards, and the old "
+            // Name the OPPOSITE channel explicitly: when the channel being re-detected is the remote
+            // one, `side` above is already "the other side", and a fixed "the other side" here
+            // contradicted the title in the one sentence meant to reassure — at the exact moment
+            // the user is deciding whether to discard naming work.
+            + "names are kept in the transcript's metadata. Names on \(channel == "local" ? "the other side" : "this side") are unaffected."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Re-detect")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        rediarize(channel: channel, count: count)
+    }
+
     private func rediarize(channel: String, count: Int) {
         rediarizing = channel
         rediarizeError = nil
+        rediarizeOutcomes[channel] = nil
+        rediarizePhase = nil
+        rediarizeFraction = nil
+        rediarizeStartedAt = Date()
         stopPlayback()
         let path = jsonPath
-        let vadThreshold = ConfigManager.shared.config.vadSpeechThreshold ?? 0.5
         rediarizeTask = Task {
             do {
-                _ = try await TranscriptRediarizer.rediarize(
+                let outcome = try await TranscriptRediarizer.rediarize(
                     transcript: path,
                     source: channel,
                     speakerCount: count,
                     diarizer: diarizer,
-                    vadSpeechThreshold: vadThreshold
+                    // Fires from off-main work (chunk decode loop, the diarizer's own background
+                    // progress callback) — hop back to the main actor per update rather than
+                    // requiring the whole signature be @MainActor, which the diarizer isn't.
+                    onProgress: { progress in
+                        Task { @MainActor in
+                            guard rediarizing == channel else { return }
+                            switch progress.phase {
+                            case .decodingAudio: rediarizePhase = .decodingAudio
+                            case .detectingSpeakers: rediarizePhase = .detectingSpeakers
+                            }
+                            rediarizeFraction = progress.fraction
+                        }
+                    }
                 )
+                await MainActor.run {
+                    rediarizePhase = .rebuildingList
+                    rediarizeFraction = nil
+                }
                 // Rebuild the rows from the rewritten transcript: labels, sample text and the
-                // resolved audio offsets can all have moved.
-                // Detached, matching `RenameWindowController.openRenameDialog`: `parseSpeakers`
-                // opens an AVAudioFile per chunk to measure durations, and this `Task` inherits the
-                // view's MainActor, so running it inline stalls the UI for O(chunks) file opens —
-                // right when the dialog is meant to be showing a spinner.
-                let refreshed = await Task.detached(priority: .userInitiated) {
-                    // minSegments: 1 — the user has just stated how many people are on this
-                    // channel. Dropping one of them as "diarization noise" for being quiet
-                    // contradicts the answer they gave and leaves a speaker they can see in the
-                    // transcript with no row to name.
-                    RenameWindowController.parseSpeakers(from: path, minSegments: 1)
+                // resolved audio offsets can all have moved. Also reload the channel-names cache
+                // (#207) — the channel just re-diarized had its names cleared, and the other
+                // channel is unaffected but re-reading both keeps the cache one honest snapshot
+                // rather than hand-patching just the changed side.
+                // Detached, matching `RenameWindowController.show`: `parseSpeakers` opens an
+                // AVAudioFile per chunk to measure durations, and this `Task` inherits the view's
+                // MainActor, so running it inline stalls the UI for O(chunks) file opens — right
+                // when the dialog is meant to be showing progress.
+                // minSegments: 1 — the user has just stated how many people are on this channel.
+                // Dropping one of them as "diarization noise" for being quiet contradicts the
+                // answer they gave and leaves a speaker they can see in the transcript with no row
+                // to name. A single combined read (not two independent ones) for the same reason
+                // as `RenameWindowController.show` — one round trip to what can be an
+                // iCloud-mounted path instead of two.
+                // What the echo check recorded comes from the same read: the re-detect has just
+                // rewritten this channel's verdicts and labels (#244).
+                let (refreshed, namesNow, echoNow) = await Task.detached(priority: .userInitiated) {
+                    RenameWindowController.parseSpeakersAndChannelNames(from: path, minSegments: 1)
                 }.value
                 await MainActor.run {
                     if refreshed.isEmpty {
@@ -155,16 +350,30 @@ struct RenameDialog: View {
                     } else {
                         speakers = refreshed
                     }
+                    cachedChannelNames = namesNow
+                    // Only from a transcript that was read: an unreadable one answers "no echo",
+                    // which would drop the notices from the rows still on screen.
+                    if !refreshed.isEmpty { echo = echoNow }
+                    absorbedClusters[channel] = nil
+                    rediarizeOutcomes[channel] = outcome
                     sampleIndices = [:]
                     // Drop the stated count so the stepper falls back to what the diarizer actually
                     // produced. Leaving it pinned showed "3 speakers" after a run that yielded 2,
                     // which reads as a result rather than as the request it was.
                     speakerCounts[channel] = nil
                     rediarizing = nil
+                    rediarizePhase = nil
+                    rediarizeFraction = nil
+                    rediarizeStartedAt = nil
                 }
             } catch is CancellationError {
                 // The user asked for this. Reporting it as a failure would make Cancel look broken.
-                await MainActor.run { rediarizing = nil }
+                await MainActor.run {
+                    rediarizing = nil
+                    rediarizePhase = nil
+                    rediarizeFraction = nil
+                    rediarizeStartedAt = nil
+                }
             } catch {
                 // .private: OS errors routinely embed full filesystem paths in their messages,
                 // and a recording's path names the meeting.
@@ -177,6 +386,9 @@ struct RenameDialog: View {
                     rediarizeError = (error as? TranscriptRediarizer.RediarizeError)?.errorDescription
                         ?? "Re-detection failed. See Console for details."
                     rediarizing = nil
+                    rediarizePhase = nil
+                    rediarizeFraction = nil
+                    rediarizeStartedAt = nil
                 }
             }
         }
@@ -225,6 +437,13 @@ struct RenameDialog: View {
         .padding(20)
         .frame(width: 400)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
+        .task {
+            // Off the main actor: a long meeting's transcript is several hundred KB.
+            let path = jsonPath
+            absorbedClusters = await Task.detached(priority: .userInitiated) {
+                Self.absorbedClusterCounts(in: path)
+            }.value
+        }
         .onDisappear {
             // The last preview would otherwise linger: it is only cleaned up when the NEXT one is
             // created, and closing the dialog is the common exit.
@@ -233,6 +452,23 @@ struct RenameDialog: View {
             previousPreview.map { try? FileManager.default.removeItem(at: $0) }
             previousPreview = nil
         }
+    }
+
+    /// Per channel, how many minority clusters the pipeline absorbed into the dominant speaker, from
+    /// the transcript's `metadata.processing_issues` (`clusters_absorbed` entries, summed across
+    /// chunks). Empty when absent or unreadable.
+    nonisolated static func absorbedClusterCounts(in jsonPath: URL) -> [String: Int] {
+        guard let data = try? Data(contentsOf: jsonPath),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let metadata = root["metadata"] as? [String: Any],
+              let issues = metadata["processing_issues"] as? [[String: Any]]
+        else { return [:] }
+        var counts: [String: Int] = [:]
+        for issue in issues where issue["code"] as? String == ChunkIssue.Code.clustersAbsorbed.rawValue {
+            guard let track = issue["track"] as? String else { continue }
+            counts[track, default: 0] += issue["count"] as? Int ?? 1
+        }
+        return counts
     }
 
     /// One card per detected speaker: label + sample controls, name field,
@@ -293,6 +529,15 @@ struct RenameDialog: View {
                 }
             }
 
+            // The echo check judged this row to be the other side's voice through the loudspeakers,
+            // not a person on this side (#244): said above the name field, before anyone names it.
+            if let notice = echo.cardNotice(forRow: speakerId) {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             TextField("Name", text: speaker.displayName)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit { stopPlayback() }
@@ -332,7 +577,7 @@ struct RenameDialog: View {
                 of: url, from: start, to: end, isLocal: isLocal
             )
         } catch {
-            Logger.audio.error("playSample: \(String(describing: error), privacy: .public)")
+            Logger.audio.error("playSample: \(String(describing: error), privacy: .private)")
             return
         }
 

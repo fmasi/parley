@@ -27,8 +27,9 @@
     <key>NSScreenCaptureUsageDescription</key>
     <string>Parley needs Screen Recording permission to capture system audio from meetings.</string>
 
-    <!-- SystemTapSession calls AudioHardwareCreateProcessTap from THIS process (the XPC helper), so
-         the System Audio Recording TCC grant is keyed to this bundle, not the main app (#103). -->
+    <!-- Kept for completeness only. TCC attributes the helper's tap to the HOST APP, whose Info.plist
+         must carry this key (#220) — a copy here alone never produces a prompt (device spike
+         2026-09-23), which is how the tap came to record silence for a whole call. -->
     <key>NSAudioCaptureUsageDescription</key>
     <string>Parley needs System Audio Recording permission to capture meeting and call audio (including Continuity calls).</string>
 

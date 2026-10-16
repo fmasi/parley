@@ -46,8 +46,14 @@ Fix the must-list, then push.
 
 ## 3. Then CI, and monitor it — but bound the review loop
 
-Push, open the PR, watch the checks. Resolve what's *pertinent*. The load-bearing word is
-pertinent, because an automated reviewer has a structural bias you must counter:
+Run `just ci` (the exact CI checks, locally), push, open the PR as a **draft** (CI skips drafts),
+then `gh pr ready`: that runs CI and the Claude review once. Watch the checks. Later pushes re-run
+the tests only; to ask for another review round, remove and re-add the `ready-for-review` label.
+The review ends with a verdict: a **Critical** finding labels the PR `claude-blocked`, and the
+required `review / review-gate` check blocks the merge until a re-review passes (or the owner
+overrides). An `@claude review` comment gets an answer, not a verdict, so it doesn't move the gate.
+Below Critical, resolve what's *pertinent*. The load-bearing word is pertinent, because an
+automated reviewer has a structural bias you must counter:
 
 **The review bot only ever adds code.** Its incentive is to find something to say, and "find
 something" almost always resolves to "add a guard / handle this edge / distinguish that case."
@@ -83,9 +89,69 @@ fix-plus-regression-test PR the gate exists to reward. Mark such a test
 (`bash scripts/fetch-diarization-fixtures.sh`), and rely on the `test` job — which does run it — for
 the real signal.
 
+**A `RED-FIRST-EXEMPT:` marker lasts as long as it is in the file.** It exempts the whole file from
+the gate in every later PR, not only the one that added it. A reason such as "this file's only
+change in this PR is…" is false from the moment that PR merges, and six files carried such markers
+until they were removed (#260). Remove a marker when its reason expires; a later PR that adds a
+characterization test next to a production change adds a fresh one with its own reason.
+
+**RED is a verdict on the tests, not any non-zero exit.** The gate resolves the packages, builds the
+production targets, builds the tests, then runs them, at the merge base and again at HEAD. It is RED
+only when the tests ran and failed, or when a gated changed test file did not compile against the
+merge base. A compile error only in a `RED-FIRST-EXEMPT` file is not RED (#297): the gated suites
+never ran, so nothing shows they fail without the fix, and an exempt file that cannot compile at the
+merge base is not the characterization its marker claims. A test file renamed and changed in the PR
+is gated under its new name; one renamed without a change is not. If the merge base cannot be resolved, built, linked or run, the gate fails with "could not
+build the parent — not RED" and names the step. It used to pass: on one Mac SwiftPM could not check
+a dependency out of its local cache, nothing compiled, and six pushes went through as "RED at
+parent". When that message appears locally with "Couldn't check out revision" or "unable to read
+tree" above it, run `swift package purge-cache` and push again. A test that crashes the test process
+at the merge base also lands here (no summary is printed): make it fail with an assertion instead.
+
 **What CI cannot cover:** anything needing real audio hardware — the capture path, Bluetooth/HFP
 behaviour, ScreenCaptureKit, the Core Audio tap. These require device validation on a real Mac,
 and the measurements belong in the commit message.
+
+### Merge blockers that are not test failures
+
+Each of these held up a merge while every test was green. All four were met while landing a stack
+of PRs (#266) and its follow-ups.
+
+**A retargeted PR has no code-scanning result.** Code scanning here is GitHub's default CodeQL
+setup (a repository setting; there is no workflow file for it). A PR opened against a branch other
+than `main` and later retargeted to `main` has no code-scanning run for its head commit, and the
+merge stays blocked until one exists. A push to the PR triggers the run. Closing and reopening the
+PR does not.
+
+**A cancelled required check blocks the merge even when its twin passed.** Pushing to a PR and
+changing its base at the same moment starts two `Tests` runs. They share a concurrency group
+(`test.yml`: the workflow plus the ref, with `cancel-in-progress` for PR events), so one of them is
+cancelled. The cancelled run's `test` counts as a required check that did not pass, although the
+other run went green. Re-running the cancelled run clears it.
+
+**A stacked branch cannot merge its parent's squash commit.** The repo squash-merges, so once the
+parent PR is merged, `main` holds one new commit whose content the stacked branch already has as
+many commits. Merging `main` into the stacked branch then conflicts everywhere. Instead, merge the
+parent branch's real history into the stacked branch (`git merge <parent-branch>`); when the
+stacked branch's tree matches what `main` plus its own work should be, record `main` as merged
+without taking anything from it: `git merge -s ours origin/main`. Check the trees first
+(`git diff <parent-branch> origin/main` must print nothing), because `-s ours` discards whatever
+`main` has that the branch does not. Simpler still is not to stack: branch from `main`, one PR per
+piece of work.
+
+**A build started from a git hook fails to resolve its packages unless git's environment is
+dropped.** Git exports `GIT_DIR` and its sibling variables to every hook. SwiftPM checks its
+dependencies out with `git`, and with those variables set its `git` acts on this repository
+instead of the dependency's checkout. In a tree that already has a build directory nothing is
+checked out, so nothing shows. In a tree that has never been built the checkout fails ("unable to
+read tree", "Couldn't check out revision"), and the red-first gate always builds such a tree: the
+throwaway worktree of the merge base. Three places drop the variables, each with
+`unset $(git rev-parse --local-env-vars)`: the `pre-push` hook in `lefthook.yml`, before it runs
+`just ci`; `scripts/verify-regression-tests.sh`, at its top, so the gate is safe whoever calls it;
+and `scripts/test-verify-regression-tests.sh`, whose throwaway repository's `git init` and commits
+would otherwise act on the real repository. Git then finds the repository from the working
+directory. A new script that runs `swift` or `git` and can be reached from a hook needs the same
+line (#260).
 
 ## 3a. Then a simplification pass — the only step that removes
 

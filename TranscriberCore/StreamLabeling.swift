@@ -27,10 +27,11 @@ enum StreamLabeling {
         /// hardcoded value while ignoring the user's config, with nothing to warn them.
         minSpeakerShare: Double?,
         speakerCountIsUserStated: Bool = false
-    ) -> (labeled: [LabeledSegment], speakerDatabase: [String: [Float]]) {
+    ) -> (labeled: [LabeledSegment], speakerDatabase: [String: [Float]], absorbed: Int) {
         // Runs BEFORE assignment so the absorbed cluster never becomes a "Speaker N" label, and
         // before `buildSpeakerMap` so the database keys agree with the labels (the invariant below).
-        let diarizationResult = DiarizationCleanup.absorbMinorityClusters(
+        // The absorbed count is returned so the chunk path can record it (`clusters_absorbed`, P7).
+        let (diarizationResult, absorbed) = DiarizationCleanup.absorbMinorityClustersCounting(
             diarizationResult,
             minShare: speakerCountIsUserStated ? nil : minSpeakerShare
         )
@@ -47,7 +48,7 @@ enum StreamLabeling {
         // breaking echo dedup and the cross-chunk reconciler. Keep their ordering logic in sync.
         let dbKeyMap = SpeakerAssignment.buildSpeakerMap(from: diarizationResult.segments)
         let speakerDatabase = SpeakerAssignment.remapDatabaseKeys(diarizationResult.speakerDatabase, using: dbKeyMap)
-        return (labeled, speakerDatabase)
+        return (labeled, speakerDatabase, absorbed)
     }
 
     /// Label every segment with one fixed speaker — used when there is no diarizer ("Speaker 1")

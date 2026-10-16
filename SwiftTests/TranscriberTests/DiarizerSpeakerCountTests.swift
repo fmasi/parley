@@ -6,7 +6,7 @@ import Foundation
 /// since the protocol was written, and `FluidAudioDiarizer` never read it — the value appeared
 /// only in the function signature and the body called `mgr.process(audioPath)` regardless.
 ///
-/// Measured on 2026-09-02 (`150633-Paul feedback`, speakerphone, two people on one mic):
+/// Measured on 2026-09-02 (a phone call on speakerphone, two people on one mic):
 ///     numSpeakers=2  ->  1 speaker   (hint discarded)
 ///     numSpeakers=3  ->  1 speaker   (hint discarded)
 ///     maxSpeakers=2  ->  2 speakers  (config knob, honoured)

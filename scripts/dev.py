@@ -5,14 +5,21 @@ Build, install, and launch the app for manual testing.
 
 Default (no flags): kill -> build -> install -> launch + print checklist.
 Step flags (--kill, --build, --install, --launch, --reset-tcc) switch to explicit mode.
-Modifier flags (--debug) layer on top of default or explicit steps.
+Modifier flags (--debug, --debug-build) layer on top of default or explicit steps.
+
+The build is a RELEASE (optimised) build unless --debug-build is given: what this script installs
+is what records real meetings between releases, and an unoptimised build allocates per sample on
+the audio queue (#271, docs/gotchas.md 84). --debug-build is for the fast inner loop only.
+--debug is unrelated to the build: it tails the log.
 
 Examples:
-    python scripts/dev.py                          # full cycle
+    python scripts/dev.py                          # full cycle, release build
+    python scripts/dev.py --debug-build            # full cycle, unoptimised debug build (faster to compile)
     python scripts/dev.py --debug                  # full cycle + tail unified log
     python scripts/dev.py --reset-tcc              # just reset TCC permissions
     python scripts/dev.py --reset-tcc --launch     # reset + launch
     python scripts/dev.py --build --install        # build + install only
+    python scripts/dev.py --build --debug-build    # debug build into dist/, nothing installed (`just build`)
     python scripts/dev.py --kill --launch          # relaunch existing install
 """
 
@@ -37,7 +44,8 @@ DEFAULT_STEPS = {"kill", "build", "install", "launch"}
 TCC_SERVICES = ["Microphone", "ScreenCapture", "Calendar", "SystemPolicyDocumentsFolder"]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
+    """Parse argv (default: the process arguments)."""
     parser = argparse.ArgumentParser(
         description="Developer iteration tool for Parley.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -53,9 +61,16 @@ def parse_args() -> argparse.Namespace:
 
     mods = parser.add_argument_group("modifiers (layer on top of default or explicit)")
     mods.add_argument("--debug", action="store_true",
-                      help="Launch app normally, then tail unified log (Ctrl+C to stop)")
+                      help="Launch app normally, then tail unified log (Ctrl+C to stop). "
+                           "Says nothing about the build: see --debug-build")
+    mods.add_argument("--debug-build", action="store_true",
+                      help="Build the unoptimised debug configuration instead of release "
+                           "(faster to compile; not for real meetings or for timings)")
 
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.debug_build and not (resolve_steps(args) & {"build", "install"}):
+        parser.error("--debug-build only applies when building: add --build or --install")
+    return args
 
 
 def resolve_steps(args: argparse.Namespace) -> set[str]:
@@ -74,9 +89,24 @@ def resolve_steps(args: argparse.Namespace) -> set[str]:
     return steps
 
 
+def build_configuration(args: argparse.Namespace) -> str:
+    """The SwiftPM configuration to build: release unless --debug-build."""
+    return "debug" if args.debug_build else "release"
+
+
+def package_command(install: bool, configuration: str) -> list[str]:
+    """The package_app.sh invocation for one build."""
+    cmd = ["bash", str(PACKAGE_SCRIPT)]
+    if configuration == "release":
+        cmd.append("--release")
+    if install:
+        cmd.append("--install")
+    return cmd
+
+
 def step(name: str) -> None:
     """Print a step header."""
-    print(f"\033[1;36m==> {name}\033[0m")
+    print(f"\033[1;36m==> {name}\033[0m", flush=True)
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -115,17 +145,25 @@ def do_reset_tcc() -> None:
     print("   To reset: System Settings > Notifications > Parley")
 
 
-def do_build(install: bool) -> None:
-    label = "Building"
+def describe_build(install: bool, configuration: str) -> str:
+    """One line saying which configuration was built, and whether it was installed."""
+    where = f"installed to {APP_PATH}" if install else "in dist/ (not installed)"
+    line = f"{configuration.upper()} build {where}"
+    if configuration == "debug":
+        line += " — unoptimised: not for real meetings or for timings"
+    return line
+
+
+def do_build(install: bool, configuration: str) -> None:
+    label = f"Building a {configuration.upper()} build"
     if install:
         label += " + installing"
     step(label)
+    if configuration == "debug":
+        print("   --debug-build: unoptimised (-Onone). Not for real meetings or for timings.", flush=True)
 
-    cmd = ["bash", str(PACKAGE_SCRIPT)]
-    if install:
-        cmd.append("--install")
-
-    run(cmd, cwd=PROJECT_ROOT)
+    run(package_command(install, configuration), cwd=PROJECT_ROOT)
+    print(f"\033[1;32m   {describe_build(install, configuration)}\033[0m")
 
 
 def do_launch() -> None:
@@ -161,6 +199,8 @@ def print_checklist() -> None:
 def main() -> None:
     args = parse_args()
     steps = resolve_steps(args)
+    configuration = build_configuration(args)
+    built = None
 
     # Fixed execution order
     if "kill" in steps:
@@ -173,13 +213,18 @@ def main() -> None:
         # would throw away exactly the permissions we now preserve. Pass --reset-tcc explicitly if
         # you need a clean slate (e.g. the one-time migration off ad-hoc, or ad-hoc fallback builds
         # where the cdhash still changes each build).
-        do_build(install="install" in steps)
+        do_build(install="install" in steps, configuration=configuration)
+        built = describe_build("install" in steps, configuration)
     elif "install" in steps:
         # Install without build — delegate to package_app.sh --install
-        do_build(install=True)
+        do_build(install=True, configuration=configuration)
+        built = describe_build(True, configuration)
     if "launch" in steps:
         do_launch()
         print_checklist()
+        if built:
+            # Again, below the checklist: the build line above has scrolled away by now.
+            print(f"\033[1;32m==> {built}\033[0m")
     if "debug" in steps:
         do_debug()  # blocking — runs after launch
 

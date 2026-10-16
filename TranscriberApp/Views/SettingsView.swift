@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ServiceManagement
 import TranscriberCore
+import os
 
 private enum DownloadState: Equatable {
     case idle
@@ -19,10 +20,12 @@ struct SettingsView: View {
     @Bindable var permissionManager: PermissionManager
     @State private var config: Config
     @State private var saveStatus: String?
+    @State private var isPreflighting = false
     @State private var statusClearTask: Task<Void, Never>?
     @State private var downloadState: DownloadState = .idle
     @State private var downloadTask: Task<Void, Never>?
-    @State private var archiveUsageBytes: Int = 0
+    /// nil while the recursive archive scan (#197) is still running — shown as "Calculating…".
+    @State private var archiveUsageBytes: Int?
     @State private var updateCheckInFlight = false
     @State private var lastUpdateStatus: String?
     private let manifestHealth = ManifestHealthStore.shared
@@ -30,6 +33,18 @@ struct SettingsView: View {
     @State private var summaryProvider: SummaryProviderType = .openai
     @State private var summaryEndpoint: String = ""
     @State private var summaryApiKey: String = ""
+    // #48: true once the async Keychain load in the body-level `.task` has actually returned.
+    // `summaryApiKey` starts `""` and is only meaningfully "empty" once this is true — before
+    // that, `""` just means "haven't checked the Keychain yet". Gates every
+    // `SummaryAPIKeyStore.save()` call in `save()` so a Save pressed before the load resolves
+    // (slow first-unlock, iCloud Keychain sync, or an ad-hoc-signing Keychain access failure)
+    // can't be mistaken for "user cleared the key" and delete a real stored key.
+    @State private var apiKeyLoaded = false
+    // #48: true if the load itself threw rather than cleanly returning "nothing stored". A
+    // transient read failure would otherwise look exactly like "user cleared the field" once
+    // `apiKeyLoaded` flips true with `summaryApiKey` still "" — this keeps Save from treating an
+    // unreadable Keychain as permission to delete whatever's actually stored there.
+    @State private var apiKeyLoadFailed = false
     @State private var summaryModel: String = "gpt-4o-mini"
     @State private var summaryContextLength: String = ""
     @State private var summaryContextOverheadPercent: String = ""
@@ -44,7 +59,12 @@ struct SettingsView: View {
         self._summaryEnabled = State(initialValue: s?.enabled ?? false)
         self._summaryProvider = State(initialValue: s?.provider ?? .openai)
         self._summaryEndpoint = State(initialValue: s?.endpoint ?? "")
-        self._summaryApiKey = State(initialValue: s?.apiKey ?? "")
+        // #48: the key lives in the Keychain, not on `SummaryConfig` — load it separately, and
+        // not synchronously here: `SecItemCopyMatching` can block (iCloud Keychain sync,
+        // first-unlock state, lock contention), and this initializer runs on whatever thread
+        // SwiftUI constructs the view on. Deferred to the body-level `.task` below instead, so
+        // opening Settings is never gated on a Keychain round-trip.
+        self._summaryApiKey = State(initialValue: "")
         self._summaryModel = State(initialValue: s?.model ?? "gpt-4o-mini")
         self._summaryContextLength = State(initialValue: s?.contextLength.map(String.init) ?? "")
         self._summaryContextOverheadPercent = State(initialValue: s?.contextOverheadPercent.map(String.init) ?? "")
@@ -93,9 +113,62 @@ struct SettingsView: View {
         // until the user happened onto the Audio tab.
         .onAppear { AudioDeviceCatalog.shared.refresh() }   // background scan, never on main (#192)
         .task {
-            archiveUsageBytes = StorageManager.currentUsageBytes(
-                in: URL(fileURLWithPath: config.recordingDirectory)
-            )
+            // #48: load the summary API key here, not in `init`, so a slow Keychain read never
+            // blocks view construction. `.task` alone isn't enough on its own — it inherits this
+            // view's @MainActor isolation, so a synchronous SecItemCopyMatching call would still
+            // run on the main thread here. Hop to a detached task for the actual Keychain read;
+            // only the state assignment needs to be back on the main actor.
+            //
+            // `tryLoad`, not `load`: `load()` collapses "nothing stored" and "the read failed" to
+            // the same `""`, which is exactly the ambiguity `save()` can't afford below — an
+            // unreadable Keychain must not look like "user cleared the field".
+            do {
+                let loadedApiKey = try await Task.detached(priority: .userInitiated) {
+                    try SummaryAPIKeyStore.tryLoad()
+                }.value
+                // On a slow load (first-unlock, iCloud Keychain sync) the user may have already
+                // started typing a key by the time this returns — don't stomp it with the
+                // Keychain's (possibly stale, possibly empty) value.
+                if summaryApiKey.isEmpty {
+                    summaryApiKey = loadedApiKey ?? ""
+                }
+            } catch is CancellationError {
+                // The view was dismissed before the Keychain read finished (this `.task` is
+                // cancelled on disappear) — not a Keychain failure, and there's no view left to
+                // update state on. Stay on `Task.detached` rather than a structured `Task { }`
+                // here: a structured task would inherit this `.task`'s @MainActor isolation and
+                // put `SecItemCopyMatching` back on the main thread, reintroducing the exact
+                // blocking problem the detached hop exists to avoid.
+                return
+            } catch {
+                apiKeyLoadFailed = true
+                Logger.config.warning("Settings couldn't read the summary API key from the Keychain: \(String(describing: error), privacy: .private)")
+            }
+            apiKeyLoaded = true
+
+            // Recursive, per-file resource-value walk of the whole recordings root (#197): can take
+            // seconds on a large archive, or hang until an SMB/network timeout on a non-local
+            // directory. Runs detached so Settings opens and the Audio tab renders immediately,
+            // with "Calculating…" shown until it resolves.
+            // withCheckedContinuation + DispatchQueue, not Task.detached: the recursive walk below
+            // is synchronous and can run long on a large or network-mounted archive, and Task.detached
+            // would tie up one of Swift's limited cooperative thread-pool threads for the duration
+            // (same reasoning as CalendarService.currentEventTitle).
+            // Reset to nil first: the Settings scene's @State survives window hide/show, so without
+            // this a reopen would show the PREVIOUS open's figure (stale, possibly for a since-changed
+            // recordingDirectory) instead of "Calculating…" while this recomputes.
+            archiveUsageBytes = nil
+            let directory = URL(fileURLWithPath: config.recordingDirectory)
+            archiveUsageBytes = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(returning: StorageManager.currentUsageBytes(in: directory))
+                }
+            }
+            // withCheckedContinuation isn't cancellation-aware, so a Settings window closed while
+            // the scan above is still running would otherwise fall through to refreshing
+            // notification status against a view context that's already gone. Harmless (no crash),
+            // but skip the extra work.
+            guard !Task.isCancelled else { return }
             // #150: refresh notification status on open so the Permissions tab (and
             // its notifications-off hint) reflects System Settings changes made after
             // launch, not the state captured at the last checkAll().
@@ -130,7 +203,7 @@ struct SettingsView: View {
             Spacer()
             Button("Save") { save() }
                 .keyboardShortcut("s", modifiers: .command)
-                .disabled(isDownloading)
+                .disabled(isDownloading || isPreflighting)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -228,11 +301,11 @@ struct SettingsView: View {
 
         Section("System Audio") {
             Picker("Capture Method", selection: $config.systemAudioSource) {
-                Text("Screen Recording (default)").tag(SystemAudioSource.screenCaptureKit)
-                Text("Core Audio Tap (captures calls)").tag(SystemAudioSource.coreAudioTap)
+                Text("Core Audio Tap (default — captures calls)").tag(SystemAudioSource.coreAudioTap)
+                Text("Screen Recording (legacy, until #221)").tag(SystemAudioSource.screenCaptureKit)
             }
             if config.systemAudioSource == .coreAudioTap {
-                Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Asks for System Audio Recording permission on first use. Applies to the next recording.")
+                Text("Captures Continuity/phone & VoIP call audio that Screen Recording misses. Needs System Audio Recording permission — Parley asks for it when you save. Applies to the next recording.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -257,14 +330,20 @@ struct SettingsView: View {
             )
 
             let estimatedMiB = config.audioArchiveLimitHours * config.archiveBitrateKbps * 1000 / 8 * 3600 / 1_048_576
-            let usageMiB = archiveUsageBytes / 1_048_576
-            let usageHours = config.archiveBitrateKbps > 0
-                ? archiveUsageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
-                : 0
-            Text("≈ \(estimatedMiB) MiB at this quality. Currently using \(usageMiB) MiB (≈ \(usageHours) hours).")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("When over the limit, the oldest audio is deleted first. Transcripts are never deleted.")
+            if let archiveUsageBytes {
+                let usageMiB = archiveUsageBytes / 1_048_576
+                let usageHours = config.archiveBitrateKbps > 0
+                    ? archiveUsageBytes * 8 / (config.archiveBitrateKbps * 1000) / 3600
+                    : 0
+                Text("≈ \(estimatedMiB) MiB at this quality. Currently using \(usageMiB) MiB (≈ \(usageHours) hours).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("≈ \(estimatedMiB) MiB at this quality. Calculating current usage…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text("The limit covers every day in the recordings folder. When over it, the oldest audio is deleted first. Transcripts are never deleted.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -376,12 +455,15 @@ struct SettingsView: View {
                 pane: .microphone,
                 onGrant: { Task { await permissionManager.requestMicrophone() } }
             )
+            // The system-audio permission that matters depends on the capture method (#220).
+            let systemAudio: CapturePermission = permissionManager.systemAudioSource == .coreAudioTap
+                ? .systemAudioRecording : .screenRecording
             PermissionSettingsRow(
-                name: "Screen Recording",
-                detail: "Capture system audio from meeting apps",
-                status: permissionManager.screenRecording,
-                pane: .screenRecording,
-                onGrant: { Task { await permissionManager.requestScreenRecording() } }
+                name: systemAudio.displayName,
+                detail: systemAudio.detail,
+                status: permissionManager.status(of: systemAudio),
+                pane: systemAudio.pane,
+                onGrant: { Task { await grantPermission(systemAudio, using: permissionManager) } }
             )
         }
         Section("Optional") {
@@ -431,7 +513,6 @@ struct SettingsView: View {
             enabled: enabled,
             provider: summaryProvider,
             endpoint: trimmedSummaryEndpoint,
-            apiKey: summaryApiKey,
             model: summaryModel,
             contextLength: Int(summaryContextLength),
             contextOverheadPercent: Int(summaryContextOverheadPercent),
@@ -445,7 +526,26 @@ struct SettingsView: View {
         )
     }
 
+    // #48: only safe to touch the Keychain once the async load in `.task` has resolved, and its
+    // result is unambiguous. Before `apiKeyLoaded`, `summaryApiKey == ""` just means "haven't
+    // checked yet". After a failed load, `""` is still ambiguous (could be "nothing stored" or
+    // "couldn't tell") — UNLESS the user has since typed a real value, which is unambiguous
+    // regardless of what the load did. A single source of truth here (rather than duplicating
+    // this condition at each of the three `save()` call sites) means a future change to the
+    // condition can't land in only some of them and silently reopen the key-deletion bug this
+    // guard exists to close.
+    private var shouldSaveApiKey: Bool {
+        apiKeyLoaded && (!apiKeyLoadFailed || !summaryApiKey.isEmpty)
+    }
+
     private func save() {
+        // Decided once, up front, from the form state as it stands right now — NOT re-read inside
+        // commitSave(), which can run a moment later (after the async preflight resolves) by which
+        // point the user may have kept typing. Only `config.summary` (in-memory @State, not yet
+        // persisted anywhere) is computed here; the one actual persistent side effect below it
+        // (the Keychain write) is deferred to commitSave(), so a failed preflight leaves the
+        // Keychain — like config.json — untouched (review fix 1, item 2).
+        let apiKeyToPersist: String? = shouldSaveApiKey ? summaryApiKey : nil
         if summaryEnabled && !trimmedSummaryEndpoint.isEmpty {
             config.summary = summaryConfig(enabled: true)
         } else if summaryEndpointMissing {
@@ -456,11 +556,58 @@ struct SettingsView: View {
             // work they did survives the round-trip instead of vanishing.
             config.summary = summaryConfig(enabled: false)
         } else {
-            // Summaries genuinely off: clear the block.
+            // Summaries genuinely off: clear the config block. The Keychain entry, unlike the old
+            // plaintext-in-config.json key, has no recovery path if deleted — so unlike the prior
+            // behavior (which dropped the whole SummaryConfig, key included), only delete it when
+            // the user actually cleared the field. Leaving a matching key in place means flipping
+            // summaries back on later doesn't require re-typing it.
             config.summary = nil
         }
+        // §11.2: the chosen engine is preflighted (one synthetic second transcribed) before the
+        // config is committed, so a broken engine never gets saved silently — Save stays disabled
+        // (isPreflighting) until this resolves. A model that is not downloaded yet has nothing to
+        // preflight: the settings are committed, and commitSave() starts the download.
+        guard EnginePreflight.saveStep(for: config.engine, modelCached: FluidAudioEngine.isModelCached()) == .preflightThenCommit else {
+            commitSave(apiKeyToPersist: apiKeyToPersist)
+            return
+        }
+        isPreflighting = true
+        Task {
+            do {
+                let (engine, _) = try TranscriptionRunner().prepareEngine(config: config)
+                try await EnginePreflight.run(engine: engine)
+                await MainActor.run {
+                    isPreflighting = false
+                    commitSave(apiKeyToPersist: apiKeyToPersist)
+                }
+            } catch {
+                await MainActor.run {
+                    isPreflighting = false
+                    saveStatus = "Not saved — this engine cannot transcribe on this Mac: \(error)"
+                }
+            }
+        }
+    }
+
+    /// The remainder of Save once the chosen engine has been preflighted successfully: persists
+    /// the Keychain-only API key (review fix 1, item 2 — the last persistent side effect that used
+    /// to run before the preflight gate), commits `config` to disk, and everything that follows.
+    private func commitSave(apiKeyToPersist: String?) {
+        if let apiKeyToPersist {
+            // #48: the key never goes into `config`/config.json — Keychain only.
+            SummaryAPIKeyStore.save(apiKeyToPersist)
+        }
         config.lastMicrophoneDeviceId = settingsMicId
+        // Remembered by recordings since Settings opened (#315): never rolled back by this older copy.
+        config.recentMicrophoneDeviceIds = configManager.config.recentMicrophoneDeviceIds
+        let sourceChanged = configManager.config.systemAudioSource != config.systemAudioSource
         configManager.update { $0 = config }
+        permissionManager.systemAudioSource = config.systemAudioSource
+        if sourceChanged {
+            // A new capture method can need a permission the old one didn't (the tap needs System
+            // Audio Recording). Ask now, not at the next meeting (#220).
+            Task { await PermissionRepairWindowController.shared.verify(trigger: .settingsChange) }
+        }
         // Don't claim "Saved" for a summary config that was just dropped on
         // the floor: the toggle would silently be off again on next open.
         saveStatus = summaryEndpointMissing
@@ -477,6 +624,9 @@ struct SettingsView: View {
             saveStatus = nil
         }
         triggerDownloadIfNeeded()
+        // The engine may be ready now (another one chosen, its model already there): recordings kept waiting for it are
+        // transcribed (L review 178).
+        Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
     }
 
     @ViewBuilder
@@ -549,6 +699,9 @@ struct SettingsView: View {
                 try await FluidAudioDiarizer.preDownloadModels()
                 guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .done }
+                // Recordings kept waiting for the engine are transcribed now (L review 178) — in their own task (L review
+                // 233): the retry is never cancelled with this download task.
+                Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {

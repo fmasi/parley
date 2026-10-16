@@ -52,23 +52,67 @@ import Foundation
     func drainDiagnostics(
         reply: @escaping (Data?) -> Void
     )
+
+    /// The System Audio Recording (`kTCCServiceAudioCapture`) permission as the HELPER sees it (#220).
+    /// Asked here rather than in the app because TCC caches the answer per process: the long-running
+    /// app keeps its launch-time answer, while the helper (which touches the tap) sees changes.
+    /// Reply: "authorized" | "denied" | "notDetermined" | "unavailable" (SPI missing — unverifiable).
+    func systemAudioPermissionStatus(
+        reply: @escaping (String) -> Void
+    )
+
+    /// Rebuild the Core Audio tap in place after the System Audio Recording permission was granted
+    /// mid-recording, so remote audio resumes in the SAME recording (#220). No-op on ScreenCaptureKit.
+    /// Reply: (success: Bool, errorMessage: String?)
+    func restartSystemAudio(
+        reply: @escaping (Bool, String?) -> Void
+    )
+
+    /// The helper's current alarm state + per-track health as JSON `CaptureStatusSnapshot` (§6.2).
+    func captureStatus(reply: @escaping (Data?) -> Void)
+
+    /// JSON `CaptureOptions`, applied to the NEXT `startCapture`. Reply false = not understood.
+    func configureCapture(optionsJSON: Data, reply: @escaping (Bool) -> Void)
+
+    /// "sleep" | "wake" from `NSWorkspace` (§8.10). Reply when applied.
+    func systemPowerEvent(kind: String, reply: @escaping () -> Void)
 }
 
 /// Reverse XPC channel: the helper calls back into the app to report that it self-healed a benign
-/// stream stop in place, or that capture has terminally failed (#86). The app sets an exported
+/// stream stop in place, or that it gave up on the remote stream (#86). The app sets an exported
 /// object conforming to this so a route-change restart surfaces as a transient "Recording Resumed"
-/// notice instead of a crash, and a fatal stop stops the session cleanly.
+/// notice instead of a crash. There is no "capture failed, stop the session" call (#233): the helper
+/// never ends a recording because a source failed. A failure reaches the app as an alarm
+/// (`captureAlarmsChanged`, and the `captureStatus` pull), and a helper that died as an XPC interruption.
 @objc public protocol AudioCaptureClientProtocol {
     /// The SCStream stopped (benign route change) and was restarted in place — no audio lost.
     func captureDidRestartInPlace()
-    /// Capture failed and could not be restarted within budget; the session must stop.
-    func captureDidFailFatally(reason: String)
     /// The MID-RECORDING system (remote) stream could not be restarted within budget (#86). The mic
     /// keeps recording on its own AVCaptureSession — the recording is NOT stopped, only a "mic only"
     /// warning is surfaced.
     func captureSystemAudioUnrecoverable(reason: String)
     /// The mic auto-switched to a new device — `deviceId` is the new device UID (nil = system default).
     @objc optional func micDeviceChanged(to deviceId: String?)
+    /// A live, user-facing capture-quality anomaly was detected WHILE the recording is still
+    /// running — an exact-zero mic run, a liveness gap on either track, or a disk-full write
+    /// failure (#193/#196). `kind` is the `CaptureEventKind` raw value (already recorded into the
+    /// helper's diagnostic ring by the call site that fired this); `message` is a human-readable,
+    /// user-facing description for the banner. Optional so an older app build talking to a newer
+    /// helper (or vice versa) doesn't crash on an unrecognized selector.
+    @objc optional func captureQualityAnomaly(kind: String, message: String)
+    /// First heartbeat of a capture generation (start / rebuild / wake) on `track` (a `CaptureTrack`
+    /// raw value: "mic" | "system"). `helperSessionId` names the helper registry that saw it, so the
+    /// app can clear the stale alarms a replaced helper left on that track even when this arrives
+    /// before the new helper's first snapshot (§6.2).
+    @objc optional func captureDidDeliverFirstFrames(track: String, helperSessionId: String)
+    /// The helper's alarm set changed: `snapshot` is a JSON `CaptureStatusSnapshot` (§6.2).
+    @objc optional func captureAlarmsChanged(snapshot: Data)
+    /// A non-zero sample on `track` ("mic" | "system"), once per helper registry: disproves a stale
+    /// CONTENT alarm (`micDigitalSilence`, `remotePermissionDenied`, `remoteCantConfirm`) (§6.2).
+    @objc optional func captureDidDeliverRealAudio(track: String, helperSessionId: String)
+    /// A successful WAV write (first write of a writer, or the first after a failure): disproves a
+    /// stale `diskWriteFailure` (§6.2).
+    @objc optional func captureDidWriteSuccessfully(helperSessionId: String)
 }
 
 /// The XPC service name — must match the bundle identifier in the XPC service's Info.plist.

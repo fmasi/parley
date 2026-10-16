@@ -106,7 +106,6 @@ import FluidAudio
 
     // MARK: - SpeechAnalyzerEngine properties
 
-    #if compiler(>=6.2)
     @Test func speechAnalyzerEngineName() {
         if #available(macOS 26.0, *) {
             let engine = SpeechAnalyzerEngine()
@@ -114,13 +113,14 @@ import FluidAudio
         }
     }
 
-    @Test func speechAnalyzerEngineIsAlwaysReady() {
+    /// L review 229: never "always ready" — without a language (no setting yet, #223) it cannot transcribe, and a
+    /// transcription never downloads a model to become ready.
+    @Test func speechAnalyzerEngineWithoutALanguageIsNeverReady() async {
         if #available(macOS 26.0, *) {
             let engine = SpeechAnalyzerEngine()
-            #expect(engine.isReady() == true)
+            #expect(await engine.isReady() == false)
         }
     }
-    #endif
 
     // MARK: - Token grouping (FluidAudioEngine pure logic)
 

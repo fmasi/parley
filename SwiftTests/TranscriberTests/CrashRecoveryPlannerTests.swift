@@ -175,4 +175,89 @@ struct CrashRecoveryPlannerTests {
 
         #expect(CrashRecoveryPlanner.safeRestartChunkIndex(sentinel: sentinel, outputDirectory: dir) == 6)
     }
+
+    // MARK: - planRestart (#170 — the hoisted restart-naming sequence shared by every
+    // no-live-pipeline restart site: crash-relaunch Flow B, XPC-crash restart with no live
+    // rotator, and Flow A re-attach's crash handler. Confirms the refactor preserves the exact
+    // behavior each of the three call sites had inline before the hoist.)
+
+    @Test func planRestartNamesFromSessionIdAndSafeIndex() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sentinel = RecordingSentinel(
+            startedAt: Date(timeIntervalSince1970: 0), sessionName: "s",
+            systemAudioPath: dir.appendingPathComponent("sess-0.wav").path,
+            micAudioPath: dir.appendingPathComponent("sess-0_mic.wav").path,
+            segment: 1, chunkIndex: 0
+        )
+
+        let plan = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: dir)
+
+        // No session.json, no WAVs on disk -> floors at sentinel.chunkIndex + 1 = 1.
+        #expect(plan.baseName == "sess-1")
+        #expect(plan.newSentinel.systemAudioPath == dir.appendingPathComponent("sess-1.wav").path)
+        #expect(plan.newSentinel.micAudioPath == dir.appendingPathComponent("sess-1_mic.wav").path)
+        #expect(plan.newSentinel.segment == sentinel.segment + 1)
+        #expect(plan.newSentinel.chunkIndex == 1)  // stamped directly (#154 finding 6)
+        // Fields planRestart doesn't touch — incrementedSegment must carry them through unchanged.
+        #expect(plan.newSentinel.startedAt == sentinel.startedAt)
+        #expect(plan.newSentinel.sessionName == sentinel.sessionName)
+        #expect(plan.newSentinel.micDeviceUID == sentinel.micDeviceUID)
+    }
+
+    @Test func planRestartUsesDiskScanWhenItExceedsSentinelIndex() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("sess-5.wav"), seconds: 1)
+        let sentinel = RecordingSentinel(
+            startedAt: Date(timeIntervalSince1970: 0), sessionName: "s",
+            systemAudioPath: dir.appendingPathComponent("sess-1.wav").path,
+            micAudioPath: dir.appendingPathComponent("sess-1_mic.wav").path,
+            segment: 3, chunkIndex: 1
+        )
+
+        let plan = CrashRecoveryPlanner.planRestart(sentinel: sentinel, outputDirectory: dir)
+
+        #expect(plan.baseName == "sess-6")
+        #expect(plan.newSentinel.chunkIndex == 6)
+        #expect(plan.newSentinel.segment == 4)
+    }
+
+    // MARK: - R2 council (C-I4, C-M16): an archived chunk not in session.json
+
+    /// C-I4: a crash between archiving a chunk (WAVs deleted) and writing session.json left its
+    /// `.m4a` invisible to recovery. An unregistered `<id>-N.m4a` is an orphan too.
+    @Test func anUnregisteredM4aIsAnOrphan() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeSessionJSON(dir: dir, sessionId: "m", meetingStart: Date(timeIntervalSince1970: 0), chunkIndices: [0])
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-0.m4a"))   // registered: not an orphan
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-1.m4a"))
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("m-2.wav"), seconds: 1)
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-2.m4a"))   // WAV and archive: one orphan
+        #expect(CrashRecoveryPlanner.orphanChunks(outputDirectory: dir, sessionId: "m", completedIndices: [0])
+                == [.init(index: 1, baseName: "m-1"), .init(index: 2, baseName: "m-2")])
+    }
+
+    /// Once a session is finalized (its transcript exists), its chunk archives are its audio, not orphans.
+    @Test func aFinalizedSessionsArchivesAreNotOrphans() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-0.m4a"))
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("m.json"))
+        #expect(CrashRecoveryPlanner.orphanChunks(outputDirectory: dir, sessionId: "m", completedIndices: []).isEmpty)
+        #expect(!CrashRecoveryPlanner.isChunkedSessionRecoverable(outputDirectory: dir, sessionId: "m"))
+    }
+
+    /// C-M16: an index whose only artefact is `.m4a` was reusable by restart naming, and the archiver
+    /// then removed that `.m4a` as stale output. Every on-disk artefact holds its index.
+    @Test func nextFreeIndexCountsArchives() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data(count: 64).write(to: dir.appendingPathComponent("m-4.m4a"))
+        try Data("{}".utf8).write(to: dir.appendingPathComponent("m.json"))   // even after finalize
+        #expect(CrashRecoveryPlanner.nextFreeChunkIndex(outputDirectory: dir, sessionId: "m") == 5)
+    }
 }

@@ -10,8 +10,10 @@ struct EngineIDTests {
         #expect(EngineID.allCases.contains(.fluidAudio))
     }
 
-    @Test func defaultIsSpeechAnalyzer() {
-        #expect(EngineID.default == .speechAnalyzer)
+    @Test func defaultIsFluidAudio() {
+        // §11.2 (owner decision 2026-09-24): FluidAudio is the default; Apple Speech is
+        // labelled "not yet usable" until #223 lands.
+        #expect(EngineID.default == .fluidAudio)
     }
 
     @Test func codableRoundTrip() throws {
@@ -75,5 +77,17 @@ struct EngineIDTests {
         // FluidAudio must be gated on model download in Setup/Settings
         #expect(EngineID.fluidAudio.descriptor.requiresModelDownload == true)
         #expect(EngineID.fluidAudio.descriptor.approximateSizeMB > 0)
+    }
+
+    /// §11.2 (owner decision 2026-09-24): FluidAudio is the default; Apple Speech stays listed but
+    /// says why it cannot be trusted yet (#223). Nothing is hidden, so no picker preselects an unlisted engine.
+    @Test func fluidAudioIsTheDefaultAndAppleSpeechIsLabelledNotYetUsable() {
+        #expect(EngineID.default == .fluidAudio)
+        #expect(EngineID.resolvedDefault == .fluidAudio)
+        #expect(EngineID.fluidAudio.descriptor.isUsableEndToEnd)
+        #expect(EngineID.speechAnalyzer.descriptor.isUsableEndToEnd == false)
+        #expect(EngineID.speechAnalyzer.descriptor.displayName == "Apple Speech — not yet usable (#223)")
+        #expect(EngineID.speechAnalyzer.descriptor.description.contains("language"))
+        #expect(EngineID.availableEngines.contains(EngineID.default))
     }
 }

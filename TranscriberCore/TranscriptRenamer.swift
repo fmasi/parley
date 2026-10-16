@@ -73,11 +73,35 @@ public enum TranscriptRenamer {
         guard let data = try? Data(contentsOf: jsonPath) else {
             throw RenameError.cannotRead
         }
+        // Checked here, not in the json-based overload below: THIS entry point's contract is "a
+        // transcript JSON, or throw" — a dict with no `segments` key at all isn't a transcript, so
+        // it stays an error here. The json-based overload has a looser contract (an already-parsed
+        // transcript that just happens to have no segments IS valid, e.g. one #207 read alongside
+        // metadata that also lacks any), so it degrades to `[]` instead.
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let segments = json["segments"] as? [[String: Any]]
+              json["segments"] is [[String: Any]]
         else {
             throw RenameError.invalidJSON
         }
+        return collectSpeakerSamples(
+            json: json, maxSamplesPerSpeaker: maxSamplesPerSpeaker, minSegmentsPerSpeaker: minSegmentsPerSpeaker)
+    }
+
+    /// Same as `collectSpeakerSamples(from:...)`, but from an already-read-and-parsed transcript.
+    ///
+    /// Exists so a caller that ALSO needs `channelNames(in:source:)`-style metadata from the same
+    /// transcript (`RenameWindowController`/`RenameDialog`, #207) can read and parse the file once
+    /// and hand the same dictionary to both, instead of two independent `Data(contentsOf:)` round
+    /// trips to what can be an iCloud-mounted, network-backed path. A missing `segments` array is
+    /// not an error here — an empty transcript yields no speakers, not a throw — since the URL-based
+    /// overload above already turned "not parseable at all" into `RenameError.invalidJSON` before
+    /// reaching this point.
+    public static func collectSpeakerSamples(
+        json: [String: Any],
+        maxSamplesPerSpeaker: Int,
+        minSegmentsPerSpeaker: Int = 1
+    ) -> [RenameableSpeaker] {
+        guard let segments = json["segments"] as? [[String: Any]] else { return [] }
 
         // Resolve the recording's audio layout. `audio_paths` is [chunk0, chunk1, ...] for a
         // chunked recording — NOT [system, mic] — so samples must be mapped onto the chunk that
@@ -85,7 +109,12 @@ public enum TranscriptRenamer {
         let metadata = json["metadata"] as? [String: Any]
         let audioPaths = (metadata?["audio_paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
         let layout = SpeakerSampleLocator.classify(audioPaths: audioPaths)
-        let chunkDurations = SpeakerSampleLocator.durations(for: layout)
+        // Prefer durations already stamped in metadata (#204) over opening every chunk file.
+        let cachedDurations = metadata?["chunk_durations"] as? [Double]
+        let chunkDurations = SpeakerSampleLocator.durations(for: layout, cached: cachedDurations)
+        // Where finalize placed each chunk on the wall-clock timeline: across a capture gap the
+        // chunks are not end to end, and samples after the gap would otherwise play wrong audio.
+        let chunkOffsets = metadata?["chunk_offsets"] as? [Double]
 
         // Collect every segment once — sample ranking needs the OTHER speakers too, to tell
         // clean speech from crosstalk.
@@ -93,7 +122,9 @@ public enum TranscriptRenamer {
         var segmentCounts: [String: Int] = [:]
         var orderedIds: [String] = []
 
-        for seg in segments {
+        // Flagged segments (VAD-filtered noise, mic-bleed echo) are never offered as a sample: an
+        // echo is the OTHER side's voice, and auditioning it would name the wrong person (P10/P11).
+        for seg in segments where !TranscriptAssembler.isFlagged(seg) {
             guard let speaker = seg["speaker"] as? String,
                   let text = seg["text"] as? String,
                   let start = seg["start"] as? Double,
@@ -125,7 +156,8 @@ public enum TranscriptRenamer {
                     start: candidate.start,
                     end: candidate.end,
                     layout: layout,
-                    chunkDurations: chunkDurations
+                    chunkDurations: chunkDurations,
+                    chunkOffsets: chunkOffsets
                 ) else { continue }
                 samples.append(SpeakerSample(
                     text: candidate.text,
@@ -159,13 +191,18 @@ public enum TranscriptRenamer {
     /// this point the source WAVs may be gone and this JSON is the only textual record of the
     /// meeting; a kill mid-write would truncate it.
     ///
-    /// Keying trap (latent, benign today): `speaker_names` is keyed by whatever label was
-    /// current at rename time (original → renamed), so re-renaming an already-renamed speaker
-    /// accumulates entries and can leave a stale original → intermediate key. Nothing in the
-    /// codebase reads `speaker_names` back — it is write-only — but if a reader is ever added,
-    /// resolve chains (or prune superseded keys) first.
+    /// Keying trap: `speaker_names` is keyed by whatever label was current at rename time
+    /// (original → renamed), so re-renaming an already-renamed speaker accumulates entries and can
+    /// leave a stale original → intermediate key. A reader has to resolve chains:
+    /// `EchoNotice.Findings` does, to find the row of a label `echo_clusters` still holds under its
+    /// original name (#244). The other reader, `TranscriptRediarizer.channelNames`, only asks
+    /// whether a channel has any name at all.
     @discardableResult
     public static func applyRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
+        TranscriptWrites.exclusive(jsonPath) { applyRenamesUnlocked(mapping, jsonPath: jsonPath) }
+    }
+
+    private static func applyRenamesUnlocked(_ mapping: [String: String], jsonPath: URL) -> Bool {
         guard let data = try? Data(contentsOf: jsonPath),
               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               var segments = json["segments"] as? [[String: Any]]
@@ -174,7 +211,9 @@ public enum TranscriptRenamer {
             return false
         }
 
-        for i in segments.indices {
+        var metadata = json["metadata"] as? [String: Any] ?? [:]
+        let rediarized = rediarizedChannels(in: metadata)
+        for i in segments.indices where !keepsItsLabel(segments[i], rediarized: rediarized) {
             if let speaker = segments[i]["speaker"] as? String,
                let newName = mapping[speaker] {
                 segments[i]["speaker"] = newName
@@ -182,7 +221,6 @@ public enum TranscriptRenamer {
         }
         json["segments"] = segments
 
-        var metadata = json["metadata"] as? [String: Any] ?? [:]
         var names = metadata["speaker_names"] as? [String: String] ?? [:]
         for (original, renamed) in mapping where original != renamed {
             names[original] = renamed
@@ -196,11 +234,41 @@ public enum TranscriptRenamer {
             let updatedData = try JSONSerialization.data(
                 withJSONObject: json, options: [.prettyPrinted, .sortedKeys]
             )
-            try updatedData.write(to: jsonPath, options: .atomic)
+            try DurableFile.replace(jsonPath, with: updatedData)   // round 4 item 6
             return true
         } catch {
-            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error.localizedDescription, privacy: .public)")
+            Logger.files.error("Rename: failed to write \(jsonPath.lastPathComponent, privacy: .sensitive): \(error, privacy: .private)")
             return false
         }
+    }
+
+    /// The channels a re-detect has rewritten: `metadata.rediarized_channels`, plus any channel with
+    /// a `speaker_count_<channel>` — builds before that list existed stamped only the count. nil when
+    /// the list is there but is not a list of channels.
+    private static func rediarizedChannels(in metadata: [String: Any]) -> Set<String>? {
+        let counted = metadata.keys.filter { $0.hasPrefix("speaker_count_") }.map { String($0.dropFirst("speaker_count_".count)) }
+        guard let recorded = metadata[TranscriptRediarizer.rediarizedChannelsKey] else { return Set(counted) }
+        return (recorded as? [String]).map { Set($0).union(counted) }
+    }
+
+    /// Whether a rename leaves this segment's label alone (#245).
+    ///
+    /// A flagged segment (an echo, gate noise, a repeat, no usable time) is never given to a person
+    /// by a re-detect. On a channel one has rewritten, every flagged segment carries the channel's
+    /// unattributed label, or — an echo line of the mic channel — its echo cluster's label (#277,
+    /// #296). Neither is a person, so the rename must not reach any of them; a transcript re-detected
+    /// by an older build can still hold an earlier diarization's label there, which can now belong to
+    /// someone else. On a channel that was never re-detected the label is still the
+    /// pipeline's, and it is renamed like any other line — the JSON is the record, and it must not
+    /// show two labels for one person.
+    ///
+    /// - Parameter rediarized: `rediarizedChannels(in:)`; nil = unreadable, and every flagged
+    ///   segment keeps its label.
+    private static func keepsItsLabel(_ segment: [String: Any], rediarized: Set<String>?) -> Bool {
+        guard TranscriptAssembler.isFlagged(segment) else { return false }
+        guard let rediarized else { return true }
+        // No `source`: it cannot be shown to be on a channel that was left alone.
+        guard let source = segment["source"] as? String else { return !rediarized.isEmpty }
+        return rediarized.contains(source)
     }
 }

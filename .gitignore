@@ -10,7 +10,6 @@
 # Transcript outputs (generated, not source)
 *.txt
 *.srt
-!requirements*.txt
 
 # Python
 __pycache__/
@@ -36,8 +35,6 @@ sparkle_private_key*
 
 # Swift build artifacts
 .build/
-audio_capture_helper/.build/
-bin/audio-capture-helper
 
 # Build output
 dist/

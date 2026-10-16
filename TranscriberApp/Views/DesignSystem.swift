@@ -198,6 +198,7 @@ struct AlertBanner: View {
 enum PrivacyPane {
     case microphone
     case screenRecording
+    case systemAudioRecording
     case calendar
     case notifications
     case filesAndFolders
@@ -219,6 +220,10 @@ enum PrivacyPane {
             return URL(string: "\(Self.security)?Privacy_Microphone")!
         case .screenRecording:
             return URL(string: "\(Self.security)?Privacy_ScreenCapture")!
+        case .systemAudioRecording:
+            // Verified on macOS 27 (2026-09-23): opens "Screen & System Audio Recording", whose
+            // "System Audio Recording Only" list is where the tap's permission lives.
+            return URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AudioCapture")!
         case .calendar:
             return URL(string: "\(Self.security)?Privacy_Calendars")!
         case .filesAndFolders:

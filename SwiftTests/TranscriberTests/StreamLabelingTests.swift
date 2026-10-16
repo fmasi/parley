@@ -47,7 +47,7 @@ struct StreamLabelingTests {
             speakerDatabase: ["S1": [1, 0, 0]]
         )
 
-        let (labeled, speakerDatabase) = StreamLabeling.withDiarization(
+        let (labeled, speakerDatabase, _) = StreamLabeling.withDiarization(
             segments: [TranscriptSegment(start: 0, end: 5, text: "hi", language: nil)],
             diarizationResult: result,
             speechMap: nil,
@@ -72,7 +72,7 @@ struct StreamLabelingTests {
             speakerDatabase: ["S1": [1, 0], "S2": [0, 1]]
         )
 
-        let (labeled, db) = StreamLabeling.withDiarization(
+        let (labeled, db, _) = StreamLabeling.withDiarization(
             segments: [
                 TranscriptSegment(start: 0, end: 3, text: "a", language: nil),
                 TranscriptSegment(start: 3, end: 6, text: "b", language: nil),
@@ -91,7 +91,7 @@ struct StreamLabelingTests {
     // Empty diarization (no speakers at all): withDiarization must return an empty database and
     // not crash on the empty remap — the withDiarization analogue of singleSpeaker's empty test.
     @Test func withDiarizationOnEmptyDiarizationReturnsEmptyDatabase() {
-        let (_, db) = StreamLabeling.withDiarization(
+        let (_, db, _) = StreamLabeling.withDiarization(
             segments: [TranscriptSegment(start: 0, end: 1, text: "x", language: nil)],
             diarizationResult: DiarizationResult(segments: [], speakerDatabase: [:]),
             speechMap: nil,
@@ -116,10 +116,10 @@ struct StreamLabelingTests {
             speakerDatabase: ["SPEAKER_00": [1, 0, 0]]
         )
 
-        let (nilMap, _) = StreamLabeling.withDiarization(
+        let (nilMap, _, _) = StreamLabeling.withDiarization(
             segments: segs, diarizationResult: result, speechMap: nil, vadSpeechThreshold: 0.5
         , minSpeakerShare: DiarizationCleanup.defaultMinShare)
-        let (withMap, _) = StreamLabeling.withDiarization(
+        let (withMap, _, _) = StreamLabeling.withDiarization(
             segments: segs, diarizationResult: result,
             speechMap: [SpeechRegion(start: 0, end: 5, probability: 0.95)], vadSpeechThreshold: 0.5
         , minSpeakerShare: DiarizationCleanup.defaultMinShare)

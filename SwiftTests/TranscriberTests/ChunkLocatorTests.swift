@@ -246,4 +246,42 @@ import Testing
         )
         #expect(hit == nil)
     }
+
+    // MARK: - Wall-clock offsets (round 3 item 5)
+
+    /// After a 60 s relaunch gap, chunk 1 starts at 62 s on the transcript's timeline, not at 2 s.
+    @Test func offsetsPlaceChunksOnTheWallClockTimeline() {
+        let hit = ChunkLocator.locate(start: 62.5, end: 63.5, chunkDurations: [2, 2], chunkOffsets: [0, 62])
+        #expect(hit == ChunkLocator.Location(index: 1, start: 0.5, end: 1.5))
+        #expect(ChunkLocator.locate(start: 30, end: 31, chunkDurations: [2, 2], chunkOffsets: [0, 62]) == nil, "inside the gap")
+        #expect(ChunkLocator.locate(start: 0.5, end: 1, chunkDurations: [2, 2], chunkOffsets: [0, 62])?.index == 0)
+    }
+
+    @Test func mismatchedOffsetsFallBackToLayingChunksEndToEnd() {
+        #expect(ChunkLocator.locate(start: 2.5, end: 3, chunkDurations: [2, 2], chunkOffsets: [0]) == ChunkLocator.Location(index: 1, start: 0.5, end: 1))
+    }
+
+    @Test func sampleLocatorUsesTheOffsets() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("locator-offsets-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("m-0.m4a"), b = dir.appendingPathComponent("m-1.m4a")
+        try Data().write(to: a); try Data().write(to: b)
+        let hit = SpeakerSampleLocator.locate(source: "remote", start: 62.5, end: 63, layout: .chunkedArchives([a, b]),
+                                              chunkDurations: [2, 2], chunkOffsets: [0, 62])
+        #expect(hit?.url == b && hit?.start == 0.5)
+    }
+
+    /// Round 4: offsets out of list order (a re-indexed chunk) still pick the chunk that holds the time.
+    @Test func unsortedOffsetsPickTheChunkThatHoldsTheTime() {
+        #expect(ChunkLocator.locate(start: 0.5, end: 1, chunkDurations: [2, 2], chunkOffsets: [62, 0]) == ChunkLocator.Location(index: 1, start: 0.5, end: 1))
+        #expect(ChunkLocator.locate(start: 62.5, end: 63, chunkDurations: [2, 2], chunkOffsets: [62, 0])?.index == 0)
+    }
+
+    /// Round 5: the greatest offset ≤ start wins, whatever the list order — `last(where:)` in list
+    /// order would pick the chunk at 10 s for a time at 62.5 s here.
+    @Test func theGreatestOffsetAtOrBeforeTheTimeWins() {
+        #expect(ChunkLocator.locate(start: 62.5, end: 63, chunkDurations: [2, 2, 2], chunkOffsets: [62, 0, 10])
+                == ChunkLocator.Location(index: 0, start: 0.5, end: 1))
+    }
 }

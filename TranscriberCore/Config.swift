@@ -6,9 +6,11 @@ public enum SummaryProviderType: String, Codable, Equatable, Sendable {
     case lmstudio
 }
 
-/// Which mechanism captures system (remote) audio. `screenCaptureKit` is the shipped default;
-/// `coreAudioTap` selects the Core Audio output process tap (#103) — a strict superset that also
-/// captures Continuity/telephony + VoIP that SCK misses. Behind a flag during phase 2 rollout.
+/// Which mechanism captures system (remote) audio. `coreAudioTap` — the Core Audio output process tap
+/// (#103) — is the default for new installs (`Config.default`): a strict superset that also captures
+/// Continuity/telephony + VoIP that SCK misses. `screenCaptureKit` is the retiring legacy path (#221):
+/// still selectable, and what a pre-existing config without the key decodes to, but not a fallback —
+/// nothing switches to it on its own.
 public enum SystemAudioSource: String, Codable, Equatable, Sendable {
     case screenCaptureKit = "sck"
     case coreAudioTap = "core_audio_tap"
@@ -18,7 +20,6 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var provider: SummaryProviderType
     public var endpoint: String
-    public var apiKey: String
     public var model: String
     public var contextLength: Int?
     /// Safety margin on estimated input tokens (default 10 = 10%).
@@ -37,7 +38,6 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         enabled: Bool,
         provider: SummaryProviderType = .openai,
         endpoint: String,
-        apiKey: String,
         model: String,
         contextLength: Int? = nil,
         contextOverheadPercent: Int? = nil,
@@ -47,7 +47,6 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         self.enabled = enabled
         self.provider = provider
         self.endpoint = endpoint
-        self.apiKey = apiKey
         self.model = model
         self.contextLength = contextLength
         self.contextOverheadPercent = contextOverheadPercent
@@ -59,7 +58,10 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         case enabled
         case provider
         case endpoint
-        case apiKey = "api_key"
+        // No `apiKey` key (#48): the field was removed from `SummaryConfig` entirely and lives in
+        // the Keychain (`SummaryAPIKeyStore`) instead, so it is structurally impossible to
+        // round-trip a plaintext key through config.json again. `ConfigManager` migrates any
+        // `api_key` still present in an old config.json on load, then strips it.
         case model
         case contextLength = "context_length"
         case contextOverheadPercent = "context_overhead_percent"
@@ -72,7 +74,9 @@ public struct SummaryConfig: Codable, Equatable, Sendable {
         enabled = try c.decode(Bool.self, forKey: .enabled)
         provider = try c.decodeIfPresent(SummaryProviderType.self, forKey: .provider) ?? .openai
         endpoint = try c.decode(String.self, forKey: .endpoint)
-        apiKey = try c.decode(String.self, forKey: .apiKey)
+        // `api_key`, if present in the JSON, is intentionally not decoded here — see the
+        // CodingKeys comment above. It is unknown-key noise to this decoder; `ConfigManager`
+        // migrates it out of the file separately, on a raw JSON pass, before this ever runs.
         model = try c.decode(String.self, forKey: .model)
         contextLength = try c.decodeIfPresent(Int.self, forKey: .contextLength)
         contextOverheadPercent = try c.decodeIfPresent(Int.self, forKey: .contextOverheadPercent)
@@ -92,6 +96,10 @@ public struct Config: Codable, Equatable, Sendable {
     public var launchOnStartup: Bool
     public var suppressCaptureWarning: Bool
     public var lastMicrophoneDeviceId: String?
+    /// The inputs the user chose by hand (a start or a switch on a specific mic), newest first, at most
+    /// `MicTargeting.userChoiceLimit`. Passed to the helper so a follow away from a removed mic while the
+    /// lid is closed lands on one of them, not on the silent built-in mic (#315). `nil` = none yet.
+    public var recentMicrophoneDeviceIds: [String]?
     public var engine: EngineID
     public var systemAudioSource: SystemAudioSource
     public var vadSpeechThreshold: Double?
@@ -142,8 +150,18 @@ public struct Config: Codable, Equatable, Sendable {
     /// Keep the uncompressed source WAVs after AAC archiving. Diagnostic: archives are lossy and
     /// speaker embeddings are far more sensitive to that than speech intelligibility is.
     public var preserveSourceWAV: Bool?
+    /// Capture knobs handed to the helper as `CaptureOptions` before each start (§5, §10). `nil` =
+    /// the shipped behaviour: tap auto-start on, the exact-zero remote soft alarm off, no frame drop.
+    public var tapAutoStart: Bool?
+    public var remoteExactZeroSoftAlarmSeconds: Int?
+    /// DIAGNOSTIC ONLY (device item D-04): the helper drops every tap buffer before the heartbeat.
+    public var debugDropTapFrames: Bool?
+    /// DIAGNOSTIC ONLY (#247): the WAV writers skip their periodic `fsync`.
+    public var debugSkipWavSync: Bool?
     public var echoTemporalThreshold: Double?
     public var echoTextThreshold: Double?
+    /// DEPRECATED (#242): read and written back so existing config files keep working, and ignored.
+    /// The echo decision no longer uses the voice similarity; it is recorded as evidence only.
     public var echoEmbeddingThreshold: Double?
     public var archiveBitrateKbps: Int
     public var audioArchiveLimitHours: Int
@@ -187,13 +205,18 @@ public struct Config: Codable, Equatable, Sendable {
         suppressCaptureWarning: false,
         lastMicrophoneDeviceId: nil,
         engine: .resolvedDefault,
-        systemAudioSource: .screenCaptureKit,
+        // §11.1: new installs record with the tap; the decode fallback below stays SCK for pre-existing configs.
+        systemAudioSource: .coreAudioTap,
         vadSpeechThreshold: nil,
         diarizationClusteringThreshold: nil,
         diarizationMaxSpeakers: nil,
         diarizationMinSpeakerShare: nil,
         diarizationExcludeOverlap: nil,
         preserveSourceWAV: nil,
+        tapAutoStart: nil,
+        remoteExactZeroSoftAlarmSeconds: nil,
+        debugDropTapFrames: nil,
+        debugSkipWavSync: nil,
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
         echoEmbeddingThreshold: nil,
@@ -216,6 +239,7 @@ public struct Config: Codable, Equatable, Sendable {
         launchOnStartup: Bool = true,
         suppressCaptureWarning: Bool = false,
         lastMicrophoneDeviceId: String? = nil,
+        recentMicrophoneDeviceIds: [String]? = nil,
         engine: EngineID = .resolvedDefault,
         systemAudioSource: SystemAudioSource = .screenCaptureKit,
         vadSpeechThreshold: Double? = nil,
@@ -224,6 +248,10 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMinSpeakerShare: Double? = nil,
         diarizationExcludeOverlap: Bool? = nil,
         preserveSourceWAV: Bool? = nil,
+        tapAutoStart: Bool? = nil,
+        remoteExactZeroSoftAlarmSeconds: Int? = nil,
+        debugDropTapFrames: Bool? = nil,
+        debugSkipWavSync: Bool? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
         echoEmbeddingThreshold: Double? = nil,
@@ -244,6 +272,7 @@ public struct Config: Codable, Equatable, Sendable {
         self.launchOnStartup = launchOnStartup
         self.suppressCaptureWarning = suppressCaptureWarning
         self.lastMicrophoneDeviceId = lastMicrophoneDeviceId
+        self.recentMicrophoneDeviceIds = recentMicrophoneDeviceIds
         self.engine = engine
         self.systemAudioSource = systemAudioSource
         self.vadSpeechThreshold = vadSpeechThreshold
@@ -252,6 +281,10 @@ public struct Config: Codable, Equatable, Sendable {
         self.diarizationMinSpeakerShare = diarizationMinSpeakerShare
         self.diarizationExcludeOverlap = diarizationExcludeOverlap
         self.preserveSourceWAV = preserveSourceWAV
+        self.tapAutoStart = tapAutoStart
+        self.remoteExactZeroSoftAlarmSeconds = remoteExactZeroSoftAlarmSeconds
+        self.debugDropTapFrames = debugDropTapFrames
+        self.debugSkipWavSync = debugSkipWavSync
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
         self.echoEmbeddingThreshold = echoEmbeddingThreshold
@@ -274,6 +307,7 @@ public struct Config: Codable, Equatable, Sendable {
         case launchOnStartup = "launch_on_startup"
         case suppressCaptureWarning = "suppress_capture_warning"
         case lastMicrophoneDeviceId = "last_microphone_device_id"
+        case recentMicrophoneDeviceIds = "recent_microphone_device_ids"
         case engine
         case systemAudioSource = "system_audio_source"
         case vadSpeechThreshold = "vad_speech_threshold"
@@ -282,6 +316,10 @@ public struct Config: Codable, Equatable, Sendable {
         case diarizationMinSpeakerShare = "diarization_min_speaker_share"
         case diarizationExcludeOverlap = "diarization_exclude_overlap"
         case preserveSourceWAV = "preserve_source_wav"
+        case tapAutoStart = "tap_auto_start"
+        case remoteExactZeroSoftAlarmSeconds = "remote_exact_zero_soft_alarm_seconds"
+        case debugDropTapFrames = "debug_drop_tap_frames"
+        case debugSkipWavSync = "debug_skip_wav_sync"
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
         case echoEmbeddingThreshold = "echo_embedding_threshold"
@@ -305,6 +343,10 @@ public struct Config: Codable, Equatable, Sendable {
         launchOnStartup = try c.decode(Bool.self, forKey: .launchOnStartup)
         suppressCaptureWarning = try c.decode(Bool.self, forKey: .suppressCaptureWarning)
         lastMicrophoneDeviceId = try c.decodeIfPresent(String.self, forKey: .lastMicrophoneDeviceId)
+        recentMicrophoneDeviceIds = try c.decodeIfPresent([String].self, forKey: .recentMicrophoneDeviceIds)
+        // Unlike system_audio_source below, a missing key here follows the CURRENT default: on
+        // macOS 26+ the old default (SpeechAnalyzer) produces blank transcripts (#223), so pinning
+        // a legacy config to it would pin a total-loss bug rather than a live setup.
         engine = try c.decodeIfPresent(EngineID.self, forKey: .engine) ?? .resolvedDefault
         systemAudioSource = try c.decodeIfPresent(SystemAudioSource.self, forKey: .systemAudioSource) ?? .screenCaptureKit
         vadSpeechThreshold = try c.decodeIfPresent(Double.self, forKey: .vadSpeechThreshold)
@@ -313,6 +355,10 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMinSpeakerShare = try c.decodeIfPresent(Double.self, forKey: .diarizationMinSpeakerShare)
         diarizationExcludeOverlap = try c.decodeIfPresent(Bool.self, forKey: .diarizationExcludeOverlap)
         preserveSourceWAV = try c.decodeIfPresent(Bool.self, forKey: .preserveSourceWAV)
+        tapAutoStart = try c.decodeIfPresent(Bool.self, forKey: .tapAutoStart)
+        remoteExactZeroSoftAlarmSeconds = try c.decodeIfPresent(Int.self, forKey: .remoteExactZeroSoftAlarmSeconds)
+        debugDropTapFrames = try c.decodeIfPresent(Bool.self, forKey: .debugDropTapFrames)
+        debugSkipWavSync = try c.decodeIfPresent(Bool.self, forKey: .debugSkipWavSync)
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
         echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)

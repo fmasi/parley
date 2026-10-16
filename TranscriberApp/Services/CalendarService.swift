@@ -1,74 +1,61 @@
-import EventKit
+@preconcurrency import EventKit
 import TranscriberCore
 
-/// EventKit lookup for the current meeting's title.
-///
-/// `events(matching:)` is synchronous and cannot be cancelled, and over a 12-hour window of every
-/// calendar it takes seconds with Exchange/Google accounts — worst on the first call. It therefore runs
-/// off the main thread and is raced against `timeout`: past the deadline the caller gets nil and the
-/// query's late result is discarded, the query itself running on to completion unwatched (#197).
-/// `CalendarEventPicker` holds the pure selection rule.
-@MainActor
+/// Deliberately NOT main-actor: `events(matching:)` is a synchronous EventKit query over a
+/// 12-hour, all-calendars predicate, and can take seconds with Exchange/Google accounts (#197).
+/// `currentEventTitle` runs the whole lookup on a background dispatch queue (not `Task.detached`
+/// — a multi-second *synchronous* call there would tie up one of Swift's limited cooperative
+/// thread-pool threads for its whole duration; `withCheckedContinuation` + `DispatchQueue` keeps
+/// the caller merely suspended, same pattern as `LaunchAgentManager.runLaunchctl`) so a caller on
+/// the main actor — e.g. the naming panel opening on Start Recording — is never blocked on it.
 final class CalendarService {
-    private let store = EKEventStore()
+    func currentEventTitle(
+        lookaheadMinutes: Int = 10,
+        from calendars: [EKCalendar]? = nil
+    ) async -> String? {
+        // EKCalendar's thread-safety is unspecified by Apple, so don't hand the objects themselves
+        // across the queue hop — capture just their (Sendable) identifiers and re-resolve against
+        // the fresh, same-thread store below instead.
+        let calendarIDs = calendars?.map(\.calendarIdentifier)
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // A fresh store per lookup, not a retained property: avoids sharing an EKEventStore
+                // across actor/thread boundaries. EKEventStore() isn't actually cheap (Apple's docs
+                // warn it's a Core Data stack init, ~50-200ms on Exchange-heavy accounts) — this
+                // trades that per-call overhead for correctness, since the lookup only runs once per
+                // Start Recording, not on a hot path.
+                // TODO: if Exchange/LDAP accounts regress (Apple's docs also discourage creating
+                // multiple EKEventStore instances at all, not just sharing one across threads),
+                // replace this with a dedicated actor holding one retained store instead.
+                let store = EKEventStore()
+                let calendars = calendarIDs.map { ids in ids.compactMap { store.calendar(withIdentifier: $0) } }
+                let now = Date()
+                // The predicate window must include both the lookback for in-progress events and
+                // the lookahead for imminent ones. EventKit needs at least a few hours back to
+                // surface events that started earlier in the day.
+                let lookahead = max(lookaheadMinutes, 0)
+                let predicate = store.predicateForEvents(
+                    withStart: now.addingTimeInterval(-12 * 3600),
+                    end: now.addingTimeInterval(TimeInterval(lookahead) * 60 + 60),
+                    calendars: calendars
+                )
+                let events = store.events(matching: predicate)
 
-    /// Lookups run here, one at a time. `EKEventStore` is not thread safe and an abandoned query may
-    /// still be running when the next lookup starts, so they are serialized rather than overlapped; a
-    /// dedicated queue also keeps a multi-second blocking call off the cooperative thread pool.
-    private let queue = DispatchQueue(label: "calendar-lookup")
+                // Filter out declined events before handing to the picker.
+                let notDeclined = events.filter { event in
+                    guard let attendees = event.attendees else { return true }
+                    let selfAttendee = attendees.first { $0.isCurrentUser }
+                    guard let me = selfAttendee else { return true }
+                    return me.participantStatus != .declined
+                }
 
-    /// Bounded by `timeout`: past the deadline the caller gets nil and records with no suggested name.
-    ///
-    /// **Concurrent callers queue, and their deadlines do not.** `queue` is serial, so a lookup started
-    /// while another is still running does not begin its EventKit work until the first finishes — while
-    /// its own timeout has been counting from the moment it was *called*. A short-deadline lookup queued
-    /// behind a long one can therefore return nil having never queried the store at all, and the query
-    /// it leaves behind still runs to completion for a result nobody reads. This is why a caller who
-    /// already holds a title passes it on rather than asking again
-    /// (`RecordingLauncher.promptAndStart(suggestedName:)`): meeting sensing's warm lookup takes 10 s,
-    /// and the 1 s lookup behind it is the one that would lose. A generation counter that dropped
-    /// superseded work was considered and deliberately not built — `events(matching:)` cannot be
-    /// cancelled, so it would save no time, only bookkeeping.
-    func currentEventTitle(lookaheadMinutes: Int = 10, timeout: TimeInterval = 1) async -> String? {
-        // Touched only on `queue` below — never on main, and never from two contexts at once.
-        nonisolated(unsafe) let store = self.store
-        return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            let once = ResumeOnce(continuation)
-            queue.async {
-                once.resume(Self.lookup(store: store, lookaheadMinutes: lookaheadMinutes))
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                // Past the deadline the caller records with no suggested name rather than waiting.
-                once.resume(nil)
+                let title = CalendarEventPicker.pickEvent(
+                    from: notDeclined,
+                    now: now,
+                    lookaheadMinutes: lookahead
+                )?.title
+                continuation.resume(returning: title)
             }
         }
-    }
-
-    nonisolated private static func lookup(store: EKEventStore, lookaheadMinutes: Int) -> String? {
-        let now = Date()
-        // The predicate window must include both the lookback for in-progress events and
-        // the lookahead for imminent ones. EventKit needs at least a few hours back to
-        // surface events that started earlier in the day.
-        let lookahead = max(lookaheadMinutes, 0)
-        let predicate = store.predicateForEvents(
-            withStart: now.addingTimeInterval(-12 * 3600),
-            end: now.addingTimeInterval(TimeInterval(lookahead) * 60 + 60),
-            calendars: nil
-        )
-        let events = store.events(matching: predicate)
-
-        // Filter out declined events before handing to the picker.
-        let notDeclined = events.filter { event in
-            guard let attendees = event.attendees else { return true }
-            let selfAttendee = attendees.first { $0.isCurrentUser }
-            guard let me = selfAttendee else { return true }
-            return me.participantStatus != .declined
-        }
-
-        return CalendarEventPicker.pickEvent(
-            from: notDeclined,
-            now: now,
-            lookaheadMinutes: lookahead
-        )?.title
     }
 }

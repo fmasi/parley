@@ -12,16 +12,133 @@ import Foundation
 /// knowledge existed; nothing carried it to the human. This type is that carrier.
 public enum CaptureQualityNotice {
 
-    /// Notification title for a completed transcription.
-    public static func completionTitle(anomalyCount: Int) -> String {
-        anomalyCount > 0 ? "Transcription Complete — capture anomalies" : "Transcription Complete"
+    /// What each `…(inTranscriptAt:)` reader answers when the transcript can't be read back (missing,
+    /// unreadable, not a transcript). Not an alarm about the audio — but not "nothing wrong" either:
+    /// answering 0/0/1 for a file nobody read turned it into a plain "Transcription Complete". The
+    /// title and body then say the transcript could not be checked. A sentinel rather than an
+    /// optional, so the one call site (`RecordingCoordinator.presentCompletedTranscription`) needs no
+    /// change to be honest.
+    public static let unreadable = -1
+
+    private static let couldNotCheck = "Parley couldn't re-read the transcript to check it"
+
+    /// Notification title for a completed transcription, with precedence unreadable > no speech > a side
+    /// not captured > a side partly captured > the remote side uncertain > a side briefly affected > capture anomalies >
+    /// processing problems > echo marked > complete (§7.3).
+    ///
+    /// A transcript that could not be re-read leads: none of the others can be known, and
+    /// "Complete" would be a clean bill for a file nobody checked. An empty transcript comes next:
+    /// "Transcription Complete" over a file with no words in it is the most misleading thing this
+    /// notice could say. The per-side verdict (`capture_provenance.<side>_coverage.status`, the fact the
+    /// summary banner uses) comes before the ring's anomalies: a side that delivered nothing may carry no
+    /// anomaly at all — a crashed helper's undrained ring, a recording too short to judge live (final review
+    /// R-I2). Anomalies beat processing problems because they mean the AUDIO itself may be wrong; the body
+    /// still names every side and every non-zero count.
+    ///
+    /// `remoteStatus` / `localStatus`: a `TrackAccounting.Status` raw value, nil when the record has none
+    /// (never an invented alarm); `idle` and `healthy` say nothing.
+    ///
+    /// `remoteUncertainSeconds` (#333 R3, `TrackAccounting.uncertainSilenceSeconds`): the remote side's status is
+    /// `healthy` or `degraded`, yet a significant part of it is silence nobody can vouch for — the fact the summary's
+    /// "uncertain" line states, said here too so a recording with no summary still says it. Below a side not or partly
+    /// captured: that is a known loss, and those statuses never carry this value for the remote side. Above the brief
+    /// glitch and the anomaly count: minutes that may not have been captured outweigh seconds at the wrong rate.
+    ///
+    /// `echoLines`: `EchoNotice.Findings.completionLines` — above 0 when the recording has an echo voice
+    /// (#244). Last in the precedence: the lines are marked and nothing is missing, so it is information,
+    /// never said in place of a problem. The body carries it either way.
+    public static func completionTitle(anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
+                                       remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0,
+                                       remoteUncertainSeconds: Double? = nil) -> String {
+        if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "Transcription finished — \(couldNotCheck)" }
+        if segmentCount == 0 { return "Transcription Complete — no speech was transcribed" }
+        let remote = side(remoteStatus), local = side(localStatus)
+        switch (remote, local) {
+        case (.neverDelivered?, .neverDelivered?): return "Transcription Complete — neither side was captured"
+        case (.neverDelivered?, _): return "Transcription Complete — the other side was not captured"
+        case (_, .neverDelivered?): return "Transcription Complete — your microphone was not captured"
+        case (.compromised?, _), (_, .compromised?): return "Transcription Complete — capture compromised"
+        case _ where uncertain(remoteUncertainSeconds) != nil: return "Transcription Complete — remote audio uncertain"
+        // A drift healed in seconds (#308): said, but not as a compromised capture.
+        case (.degraded?, _), (_, .degraded?): return "Transcription Complete — brief capture glitch"
+        default: break
+        }
+        if anomalyCount > 0 { return "Transcription Complete — capture anomalies" }
+        if problemChunkCount > 0 { return "Transcription Complete — \(problemPhrase(problemChunkCount))" }
+        if echoLines > 0 { return "Transcription Complete — \(EchoNotice.completionTitle)" }
+        return "Transcription Complete"
     }
 
-    /// Notification body. Names the count so the user knows to look, and where.
-    public static func completionBody(fileName: String, anomalyCount: Int) -> String {
-        guard anomalyCount > 0 else { return fileName }
-        let noun = anomalyCount == 1 ? "anomaly" : "anomalies"
-        return "\(fileName) — \(anomalyCount) capture \(noun) recorded; audio may be affected"
+    /// Notification body: the file name, then each side not (or partly) captured, then every non-zero count,
+    /// then the echo voice (`echoLines`, as for the title).
+    /// `removedRecordings` (#224): how many older recordings lost their audio to the storage limit — a line of its own.
+    public static func completionBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
+                                      remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0,
+                                      removedRecordings: Int = 0, remoteUncertainSeconds: Double? = nil,
+                                      remoteUncertainIsLowerBound: Bool = false) -> String {
+        let body = recordBody(fileName: fileName, anomalyCount: anomalyCount, problemChunkCount: problemChunkCount, segmentCount: segmentCount,
+                              remoteStatus: remoteStatus, localStatus: localStatus, echoLines: echoLines,
+                              remoteUncertainSeconds: remoteUncertainSeconds, remoteUncertainIsLowerBound: remoteUncertainIsLowerBound)
+        guard let line = storageLimitLine(removedRecordings: removedRecordings) else { return body }
+        return body + "\n" + line
+    }
+
+    /// The completion notice's line when the storage limit removed older audio (#224); nil when nothing was removed.
+    public static func storageLimitLine(removedRecordings count: Int) -> String? {
+        guard count > 0 else { return nil }
+        let noun = count == 1 ? "recording" : "recordings"
+        return "Removed the audio of \(count) older \(noun) to stay within the storage limit; transcripts are kept."
+    }
+
+    private static func recordBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
+                                   remoteStatus: String?, localStatus: String?, echoLines: Int, remoteUncertainSeconds: Double?,
+                                   remoteUncertainIsLowerBound: Bool) -> String {
+        if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "\(fileName) — \(couldNotCheck)" }
+        var parts: [String] = []
+        if segmentCount == 0 { parts.append("no speech was transcribed") }
+        for (name, status, silence) in [("remote audio", side(remoteStatus), uncertain(remoteUncertainSeconds)),
+                                        ("microphone", side(localStatus), nil)] {
+            switch status {
+            case .neverDelivered?: parts.append("\(name) not captured")
+            case .compromised?: parts.append("\(name) partly captured")
+            default: break
+            }
+            // In the title's order: the silence nobody can vouch for (#333 R3), then the brief glitch.
+            // "at least": zeros summed over a measured and an unmeasured helper session, as the summary words it.
+            if let silence {
+                parts.append("\(name): \(remoteUncertainIsLowerBound ? "at least " : "")\(silence) s of silence could not be confirmed")
+            }
+            if status == .degraded { parts.append("\(name) briefly affected") }
+        }
+        if anomalyCount > 0 {
+            let noun = anomalyCount == 1 ? "anomaly" : "anomalies"
+            parts.append("\(anomalyCount) capture \(noun) recorded; audio may be affected")
+        }
+        if problemChunkCount > 0 { parts.append(problemPhrase(problemChunkCount)) }
+        if let echo = EchoNotice.completionNotice(lines: echoLines) { parts.append(echo) }
+        guard !parts.isEmpty else { return fileName }
+        return "\(fileName) — " + parts.joined(separator: "; ")
+    }
+
+    /// A side's verdict worth saying: `neverDelivered`, `compromised` or `degraded`; nil otherwise (absent, unknown, idle,
+    /// healthy).
+    private static func side(_ status: String?) -> TrackAccounting.Status? {
+        switch status.flatMap(TrackAccounting.Status.init(rawValue:)) {
+        case .neverDelivered?: return .neverDelivered
+        case .compromised?: return .compromised
+        case .degraded?: return .degraded
+        default: return nil
+        }
+    }
+
+    /// Whole seconds of unconfirmed silence to say; nil when there is none, or the value is not one a recording has.
+    private static func uncertain(_ seconds: Double?) -> String? {
+        guard let seconds, seconds.isFinite, seconds >= 0, seconds < 3_153_600_000 else { return nil }
+        return String(format: "%.0f", seconds)
+    }
+
+    private static func problemPhrase(_ count: Int) -> String {
+        count == 1 ? "1 chunk had processing problems" : "\(count) chunks had processing problems"
     }
 
     /// Read the CONTENT-compromising anomaly count a transcript carries in
@@ -35,20 +152,74 @@ public enum CaptureQualityNotice {
     /// Reading it back from the artifact (rather than threading it through every call site) means the
     /// crash-recovery and salvage paths get the same treatment as a clean stop for free — those are
     /// exactly the paths where a compromised capture is most likely and least examined.
-    /// Returns 0 when absent or unreadable: never invent an alarm.
+    /// Returns 0 when the field is absent (never invent an alarm), `unreadable` when the transcript
+    /// itself can't be read back.
     ///
     /// - Important: synchronous file I/O. A long meeting's transcript can reach several hundred KB,
     ///   so call this OFF the main actor (`RecordingCoordinator` uses a detached task) — blocking
     ///   the UI to decide how to phrase a notification would be a poor trade.
     public static func anomalyCount(inTranscriptAt url: URL) -> Int {
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let metadata = root["metadata"] as? [String: Any],
+        guard let root = readRoot(url) else { return unreadable }
+        guard let metadata = root["metadata"] as? [String: Any],
               let provenance = metadata["capture_provenance"] as? [String: Any]
         else { return 0 }
         // Transcripts written before this field existed simply have no quality signal — absent means
         // 0, never a retroactive alarm.
         // `as? Int` already bridges the NSNumber that JSONSerialization produces for JSON integers.
-        return provenance["quality_anomaly_count"] as? Int ?? 0
+        let count = provenance["quality_anomaly_count"] as? Int ?? 0
+        // A drift the Stop ended after the other side's last word (#333 R5) is recorded, not announced: it leaves the
+        // count read here, or the notice would fall through to "1 capture anomaly recorded; audio may be affected"
+        // for a drift that touched nothing anybody said. `quality_anomaly_count` itself stays as recorded.
+        return max(0, count - RateDriftWindow.unannounced(inSide: provenance["remote_coverage"] as? [String: Any]))
+    }
+
+    /// Distinct chunks with a content-affecting processing issue, computed from
+    /// `metadata.processing_issues` itself — never a stored summary key that could disagree with it.
+    /// 0 when absent (never invent an alarm), `unreadable` when the transcript can't be read back.
+    /// Synchronous file I/O — call off the main actor, like `anomalyCount(inTranscriptAt:)`.
+    public static func problemChunkCount(inTranscriptAt url: URL) -> Int {
+        guard let root = readRoot(url) else { return unreadable }
+        guard let metadata = root["metadata"] as? [String: Any],
+              let issues = metadata["processing_issues"] as? [[String: Any]]
+        else { return 0 }
+        return ChunkIssue.problemCounts(in: issues).chunks
+    }
+
+    /// How many readable segments the transcript holds — flagged ones (`filtered` / `echo`) are
+    /// hidden from every rendering, so they are not speech anyone can read. A file that can't be
+    /// read back, or holds no segment list, answers `unreadable`, not 0: failing to read it is not
+    /// evidence that no speech was transcribed, and "no speech" is an alarm.
+    public static func segmentCount(inTranscriptAt url: URL) -> Int {
+        guard let segments = readRoot(url)?["segments"] as? [[String: Any]] else { return unreadable }
+        return segments.filter { !TranscriptAssembler.isFlagged($0) }.count
+    }
+
+    /// Each side's verdict, `metadata.capture_provenance.{remote,local}_coverage.status` — the fact the summary banner
+    /// uses (final review R-I2). nil when the transcript can't be read back (the caller says it could not check); each
+    /// side nil when its key is absent (never an invented alarm). Synchronous file I/O — call off the main actor, like
+    /// `anomalyCount(inTranscriptAt:)`.
+    ///
+    /// What the notice is to say, not the record: a remote side `degraded` only by drifts the Stop ended after its
+    /// last speech (`RateDriftWindow.unannounced`, #333 R5) answers nil — nothing to say, as the summary banner says
+    /// nothing. The transcript still reads `degraded`.
+    ///
+    /// `remoteUncertainSeconds`: `TrackAccounting.uncertainSilenceSeconds` of the remote side (#333 R3), from the same
+    /// read; nil when the rule does not hold, and always for a record without `exact_zero_unproven_seconds`.
+    /// `remoteUncertainIsLowerBound`: the side's `exact_zero_seconds_is_lower_bound`, which covers the unproven
+    /// seconds too — the body then says "at least".
+    public static func sideStatuses(inTranscriptAt url: URL)
+        -> (remote: String?, local: String?, remoteUncertainSeconds: Double?, remoteUncertainIsLowerBound: Bool)? {
+        guard let root = readRoot(url) else { return nil }
+        let provenance = (root["metadata"] as? [String: Any])?["capture_provenance"] as? [String: Any]
+        func status(_ key: String) -> String? { (provenance?[key] as? [String: Any])?["status"] as? String }
+        let remote = provenance?["remote_coverage"] as? [String: Any]
+        let remoteUnannounced = RateDriftWindow.unannounced(inSide: remote) > 0
+        return (remoteUnannounced ? nil : status("remote_coverage"), status("local_coverage"),
+                TrackAccounting.uncertainSilenceSeconds(inRemoteSide: remote), remote?["exact_zero_seconds_is_lower_bound"] as? Bool == true)
+    }
+
+    private static func readRoot(_ url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 }

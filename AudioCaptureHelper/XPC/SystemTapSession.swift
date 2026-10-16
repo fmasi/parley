@@ -31,22 +31,48 @@ import TranscriberCore
 final class SystemTapSession {
     private let deliveryQueue: DispatchQueue
     /// Delivers normalized 48 kHz mono Int16 system samples + a host-clock PTS (aligned with the mic's
-    /// AVCapture PTS — both are mach host time) on the `deliveryQueue`.
-    private let onSamples: ([Int16], CMTime) -> Void
+    /// AVCapture PTS — both are mach host time) on the `deliveryQueue`, with what this callback measured
+    /// of its own cycle so far (#247).
+    private let onSamples: ([Int16], CMTime, TapCycleLead) -> Void
     /// Records a diagnostic event (build, rebuild, error) into the helper's anomaly ring.
     var onEvent: ((CaptureEventKind, CaptureEvent.Severity, [String: String]) -> Void)?
-    /// Invoked if the tap cannot be (re)built — e.g. the System Audio Recording TCC grant is missing,
-    /// or an output-switch rebuild fails. The caller decides how to surface it.
-    var onUnavailable: ((String) -> Void)?
+    /// The result of every mid-session rebuild, on `configQueue`: (rung, token, succeeded, reason).
+    /// Token 0 = a rebuild the healing ladder did not order (output change, rate drift, permission).
+    var onRebuildResult: ((TapRecoveryLadder.Rung, Int, Bool, String) -> Void)?
+    /// An aggregate listener fired (fourcc: "goin" (value 0 only), "stpd", "diff", "agrp"), on
+    /// `monitorQueue`. Accelerators only (§5): the liveness driver checks the heartbeat, never a blind rebuild.
+    var onAggregateEvent: ((String) -> Void)?
+    /// coreaudiod restarted (`srst`), on `monitorQueue`: every Core Audio object id this session holds
+    /// is dead. The caller jumps to the top rung (new tap + aggregate + listeners, §5).
+    var onServiceRestarted: (() -> Void)?
+    /// Invoked on the config queue after every successful build or rebuild, so the caller can check the
+    /// System Audio Recording permission the new aggregate started with (#220).
+    var onBuilt: (() -> Void)?
+    /// Invoked on the config queue after every successful build or rebuild, once the new aggregate
+    /// generation is committed: the liveness watchdog re-arms the system track from here (§4.2).
+    var onGenerationChanged: (() -> Void)?
+
+    /// Stamped as the FIRST statement of every IOProc callback, whatever the guards below decide: a
+    /// heartbeat means "the OS called us" (§4.2). Lock-only, read from the watchdog's queue.
+    private let heartbeat = OSAllocatedUnfairLock<(nanos: UInt64, count: Int)>(initialState: (0, 0))
+    /// Aggregate generation, bumped on every successful build/rebuild. Guarded by `stateLock`.
+    private var generation = 0
 
     /// Converts each tap buffer (float32 @ output rate, stereo) → 48 kHz mono Int16. Reused across
     /// IOProc invocations; only ever touched on `deliveryQueue` (serial), so no lock needed.
     private let converter = AudioConverter()
+    /// One-shot latch for the converter-failure anomaly (#196); only ever touched on
+    /// `deliveryQueue`, same as `converter`.
+    private var converterFailureReported = false
 
     /// Serializes every build / output-switch rebuild / stop so a HAL output-change rebuild can't race
     /// a user stop into two aggregate devices. `AudioDeviceStart`/destroy happen here, never under
     /// `stateLock`.
     private let configQueue = DispatchQueue(label: "system-tap.config")
+    /// Mark `configQueue` / `monitorQueue`, so `stop()` never `sync`s onto the queue it is already on:
+    /// `deinit` calls `stop()`, and the last reference can drop inside a block on either queue (B-M4).
+    private let configQueueKey = DispatchSpecificKey<Bool>()
+    private let monitorQueueKey = DispatchSpecificKey<Bool>()
     /// Guards the CoreAudio object ids + the listener block + stopping flag. A leaf lock — its critical
     /// sections never call CoreAudio — so it can't deadlock with `configQueue`.
     private let stateLock = DispatchQueue(label: "system-tap.state")
@@ -63,12 +89,17 @@ final class SystemTapSession {
     private let monitorQueue = DispatchQueue(label: "system-tap.device-monitor")
     /// Retained so the SAME reference can be passed to remove it (Swift boxes a fresh block per call).
     private var outputListenerBlock: AudioObjectPropertyListenerBlock?
+    /// The current aggregate's `goin`/`stpd`/`diff`/`agrp` listeners (§5), retained for removal in
+    /// `teardownIO`. Guarded by `stateLock`.
+    private var aggregateListenerBlocks: [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
     /// Second HAL listener, on the device LIST. The default-output listener cannot cover us any more:
     /// re-anchoring means our clock is routinely some device the user never selected, and when that
     /// one is unplugged no default-output notification fires. The IOProc then stalls forever — and a
     /// stall is invisible to the rate-drift watchdog, which only runs when buffers arrive. Mirrors
     /// what `MicCaptureSession` has always done (gotcha #55).
     private var deviceListListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Third HAL listener, on the system object's `srst` (coreaudiod restarted). Guarded by `stateLock`.
+    private var serviceRestartListenerBlock: AudioObjectPropertyListenerBlock?
     /// UID of the device currently clocking the aggregate, so a device-list change can tell whether
     /// the one that matters is the one that disappeared. Guarded by `stateLock`.
     private var anchorDeviceUID: String?
@@ -97,15 +128,46 @@ final class SystemTapSession {
     /// Mutated only under `stateLock`.
     private var driftMonitor = RateDriftMonitor()
 
-    init(deliveryQueue: DispatchQueue, onSamples: @escaping ([Int16], CMTime) -> Void) {
+    /// `kAudioAggregateDeviceTapAutoStartKey` for every aggregate this session builds (§5, gotcha #78).
+    private let tapAutoStart: Bool
+    /// DIAGNOSTIC ONLY (device item D-04): drop every IOProc callback before the heartbeat stamp.
+    private let dropFramesForDiagnostics: Bool
+
+    init(
+        deliveryQueue: DispatchQueue, tapAutoStart: Bool = true, dropFramesForDiagnostics: Bool = false,
+        onSamples: @escaping ([Int16], CMTime, TapCycleLead) -> Void
+    ) {
         self.deliveryQueue = deliveryQueue
+        self.tapAutoStart = tapAutoStart
+        self.dropFramesForDiagnostics = dropFramesForDiagnostics
         self.onSamples = onSamples
+        configQueue.setSpecific(key: configQueueKey, value: true)
+        monitorQueue.setSpecific(key: monitorQueueKey, value: true)
     }
+
+    private func onConfigQueue(_ work: () -> Void) {
+        if DispatchQueue.getSpecific(key: configQueueKey) == true { work() } else { configQueue.sync(execute: work) }
+    }
+
+    private func onMonitorQueue(_ work: () -> Void) {
+        if DispatchQueue.getSpecific(key: monitorQueueKey) == true { work() } else { monitorQueue.sync(execute: work) }
+    }
+
+    /// Once `stop()` has begun, the session is dead to its owner (B-I1): a build or rung still finishing
+    /// on `configQueue` — one a bounded Stop abandoned — reports nothing, so it can't land in the next session.
+    private var isLive: Bool { !stateLock.sync { isStopping } }
 
     // stop() (not just stopDeviceMonitoring) so a partial start() failure — createTap() succeeds but
     // buildAggregateAndStart() throws — doesn't leak the HAL-level process tap. The caller (startSystemTap)
     // never retains the session on a throw, so this is the only place that cleanup runs. Idempotent.
     deinit { stop() }
+
+    /// The last IOProc callback, in `DispatchTime` uptime nanoseconds (0 = never). Lock-only.
+    func lastHeartbeatNanos() -> UInt64 { heartbeat.withLock { $0.nanos } }
+    /// Heartbeats since this session began, for coverage accounting (§7.1). Lock-only.
+    func heartbeatCount() -> Int { heartbeat.withLock { $0.count } }
+    /// The current aggregate generation (0 = never built).
+    func generationValue() -> Int { stateLock.sync { generation } }
 
     // MARK: - Lifecycle
 
@@ -121,11 +183,13 @@ final class SystemTapSession {
         startDeviceMonitoring()
     }
 
-    /// Stop capture and destroy all CoreAudio objects. Idempotent.
+    /// Stop capture and destroy all CoreAudio objects. Idempotent. Can block behind a rung stuck on
+    /// `configQueue` (M-C): the service bounds it and abandons the session (B-I1), which is dead from the
+    /// first line here — nothing it finishes afterwards reports back.
     func stop() {
         stateLock.sync { isStopping = true }
         stopDeviceMonitoring()
-        configQueue.sync { teardownIO(); destroyTap() }
+        onConfigQueue { teardownIO(); destroyTap() }
     }
 
     // MARK: - Tap + aggregate construction (on configQueue)
@@ -184,7 +248,7 @@ final class SystemTapSession {
         if case .reanchor(let reason) = decision {
             if let fullRate = Self.fullRateOutputDevice(minimum: 44100), fullRate != output {
                 Logger.audio.info(
-                    "System tap: clocking capture off \(Self.deviceName(fullRate), privacy: .public) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead of output device \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — reason: \(reason.rawValue, privacy: .public)"
+                    "System tap: clocking capture off \(Self.deviceName(fullRate), privacy: .private) at \(Self.deviceNominalRate(fullRate), privacy: .public)Hz instead of output device \(Self.deviceName(output), privacy: .private) at \(outputRate, privacy: .public)Hz — reason: \(reason.rawValue, privacy: .public)"
                 )
                 anchor = fullRate
             } else {
@@ -212,7 +276,7 @@ final class SystemTapSession {
                     // later (a Bluetooth profile flip, or a virtual device's hidden clock member
                     // doing the same). Not an anomaly yet — the watchdog catches it if it happens.
                     Logger.audio.warning(
-                        "System tap: clocking off \(reason.rawValue, privacy: .public) output \(Self.deviceName(output), privacy: .public) at \(outputRate, privacy: .public)Hz — no full-rate device available to re-anchor to if its rate changes"
+                        "System tap: clocking off \(reason.rawValue, privacy: .public) output \(Self.deviceName(output), privacy: .private) at \(outputRate, privacy: .public)Hz — no full-rate device available to re-anchor to if its rate changes"
                     )
                 }
             }
@@ -232,7 +296,7 @@ final class SystemTapSession {
             kAudioAggregateDeviceMainSubDeviceKey as String: outUID,
             kAudioAggregateDeviceIsPrivateKey as String: true,
             kAudioAggregateDeviceIsStackedKey as String: false,
-            kAudioAggregateDeviceTapAutoStartKey as String: true,
+            kAudioAggregateDeviceTapAutoStartKey as String: tapAutoStart,
             kAudioAggregateDeviceSubDeviceListKey as String: [[kAudioSubDeviceUIDKey as String: outUID]],
             kAudioAggregateDeviceTapListKey as String: [[
                 kAudioSubTapDriftCompensationKey as String: true,
@@ -306,8 +370,8 @@ final class SystemTapSession {
         // (format, converter on this serial queue) and calls onSamples on the same queue.
         var proc: AudioDeviceIOProcID?
         let ioSt = AudioDeviceCreateIOProcIDWithBlock(&proc, agg, deliveryQueue) {
-            [weak self] _, inInputData, inInputTime, _, _ in
-            self?.handleTapBuffers(inInputData, inInputTime)
+            [weak self] inNow, inInputData, inInputTime, _, _ in
+            self?.handleTapBuffers(inNow, inInputData, inInputTime)
         }
         guard ioSt == noErr, let proc else {
             AudioHardwareDestroyAggregateDevice(agg)
@@ -340,7 +404,11 @@ final class SystemTapSession {
             aggregateID = agg
             procID = proc
         }
-        Logger.audio.info("System tap aggregate started — output \(Self.deviceName(output), privacy: .public), delivery format \(asbd.mSampleRate)Hz \(asbd.mChannelsPerFrame)ch (converter → 48000Hz 1ch)")
+        stateLock.sync { generation += 1 }
+        registerAggregateListeners(on: agg)
+        Logger.audio.info("System tap aggregate started — output \(Self.deviceName(output), privacy: .private), delivery format \(asbd.mSampleRate)Hz \(asbd.mChannelsPerFrame)ch (converter → 48000Hz 1ch)")
+        // A build a stop overtook (the stop's own teardown is queued behind it): report nothing.
+        guard isLive else { return }
         // Surface the REAL tap delivery format for provenance/diagnostics — the WAV is always the
         // normalized 48 kHz mono, but the source rate is what reveals a chipmunk-class mismatch.
         // Use the standard "rate"/"channels" keys the app's provenance formatter reads, so
@@ -352,6 +420,44 @@ final class SystemTapSession {
             "channels": "\(asbd.mChannelsPerFrame)",
             "normalized": "48000Hz/1ch",
         ])
+        onBuilt?()
+        onGenerationChanged?()
+    }
+
+    private static let aggregateSelectors: [(AudioObjectPropertySelector, String)] = [
+        (kAudioDevicePropertyDeviceIsRunning, "goin"),
+        (kAudioDevicePropertyIOStoppedAbnormally, "stpd"),
+        (kAudioDevicePropertyDeviceHasChanged, "diff"),
+        (kAudioAggregateDevicePropertyActiveSubDeviceList, "agrp"),
+    ]
+
+    /// Accelerators only (§5): they force an immediate heartbeat check in the driver; the
+    /// heartbeat decides. Registered per aggregate generation, removed in `teardownIO`.
+    private func registerAggregateListeners(on agg: AudioObjectID) {
+        var registered: [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+        for (selector, name) in Self.aggregateSelectors {
+            let address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                guard let self, self.isLive else { return }
+                if name == "goin" {
+                    var running: UInt32 = 1; var size = UInt32(4)
+                    var a = address
+                    if AudioObjectGetPropertyData(agg, &a, 0, nil, &size, &running) == noErr, running != 0 { return }
+                }
+                Logger.audio.warning("System tap aggregate event '\(name, privacy: .public)'")
+                self.onEvent?(.aggregateIOStopped, .warning, ["source": "system-tap", "selector": name])
+                self.onAggregateEvent?(name)
+            }
+            var addr = address
+            let st = AudioObjectAddPropertyListenerBlock(agg, &addr, monitorQueue, block)
+            if st == noErr {
+                registered.append((address, block))
+            } else {
+                // An accelerator only: the 1 Hz heartbeat still catches the stall, just later.
+                Logger.audio.error("System tap: aggregate '\(name, privacy: .public)' listener registration failed (\(st))")
+            }
+        }
+        stateLock.sync { aggregateListenerBlocks = registered }
     }
 
     /// The `AudioStreamBasicDescription` the aggregate device's input stream will actually deliver to
@@ -396,6 +502,18 @@ final class SystemTapSession {
             driftMonitor.reset()
             return (a, p)
         }
+        // Listeners go first, so our own stop can't fire `goin`→0 into the liveness driver.
+        let listeners = stateLock.sync { () -> [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] in
+            let l = aggregateListenerBlocks
+            aggregateListenerBlocks = []
+            return l
+        }
+        if agg != kAudioObjectUnknown {
+            for (address, block) in listeners {
+                var addr = address
+                _ = AudioObjectRemovePropertyListenerBlock(agg, &addr, monitorQueue, block)
+            }
+        }
         // Concurrency note (#112): the IOProc block runs on `deliveryQueue`, a different queue from
         // this `configQueue` teardown, so a callback can be in flight here. We rely on CoreAudio's
         // documented contract that `AudioDeviceStop` blocks until any executing IOProc has returned
@@ -429,9 +547,22 @@ final class SystemTapSession {
     /// Wrap the tap's pulled buffers into an AVAudioPCMBuffer matching the tap format, normalize to
     /// 48 kHz mono Int16 via the shared converter, and deliver with a host-clock PTS. Runs on the
     /// capture service's audio queue.
+    ///
+    /// Timing (#247): the HAL dispatches this block synchronously on `deliveryQueue` and waits for it,
+    /// so the time the block waits for that queue is part of the IO cycle. `inNow` is when the HAL
+    /// started the cycle (`AudioHardware.h`); the first line here minus `inNow` is that wait. NOT
+    /// `inInputTime`: that is when the buffer's first frame was acquired, a whole buffer earlier. The
+    /// clock reads below are `mach_absolute_time()` (a counter read: no lock, no allocation); the numbers go
+    /// to `AudioOutputHandler`, which finishes the cycle and records it.
     private func handleTapBuffers(
+        _ inNow: UnsafePointer<AudioTimeStamp>,
         _ inInputData: UnsafePointer<AudioBufferList>, _ inInputTime: UnsafePointer<AudioTimeStamp>
     ) {
+        // D-04: reproduce Incident B (no callbacks at all) on demand — the heartbeat is never stamped,
+        // so never-delivered fires and the ladder runs against a tap this code keeps silent.
+        if dropFramesForDiagnostics { return }
+        let entryTicks = mach_absolute_time()
+        heartbeat.withLock { $0 = (DispatchTime.now().uptimeNanoseconds, $0.count + 1) }
         let (format, bpf, stopping) = stateLock.sync { (tapFormat, bytesPerFrame, isStopping) }
         guard !stopping, let format, bpf > 0 else { return }
 
@@ -440,6 +571,7 @@ final class SystemTapSession {
         let frames = Int(srcABL[0].mDataByteSize) / Int(bpf)
         guard frames > 0 else { return }
 
+        let convertStartTicks = mach_absolute_time()
         guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { return }
         pcm.frameLength = AVAudioFrameCount(frames)
         // The PCM buffer was created with the SAME format as the tap, so its AudioBufferList layout
@@ -455,9 +587,16 @@ final class SystemTapSession {
             samples = try converter.convert(pcm).samples
         } catch {
             Logger.audio.error("System tap conversion failed: \(error, privacy: .public)")
+            // Previously logged only (#196) — a format the converter can't handle fails on EVERY
+            // buffer. One-shot per session so a persistent failure doesn't flood the ring.
+            if !converterFailureReported {
+                converterFailureReported = true
+                onEvent?(.converterFailure, .anomaly, ["source": "system-tap", "error": "\(error)"])
+            }
             return
         }
         guard !samples.isEmpty else { return }
+        let convertEndTicks = mach_absolute_time()
 
         // Watchdog: delivered frames vs wall clock. A sustained shortfall means the declared format
         // no longer matches what the device is really producing.
@@ -473,7 +612,14 @@ final class SystemTapSession {
         let nanos = host != 0 ? AudioConvertHostTimeToNanos(host)
                               : AudioConvertHostTimeToNanos(mach_absolute_time())
         let pts = CMTime(value: CMTimeValue(nanos), timescale: 1_000_000_000)
-        onSamples(samples, pts)
+        // No host time in `inNow` (or one after the entry): the queue wait is unmeasured for this
+        // cycle (0 = not counted) and the total starts at the entry instead.
+        let cycleStartTicks = inNow.pointee.mHostTime
+        let anchored = cycleStartTicks != 0 && cycleStartTicks <= entryTicks
+        onSamples(samples, pts, TapCycleLead(
+            startTicks: anchored ? cycleStartTicks : entryTicks,
+            queueWaitTicks: anchored ? entryTicks &- cycleStartTicks : 0,
+            convertTicks: IOCycleStats.elapsed(from: convertStartTicks, to: convertEndTicks)))
     }
 
     // MARK: - Default-output monitoring (HAL) — clock continuity across output switches
@@ -493,9 +639,29 @@ final class SystemTapSession {
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.scheduleOutputReevaluation()
         }
+        // Second listener: the device LIST. Re-anchoring means our clock is often a device that is
+        // not the default output, and unplugging THAT fires no default-output notification — the
+        // IOProc simply stops being called. Nothing else would notice: the rate-drift watchdog is
+        // driven from inside the IOProc, so zero callbacks means zero detection, and the track just
+        // stops growing while the mic keeps recording and finalize reports success.
+        let listBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.handleDeviceListChange()
+        }
+        // Third listener: coreaudiod restarted. Nothing we hold survives it — the tap, the aggregate
+        // and every listener registration are gone — so the healer rebuilds from the top rung.
+        let srstBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self, self.isLive else { return }
+            Logger.audio.error("System tap: coreaudiod restarted — rebuilding the tap from scratch")
+            self.onEvent?(.serviceRestarted, .warning, ["source": "system-tap"])
+            self.onServiceRestarted?()
+        }
+        // Claim all three in ONE critical section, and never once a stop has begun (B-M3): a tap rung
+        // re-registering on `configQueue` can race `stop()`.
         let shouldRegister: Bool = stateLock.sync {
-            guard outputListenerBlock == nil else { return false }
+            guard outputListenerBlock == nil, !isStopping else { return false }
             outputListenerBlock = block
+            deviceListListenerBlock = listBlock
+            serviceRestartListenerBlock = srstBlock
             return true
         }
         guard shouldRegister else { return }
@@ -506,16 +672,6 @@ final class SystemTapSession {
             Logger.audio.error("System tap: default-output HAL listener registration failed (\(st))")
             onEvent?(.streamStopError, .anomaly, ["source": "system-tap", "reason": "output monitor unavailable", "status": "\(st)"])
         }
-
-        // Second listener: the device LIST. Re-anchoring means our clock is often a device that is
-        // not the default output, and unplugging THAT fires no default-output notification — the
-        // IOProc simply stops being called. Nothing else would notice: the rate-drift watchdog is
-        // driven from inside the IOProc, so zero callbacks means zero detection, and the track just
-        // stops growing while the mic keeps recording and finalize reports success.
-        let listBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.handleDeviceListChange()
-        }
-        stateLock.sync { deviceListListenerBlock = listBlock }
         var listAddr = Self.deviceListAddress
         let listSt = AudioObjectAddPropertyListenerBlock(system, &listAddr, monitorQueue, listBlock)
         if listSt != noErr {
@@ -524,6 +680,36 @@ final class SystemTapSession {
                 "source": "system-tap", "reason": "device list monitor unavailable", "status": "\(listSt)",
             ])
         }
+        var srstAddr = Self.serviceRestartedAddress
+        let srstSt = AudioObjectAddPropertyListenerBlock(system, &srstAddr, monitorQueue, srstBlock)
+        if srstSt != noErr {
+            Logger.audio.error("System tap: service-restart HAL listener registration failed (\(srstSt))")
+            onEvent?(.streamStopError, .anomaly, [
+                "source": "system-tap", "reason": "service restart monitor unavailable", "status": "\(srstSt)",
+            ])
+        }
+        // A stop that began between the claim and the adds removed nothing (the adds hadn't happened):
+        // undo them here with our own references, or HAL keeps three dead listeners for the helper's life.
+        if stateLock.sync(execute: { isStopping }) {
+            _ = AudioObjectRemovePropertyListenerBlock(system, &addr, monitorQueue, block)
+            _ = AudioObjectRemovePropertyListenerBlock(system, &listAddr, monitorQueue, listBlock)
+            _ = AudioObjectRemovePropertyListenerBlock(system, &srstAddr, monitorQueue, srstBlock)
+        }
+    }
+
+    private static let serviceRestartedAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyServiceRestarted,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    /// Client state must be re-established after `srst` (the HAL header says so): drop and re-add the
+    /// system-object listeners. Runs on `configQueue`, inside a `.rebuildTap` rung. Skipped once a stop
+    /// has begun, so a rung racing `stop()` can't re-add listeners the stop just removed.
+    private func reregisterSystemListeners() {
+        if stateLock.sync(execute: { isStopping }) { return }
+        stopDeviceMonitoring()
+        startDeviceMonitoring()
     }
 
     private static let deviceListAddress = AudioObjectPropertyAddress(
@@ -597,11 +783,21 @@ final class SystemTapSession {
             var listAddr = Self.deviceListAddress
             _ = AudioObjectRemovePropertyListenerBlock(system, &listAddr, monitorQueue, listBlock)
         }
+        let srstBlock: AudioObjectPropertyListenerBlock? = stateLock.sync {
+            let b = serviceRestartListenerBlock
+            serviceRestartListenerBlock = nil
+            return b
+        }
+        if let srstBlock {
+            let system = AudioObjectID(kAudioObjectSystemObject)
+            var srstAddr = Self.serviceRestartedAddress
+            _ = AudioObjectRemovePropertyListenerBlock(system, &srstAddr, monitorQueue, srstBlock)
+        }
         // Listener removed first (so no new rebuild can be scheduled), then cancel any already-pending
         // debounced rebuild so it doesn't fire after stop() or keep a [weak self] closure alive (#112).
         // reevaluationItem is monitorQueue-confined; the sync also serializes AFTER any in-flight
         // listener block, so an item that block just scheduled is cancelled too.
-        monitorQueue.sync {
+        onMonitorQueue {
             reevaluationItem?.cancel()
             reevaluationItem = nil
         }
@@ -620,25 +816,37 @@ final class SystemTapSession {
         monitorQueue.asyncAfter(deadline: .now() + 0.2, execute: item)
     }
 
-    /// Rebuild the aggregate + IOProc around the new default output, keeping the same global tap. Runs
-    /// the actual rebuild on `configQueue` (serialized against stop and other rebuilds).
-    private func rebuildForOutputChange() {
+    /// Run one healing rung on `configQueue`. The result goes to `onRebuildResult` with the caller's
+    /// token (0 = not ordered by the ladder); the healer decides what happens next. A stop that raced
+    /// in makes this a no-op.
+    func rebuild(rung: TapRecoveryLadder.Rung, token: Int, reason: String) {
         if stateLock.sync(execute: { isStopping }) { return }
         configQueue.async { [weak self] in
             guard let self else { return }
             if self.stateLock.sync(execute: { self.isStopping }) { return }
             self.teardownIO()
             do {
+                if rung == .rebuildTap {
+                    self.destroyTap()
+                    try self.createTap()
+                    self.reregisterSystemListeners()
+                }
                 try self.buildAggregateAndStart()
-                Logger.audio.info("System tap rebuilt around new default output")
-                self.onEvent?(.restartInPlace, .warning, ["source": "system-tap", "reason": "output device changed"])
+                Logger.audio.info("System tap \(rung.rawValue, privacy: .public) done (\(reason, privacy: .public))")
+                guard self.isLive else { return }   // a stop overtook it: its result belongs to no session
+                self.onEvent?(.restartInPlace, .warning, ["source": "system-tap", "reason": reason, "rung": rung.rawValue])
+                self.onRebuildResult?(rung, token, true, reason)
             } catch {
-                Logger.audio.error("System tap rebuild after output change failed: \(error, privacy: .public)")
-                self.onEvent?(.restartFailed, .anomaly, ["source": "system-tap", "reason": "output rebuild failed", "error": "\(error)"])
-                self.onUnavailable?("System audio tap could not follow the output device change")
+                Logger.audio.error("System tap \(rung.rawValue, privacy: .public) failed (\(reason, privacy: .public)): \(error, privacy: .public)")
+                guard self.isLive else { return }
+                self.onEvent?(.restartFailed, .anomaly, ["source": "system-tap", "reason": "\(rung.rawValue) failed: \(reason)", "error": "\(error)"])
+                self.onRebuildResult?(rung, token, false, reason)
             }
         }
     }
+
+    /// Output-device change (HAL listener): the same aggregate rebuild, reported into the ladder as external.
+    private func rebuildForOutputChange() { rebuild(rung: .rebuildAggregate, token: 0, reason: "output device changed") }
 
     // MARK: - CoreAudio helpers
 
@@ -658,8 +866,8 @@ final class SystemTapSession {
 
         // ONE lock acquisition for the WHOLE decision — the monitor's accumulate/judge/latch must
         // advance atomically, or a teardown landing mid-decision reopens the exact race this closes.
-        let verdict = stateLock.sync {
-            driftMonitor.record(frames: frames, declaredRate: declaredRate, hostNanos: hostNanos)
+        let (verdict, onsetWithin) = stateLock.sync {
+            (driftMonitor.record(frames: frames, declaredRate: declaredRate, hostNanos: hostNanos), driftMonitor.onsetWithinSeconds)
         }
 
         guard case .drift(let effectiveRate, let ratio) = verdict else { return }
@@ -678,6 +886,9 @@ final class SystemTapSession {
             "reason": "rate drift — output device changed rate under the tap",
             "declared": "\(Int(declaredRate))",
             "actual": "\(Int(effectiveRate))",
+            // How long before this event the drift can have begun, at the earliest (#308): the record's
+            // wrong-rate window starts there and ends at the rebuild's first frames.
+            "onset_within_seconds": onsetWithin.map { String(format: "%.1f", $0) } ?? "unknown",
         ])
 
         // Remediate, don't just narrate. Detection alone cost a real 24-minute meeting: the watchdog
@@ -705,11 +916,12 @@ final class SystemTapSession {
         )
         onEvent?(.restartInPlace, .warning, [
             "source": "system-tap",
-            "reason": "rate drift remediation",
+            // The record pairs this rebuild with its drift by this reason (#308).
+            "reason": CaptureDiagnostics.driftRemediationReason,
             "attempt": "\(attempt)",
         ])
         // Hops to configQueue internally — never blocks the audio queue we are on.
-        rebuildForOutputChange()
+        rebuild(rung: .rebuildAggregate, token: 0, reason: "rate drift remediation")
     }
 
     /// An output device running at or above `minimum` Hz, preferring the built-in one.
@@ -864,6 +1076,18 @@ final class SystemTapSession {
             Logger.audio.info("System tap swept orphaned aggregate \(uid, privacy: .public): \(st == noErr ? "ok" : "\(st)", privacy: .public)")
         }
     }
+}
+
+/// What one tap callback measured before it handed its samples over (#247), in host-clock ticks
+/// (`mach_absolute_time`). Three integers, passed by value.
+struct TapCycleLead {
+    /// Where the cycle's total is counted from: the HAL's cycle start (`inNow`), or the callback's
+    /// first line when `inNow` carried no host time.
+    let startTicks: UInt64
+    /// From the HAL's cycle start to the callback's first line. 0 = not measured.
+    let queueWaitTicks: UInt64
+    /// Buffer allocation, copy and conversion to 48 kHz mono Int16.
+    let convertTicks: UInt64
 }
 
 enum SystemTapError: LocalizedError {

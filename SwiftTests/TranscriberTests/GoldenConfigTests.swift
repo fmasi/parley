@@ -15,7 +15,7 @@ import Testing
 /// one of ITS defaults — becomes a red diff line a reviewer must approve.
 ///
 /// To regenerate after an INTENTIONAL change:
-///     UPDATE_GOLDEN=1 swift test --filter GoldenConfigTests   (plus the usual -Xswiftc/-Xlinker flags)
+///     UPDATE_GOLDEN=1 bash scripts/swift-test.sh GoldenConfigTests
 /// then review and commit the diff to resolved-config.golden.json. The default run only compares.
 @Suite struct GoldenConfigTests {
 

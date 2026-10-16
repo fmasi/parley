@@ -110,8 +110,8 @@ The net effect: even when forcing CoreML to GPU (`.cpuAndGPU`), it remains appro
 
 | Audio File | Duration | ANE (default) | GPU (.cpuAndGPU) |
 |------------|----------|---------------|-------------------|
-| Gustavo | 17 min | 8m 04s | 7m 37s |
-| Jon Interview | 38 min | 12m 58s | -- |
+| Recording A | 17 min | 8m 04s | 7m 37s |
+| Recording B | 38 min | 12m 58s | -- |
 
 #### Hardware Utilization (WhisperKit, ANE mode)
 
@@ -138,8 +138,8 @@ The net effect: even when forcing CoreML to GPU (`.cpuAndGPU`), it remains appro
 
 | Audio File | Duration | Time |
 |------------|----------|------|
-| Gustavo | 17 min | 2m 23s |
-| Jon Interview | 38 min | 3m 35s |
+| Recording A | 17 min | 2m 23s |
+| Recording B | 38 min | 3m 35s |
 
 #### Hardware Utilization (mlx-whisper)
 
@@ -257,7 +257,7 @@ WhisperKit exposes `language` per `DecodingResult` but **not per segment** -- ma
 
 ### Transcription Speed
 
-| Framework | Model | Gustavo (17 min) | Jon Interview (38 min) | Realtime Factor |
+| Framework | Model | Recording A (17 min) | Recording B (38 min) | Realtime Factor |
 |-----------|-------|-----------------|----------------------|-----------------|
 | WhisperKit (ANE) | large-v3-turbo | 8m 04s | 12m 58s | ~2.9x RT |
 | WhisperKit (GPU) | large-v3-turbo | 7m 37s | -- | ~2.2x RT |
@@ -366,8 +366,8 @@ If the app supports multiple engines or models, the Settings UI needs:
 
 | File | Duration | Content | Languages |
 |------|----------|---------|-----------|
-| Gustavo | 17 min | Interview, single speaker dominant | EN |
-| Jon Interview | 38 min | Multi-speaker interview | EN |
+| Recording A | 17 min | Interview, single speaker dominant | EN |
+| Recording B | 38 min | Multi-speaker interview | EN |
 
 ---
 

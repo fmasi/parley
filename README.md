@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-1082%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2711%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
@@ -65,15 +65,15 @@ can rely on. Parley covers meetings, mailrag covers email. By humans. For agents
   quality score on every segment.
 - **Two transcription engines** — FluidAudio (Parakeet — fastest, 25 EU languages) or Apple
   SpeechAnalyzer (macOS 26+; downloads a per-language model on first use). Swap them in Settings.
-- **Echo / mic-bleed removal** — strips the far-end voice that bleeds into your mic on speakers, so it
-  doesn't show up as a phantom speaker.
+- **Echo / mic-bleed removal** — flags the far-end voice that bleeds into your mic on speakers, so it
+  doesn't show up as a phantom speaker in what you read (the JSON record keeps it, marked `echo`).
 - **Crash-safe recording** — survives UI and XPC crashes with auto-relaunch, silent re-attach, and
   multi-segment stitching.
 - **Multiple outputs** — JSON, SRT, and TXT with absolute timestamps, speaker labels, confidence
   scores, and local/remote tags.
 - **Optional local LLM summaries** — point it at any OpenAI-compatible or LM Studio endpoint (including
   a fully local model) for a meeting summary, still without touching the cloud.
-- **CLI included** — transcribe, rename speakers, summarize, and benchmark from the terminal.
+- **CLI included** — transcribe, rename speakers, summarize and download models from the terminal.
 
 ## Screenshots
 
@@ -88,15 +88,15 @@ can rely on. Parley covers meetings, mailrag covers email. By humans. For agents
 ```bash
 git clone https://github.com/fmasi/parley.git
 cd parley
-bash package_app.sh --install      # builds the Swift targets, assembles the .app + XPC service,
-                                   # ad-hoc signs everything, installs to /Applications
+bash package_app.sh --release --install   # builds the Swift targets (optimised), assembles the .app +
+                                          # XPC service, ad-hoc signs everything, installs to /Applications
 open /Applications/Parley.app
 ```
 
 On first launch, macOS asks for **Screen & System Audio Recording** permission. The default engine
 downloads its model (~500 MB) on first use and caches it after that.
 
-**Requirements:** macOS 15+ (Sequoia), Apple Silicon (M1–M5), Xcode Command Line Tools. *(The Apple
+**Requirements:** macOS 15+ (Sequoia), Apple Silicon (M1–M5); Xcode to build from source. *(The Apple
 SpeechAnalyzer engine additionally requires macOS 26+.)*
 
 ## How it works — the hard parts
@@ -108,15 +108,18 @@ faithful and private.
   stream — verified through the macOS 26 SDK headers. So the app runs two independent capture streams —
   your mic and the system output — and treats "local" (mic) and "remote" (system) as first-class. That
   constraint is *why* reliable speaker separation is possible at all.
-- **Capturing the calls a screen recorder can't see.** ScreenCaptureKit is the default for system
-  audio, but it misses Continuity (iPhone) calls and some VoIP audio. An optional Core Audio process
-  tap grabs the system output directly, so phone and app calls land in the transcript too — switchable
-  in Settings, off by default.
+- **Capturing the calls a screen recorder can't see.** ScreenCaptureKit misses Continuity (iPhone) calls
+  and some VoIP audio. A Core Audio process tap grabs the system output directly, so phone and app calls
+  land in the transcript too. The tap is the default for new installs; ScreenCaptureKit stays
+  selectable in Settings as the legacy option until #221.
 - **Echo / mic-bleed removal.** On speakers, the far-end voice bleeds into your mic and shows up as a
-  phantom local speaker. A triple-confirmed gate removes it: >50% temporal overlap **and** >70% word
-  overlap **and** >0.8 speaker-embedding cosine — all three, or it stays. Across 7 real recordings that
-  gate caught 22% more far-end bleed than the heuristic it replaced (158 vs 129 segments), with zero
-  false positives.
+  phantom local speaker. Each mic-side line is matched against the far end on time (>50% overlap)
+  **and** words (>70% overlap); a mic-side speaker whose speech is at least half matched is judged to
+  be echo and every matched line of it is flagged, and elsewhere only matches of three words or more
+  are. A flagged line is kept in the JSON record and hidden from the TXT/SRT transcript and the
+  summary, and the transcript records the numbers behind each verdict (`metadata.echo_clusters`).
+  The rename dialog and the completion notice say it in words: which speaker row looks like the far end
+  through your loudspeakers, how many lines were marked, and that headphones avoid it.
 - **Cross-chunk speaker reconciliation.** Audio is chunked and transcribed in parallel; per-chunk
   speaker IDs are merged into one global identity via greedy cosine matching on embeddings.
 - **Crash-safe by design.** A sentinel file + LaunchAgent restart + multi-segment stitching mean a UI
@@ -128,7 +131,8 @@ faithful and private.
   Engine (`.cpuAndNeuralEngine`); pyannote/WeSpeaker/VBx diarization runs through CoreML's `.all`,
   spread across the Neural Engine and GPU.
 
-For the full design — XPC architecture, ScreenCaptureKit constraints, the pipeline — see
+For the full design — the Core Audio tap, capture reliability and healing, the recording
+lifecycle, the pipeline — see
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Transcription engines
@@ -182,13 +186,13 @@ record trustworthy.
 
 ```bash
 # Transcribe audio files (system + optional mic stream)
-.build/debug/Parley transcribe -i system.wav [-i mic.wav] [-f srt] [--engine fluid_audio]
+"$(swift build --show-bin-path)/Parley" transcribe -i system.wav [-i mic.wav] [-f srt] [--engine fluid_audio]
 
 # Rename detected speakers interactively
-.build/debug/Parley rename -i transcript.json
+"$(swift build --show-bin-path)/Parley" rename -i transcript.json
 
 # Summarize a transcript with a local/remote LLM
-.build/debug/Parley summarize -i transcript.json
+"$(swift build --show-bin-path)/Parley" summarize -i transcript.json
 
 # Benchmark engines (speed + WER) across languages
 swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engines fluid,speech
@@ -197,21 +201,37 @@ swift run --package-path tools/engine-benchmark EngineBenchmark audio.wav --engi
 ## Project layout
 
 ```
-TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC client, chunk processing
-TranscriberCore/       engines, diarization, echo-dedup, speaker reconciliation, summaries, transcript I/O
-AudioCaptureHelper/    XPC audio-capture service (ScreenCaptureKit, dual-stream)
+TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC client, windows and dialogs
+TranscriberCore/       recording lifecycle, chunk processing, engines, diarization, echo detection, summaries, transcript I/O
+AudioCaptureHelper/    XPC audio-capture service (Core Audio tap or ScreenCaptureKit, dual-stream)
 AudioCaptureProtocol/  shared @objc XPC protocol
-SwiftTests/            1082 tests across 127 suites
+SwiftTests/            2711 tests across 291 suites
 tools/engine-benchmark/  WER + speed benchmark harness
 docs/                  architecture, pipeline, parameters, gotchas
 ```
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — XPC design, ScreenCaptureKit constraints, the dual-stream model
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the four targets, the Core Audio tap, capture reliability and healing, the recording lifecycle, the record
 - [docs/pipeline.md](docs/pipeline.md) — end-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) — every tunable parameter, with config keys and defaults
 - [docs/gotchas.md](docs/gotchas.md) — hard-won platform gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats)
+
+## Local CI
+
+CI runs once per PR, when it's marked ready, so run the checks on your machine first:
+
+```bash
+lefthook install      # once per clone: pre-commit secrets/shell/workflow checks, pre-push `just ci`
+just ci               # exactly what CI runs (workflow lint, the serial Swift suite, the red-first gate), plus the app build
+/ci-review            # in Claude Code: the same review rubric CI uses (.github/claude-review-prompt.md)
+gh pr create --draft  # CI skips drafts
+gh pr ready           # runs CI and the Claude review once
+```
+
+A PR merges when `test`, `red-first` and `review / review-gate` are green; a Critical review
+finding keeps the gate red until a re-review passes. The full rules for contributors and coding
+agents are in [AGENTS.md](AGENTS.md).
 
 ## Models & credits
 

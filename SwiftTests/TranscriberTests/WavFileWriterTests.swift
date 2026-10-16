@@ -404,6 +404,52 @@ struct WavFileWriterTests {
         #expect(rate == 48000)
     }
 
+    // MARK: - Throwing FileHandle write-failure surface (#196)
+
+    /// The legacy `FileHandle` write/seek/sync API raised an uncatchable Objective-C exception on a
+    /// full disk or I/O error, which could abort the whole helper process mid-meeting. This pins the
+    /// HEALTHY path: `onWriteFailure` must never fire when nothing is actually failing — a
+    /// regression guard against the throwing conversion accidentally treating success as failure.
+    /// Forcing a REAL write failure (disk full / revoked permissions) needs a live filesystem fault
+    /// injection and is a device/integration test, not a unit test — see the worktree's final report.
+    @Test func onWriteFailureNeverFiresOnTheHealthyPath() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failureMessages: [String] = []
+        writer.onWriteFailure = { failureMessages.append($0) }
+
+        writer.setSampleRate(48000)
+        let samples = [Int16](repeating: 42, count: 4800)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.flushHeader()
+        writer.finalize()
+
+        #expect(failureMessages.isEmpty)
+    }
+
+    /// Writing after `finalize()` (a straggler buffer racing teardown) must stay a silent no-op —
+    /// NOT a write-failure report. `onWriteFailure` means "a write was attempted and failed", not
+    /// "a write was skipped because the writer is closed" (that path already existed and is covered
+    /// by `finalizeIsIdempotentAndSafeAfterClose`).
+    @Test func writeFailureCallbackNotFiredForPostFinalizeNoOps() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failureMessages: [String] = []
+        writer.onWriteFailure = { failureMessages.append($0) }
+        writer.finalize()
+
+        let stray: [Int16] = [1, 2, 3]
+        stray.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.flushHeader()
+        writer.finalize()
+
+        #expect(failureMessages.isEmpty)
+    }
+
     @Test func repairHeaderLeavesConsistentFileUnchanged() throws {
         let path = tempPath()
         defer { cleanup(path) }
@@ -420,5 +466,145 @@ struct WavFileWriterTests {
         let data = readData(at: path)
         let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
         #expect(dataSize == UInt32(samples.count * 2))
+    }
+
+    /// §6.2: a stale `diskWriteFailure` from a REPLACED helper is disproved by the NEW helper's first
+    /// successful write — so the writer reports its first write, once.
+    @Test func theFirstSuccessfulWriteIsReportedOnce() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("first-write-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var successes = 0
+        writer.onWriteSucceeded = { successes += 1 }
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+        #expect(successes == 1)
+    }
+
+    /// §6.1: diskWriteFailure clears on the next successful write on that writer — reported once.
+    @Test func aSuccessfulWriteAfterAFailureReportsRecoveryOnce() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recover-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failures = 0, successes = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.onWriteSucceeded = { successes += 1 }
+        writer.recoveryHold = .zero   // the re-arm logic, without the hold (see aSuccessRightAfterAFailureIsNotYetARecovery)
+        writer.noteWriteFailure(CocoaError(.fileWriteNoPermission), context: "test")   // internal seam (was private)
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.finalize()
+        #expect(failures == 1 && successes == 1)
+    }
+
+    /// Every failure episode is reported, and every recovery from one: write, fail, write, fail. Pins
+    /// both re-arms — a failure re-arms the success report, a success re-arms the failure report.
+    @Test func eachFailureEpisodeAndEachRecoveryIsReported() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("episodes-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failures = 0, successes = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.onWriteSucceeded = { successes += 1 }
+        writer.recoveryHold = .zero
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.noteWriteFailure(CocoaError(.fileWriteOutOfSpace), context: "test")
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(successes == 2, "the first write, then the recovery")
+        writer.noteWriteFailure(CocoaError(.fileWriteOutOfSpace), context: "test")
+        #expect(failures == 2, "the recovery re-armed the failure report")
+        writer.finalize()
+    }
+
+    /// H2 council (B-M10): a volume where every sync fails but writes succeed flapped the disk alarm
+    /// twice a second — a snapshot push, two XPC sends, ring events and a banner per flap, evicting real
+    /// evidence. A failure now clears only after `recoveryHold` without another one.
+    @Test func aSuccessRightAfterAFailureIsNotYetARecovery() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hold-\(UUID().uuidString).wav").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let writer = try WavFileWriter(path: path)
+        var failures = 0, successes = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.onWriteSucceeded = { successes += 1 }
+        #expect(writer.recoveryHold == .seconds(5))
+        let samples = [Int16](repeating: 0, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(successes == 1, "a first write is evidence at once")
+        writer.noteWriteFailure(CocoaError(.fileWriteUnknown), context: "sync")
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        writer.noteWriteFailure(CocoaError(.fileWriteUnknown), context: "sync")
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(failures == 1 && successes == 1, "no flap: one raise, no clear within the hold")
+        writer.recoveryHold = .zero   // the hold has passed
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(successes == 2, "then the recovery")
+        writer.finalize()
+    }
+
+    // MARK: - Periodic sync: its timing, and the debug skip (#247)
+
+    /// The periodic `fsync` runs on the capture queue and is the suspected cause of the IO-callback
+    /// stalls (#247). The writer reports the time it spent there, so a callback can attribute it.
+    @Test func thePeriodicSyncIsTimed() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        #expect(writer.syncInterval == .milliseconds(500), "the shipped cadence")
+        #expect(writer.skipPeriodicSync == false, "the fsync is never skipped unless asked")
+        let samples = [Int16](repeating: 1234, count: 480)
+
+        writer.syncInterval = .seconds(3600)   // not due
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(writer.syncTicks == 0, "no sync, no time")
+
+        writer.syncInterval = .zero            // due on every append
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        let first = writer.syncTicks
+        #expect(first > 0)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(writer.syncTicks > first, "cumulative over the writer's life")
+        writer.finalize()
+    }
+
+    /// `debug_skip_wav_sync`: the `fsync` is left out, and nothing else. The header is still rewritten
+    /// on the same cadence, so the file stays readable if the helper dies before `finalize()`.
+    @Test func skippingThePeriodicSyncLeavesOutOnlyTheFsync() throws {
+        let path = tempPath()
+        defer { cleanup(path) }
+
+        let writer = try WavFileWriter(path: path)
+        writer.setSampleRate(48000)
+        var failures = 0
+        writer.onWriteFailure = { _ in failures += 1 }
+        writer.skipPeriodicSync = true
+        writer.syncInterval = .zero
+        let samples = [Int16](repeating: 1234, count: 480)
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        samples.withUnsafeBufferPointer { writer.appendInt16($0) }
+        #expect(writer.syncTicks == 0, "no fsync ran")
+        #expect(failures == 0)
+
+        // No finalize: what a reader finds after a helper crash.
+        let data = readData(at: path)
+        #expect(data.count == 44 + 2 * samples.count * 2)
+        let dataSize: UInt32 = data[40...43].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(dataSize == UInt32(2 * samples.count * 2), "the header was still flushed")
+        let rate: UInt32 = data[24...27].withUnsafeBytes { $0.load(as: UInt32.self) }
+        #expect(rate == 48000)
+        writer.finalize()
     }
 }

@@ -1,0 +1,127 @@
+import Testing
+@testable import TranscriberCore
+
+/// #196: the finalize-time backstop that compares a track's total recorded frames against how long
+/// the session actually ran — catches gaps that padding itself skipped (an implausible timeline
+/// delta), which `PadRatioMonitor` cannot see because it only ever judges what was actually appended.
+@Suite struct FrameCountPlausibilityTests {
+
+    private let rate = 48000.0
+
+    // MARK: - H2 council (A-I8): the remote is judged against the time it was EXPECTED to deliver
+
+    /// The call ends at 5 min and the user presses Stop at 10: the remote went quiet with the call
+    /// (nothing pads a trailing idle), which is not missing audio. Before, elapsed time made this a
+    /// false "capture anomalies" on a healthy recording.
+    @Test func aRemoteThatWentQuietWhenTheCallEndedIsNotAMismatch() {
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(600 * rate), micRate: rate,
+            systemFrames: Int64(300 * rate), systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 300)
+        #expect(verdicts.isEmpty)
+    }
+
+    @Test func aRemoteThatStoppedWhileItWasExpectedIsStillCaught() {
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(600 * rate), micRate: rate,
+            systemFrames: Int64(300 * rate), systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 600)
+        #expect(verdicts.map(\.track) == ["system"])
+        #expect(verdicts.first?.elapsedSeconds == 600, "judged against the expected seconds")
+    }
+
+    @Test func theMicIsStillJudgedAgainstElapsedTime() {
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(300 * rate), micRate: rate,
+            systemFrames: Int64(600 * rate), systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 600)
+        #expect(verdicts.map(\.track) == ["mic"])
+    }
+
+    /// H2 round 2 item 17: only frames written while the remote was EXPECTED count against the expected
+    /// seconds. A tap that delivered outside the call (gate closed) but went dead during it held enough
+    /// frames in total to pass; counted against the gate it does not.
+    @Test func framesWrittenWhileTheGateWasClosedDoNotCount() {
+        var counter = GateOpenFrameCounter()
+        counter.add(Int64(300 * rate), gateOpen: false)   // before the call: delivering, not expected
+        counter.add(Int64(20 * rate), gateOpen: true)     // the call: 20 s of 300 s expected
+        #expect(counter.frames == Int64(20 * rate))
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(600 * rate), micRate: rate,
+            systemFrames: counter.frames, systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 300)
+        #expect(verdicts.map(\.track) == ["system"])
+    }
+
+    /// Nothing ever played (gotcha #66): no expected time, nothing to judge.
+    @Test func aRemoteNeverExpectedIsNotJudged() {
+        let verdicts = FrameCountPlausibility.finalizeVerdicts(
+            micFrames: Int64(600 * rate), micRate: rate,
+            systemFrames: 0, systemRate: rate,
+            elapsedSeconds: 600, systemExpectedSeconds: 0)
+        #expect(verdicts.isEmpty)
+    }
+
+    /// A track that recorded (approximately) the whole session must not fire.
+    @Test func matchingFramesIsHealthy() {
+        let elapsed = 120.0
+        let frames = Int64(elapsed * rate)
+        let verdict = FrameCountPlausibility.check(
+            track: "mic", framesWritten: frames, rate: rate, elapsedSeconds: elapsed
+        )
+        #expect(verdict == nil)
+    }
+
+    /// A small, ordinary discrepancy (a few seconds of legitimate startup skew already accounted
+    /// for elsewhere) must not fire — the absolute floor exists exactly for this.
+    @Test func smallDeficitDoesNotFire() {
+        let elapsed = 120.0
+        let frames = Int64((elapsed - 5) * rate)  // 5s short
+        let verdict = FrameCountPlausibility.check(
+            track: "mic", framesWritten: frames, rate: rate, elapsedSeconds: elapsed
+        )
+        #expect(verdict == nil)
+    }
+
+    /// A large proportional deficit that is ALSO a large absolute one fires, with the right numbers.
+    @Test func largeDeficitFires() {
+        let elapsed = 120.0
+        let frames = Int64((elapsed - 40) * rate)  // 40s short — 33% of elapsed, well past 15s floor
+        let verdict = FrameCountPlausibility.check(
+            track: "system", framesWritten: frames, rate: rate, elapsedSeconds: elapsed
+        )
+        #expect(verdict != nil)
+        #expect(verdict?.track == "system")
+        #expect(verdict?.elapsedSeconds == 120.0)
+        #expect(abs((verdict?.deficitSeconds ?? 0) - 40) < 0.01)
+    }
+
+    /// A session that has barely started must not be judged — mirrors `PadRatioMonitor.minimumSeconds`.
+    @Test func tooEarlyIsNotJudged() {
+        let elapsed = 10.0
+        let frames: Int64 = 0  // nothing written yet
+        let verdict = FrameCountPlausibility.check(
+            track: "mic", framesWritten: frames, rate: rate, elapsedSeconds: elapsed
+        )
+        #expect(verdict == nil)
+    }
+
+    /// A high ratio alone (e.g. a session so short the ratio spikes) without enough ABSOLUTE
+    /// deficit must not fire — both-conditions gating, same shape as `PadRatioMonitor`.
+    @Test func ratioAloneWithoutAbsoluteFloorDoesNotFire() {
+        let elapsed = 30.0  // right at the minimum
+        let frames = Int64((elapsed - 10) * rate)  // 10s short: 33% ratio, but under the 15s floor
+        let verdict = FrameCountPlausibility.check(
+            track: "mic", framesWritten: frames, rate: rate, elapsedSeconds: elapsed
+        )
+        #expect(verdict == nil)
+    }
+
+    /// A non-positive rate must never be judged (division guard).
+    @Test func nonPositiveRateNeverFires() {
+        let verdict = FrameCountPlausibility.check(
+            track: "mic", framesWritten: 0, rate: 0, elapsedSeconds: 120
+        )
+        #expect(verdict == nil)
+    }
+}

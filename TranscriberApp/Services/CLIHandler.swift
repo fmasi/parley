@@ -80,7 +80,7 @@ enum CLIHandler {
             } catch {
                 // Leave logProcess nil so teardown never terminates an unlaunched Process.
                 fputs("Warning: --debug log stream unavailable: \(error.localizedDescription)\n", stderr)
-                Logger.transcription.warning("--debug: failed to launch /usr/bin/log: \(error.localizedDescription, privacy: .public)")
+                Logger.transcription.warning("--debug: failed to launch /usr/bin/log: \(error.localizedDescription, privacy: .private)")
             }
         }
         // Only terminate a process that actually launched and is still running (#62).
@@ -106,6 +106,9 @@ enum CLIHandler {
         } else {
             outputDir = inputURLs[0].deletingLastPathComponent()
         }
+        // #246: before any work, so a missing --output-dir is created (and an impossible one is
+        // refused by name) up front rather than after the whole transcription, at the write.
+        try OutputDirectory.ensureExists(outputDir)
 
         // Resolve stereo channel handling for single-file AAC input
         let systemAudio: URL
@@ -227,7 +230,9 @@ enum CLIHandler {
 
         let providerStr = opts.provider ?? config.summary?.provider.rawValue ?? "openai"
         let endpoint = opts.endpoint ?? config.summary?.endpoint
-        let apiKey = opts.apiKey ?? config.summary?.apiKey ?? ""
+        // #48: no `config.summary?.apiKey` to fall back to any more — the key lives in the
+        // Keychain, not config.json. A `--api-key` flag still overrides it, same as before.
+        let apiKey = opts.apiKey ?? SummaryAPIKeyStore.load()
         let model = opts.model ?? config.summary?.model
         let contextLength = opts.contextLength ?? config.summary?.contextLength
 
@@ -241,11 +246,10 @@ enum CLIHandler {
             enabled: true,
             provider: providerType,
             endpoint: endpoint,
-            apiKey: apiKey,
             model: model,
             contextLength: contextLength
         )
-        let provider = MeetingSummarizer.createProvider(from: summaryConfig)
+        let provider = MeetingSummarizer.createProvider(from: summaryConfig, apiKey: apiKey)
         try await MeetingSummarizer.summarize(transcriptPath: jsonPath, provider: provider, endpoint: endpoint)
 
         let baseName = jsonPath.deletingPathExtension().lastPathComponent
@@ -282,7 +286,7 @@ enum CLIHandler {
         Subcommands:
           transcribe  Transcribe audio files
             -i <file>        Input audio file (required, can specify twice for dual-stream)
-            --output-dir <dir>  Output directory (default: same as input file)
+            --output-dir <dir>  Output directory, created if missing (default: same as input file)
             -f <format>      Output format: json, srt, txt (default: json)
             --engine <id>    Engine: speech_analyzer, fluid_audio (default: from config)
             --no-diarize     Skip speaker diarization

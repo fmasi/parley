@@ -5,9 +5,8 @@ import AVFoundation
 
 /// A recording with NO system audio (#183).
 ///
-/// Device-observed twice: `2026-07-16/115126-Leaseholder Insurance first call` and
-/// `2026-09-02/150633-Paul feedback` — a phone call answered and put on speaker. Everything comes
-/// through the mic; the system capture writes a 44-byte header and nothing else.
+/// Device-observed twice, on 2026-07-16 and 2026-09-02: a phone call answered and put on speaker.
+/// Everything comes through the mic; the system capture writes a 44-byte header and nothing else.
 ///
 /// The empty header declares 16000 Hz, the mic runs at 48000, so `archive()` hit its rate-mismatch
 /// guard and refused. The guard is right in principle — a genuine rate divergence used to encode a
@@ -82,13 +81,13 @@ struct MicOnlyArchiveTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let micWav = dir.appendingPathComponent("150633-Paul feedback-0_mic.wav")
+        let micWav = dir.appendingPathComponent("150633-weekly sync-0_mic.wav")
         try Self.createTestWav(at: micWav)
 
         let result = try await AudioArchiver.archiveMicOnly(
             micAudio: micWav, outputDirectory: dir, bitrateKbps: 64)
         // "…-0_mic.m4a" would not match the chunk naming every other path produces.
-        #expect(result.archivePath.lastPathComponent == "150633-Paul feedback-0.m4a")
+        #expect(result.archivePath.lastPathComponent == "150633-weekly sync-0.m4a")
     }
 
     @Test("mic-only archive deletes its source once verified")

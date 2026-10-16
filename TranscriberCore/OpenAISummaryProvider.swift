@@ -88,6 +88,16 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
     private let requestTimeoutSeconds: Int
 
     public func summarize(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> String {
+        try Self.parseResponse(try await responseData(segments: segments, metadata: metadata))
+    }
+
+    public func summarizeDetailed(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> SummaryResponse {
+        try Self.parseDetailedResponse(try await responseData(segments: segments, metadata: metadata))
+    }
+
+    /// Send the request (with the bounded 429/503 retry) and return the body of the successful
+    /// response; every failure throws.
+    private func responseData(segments: [SummarySegment], metadata: SummaryMetadata) async throws -> Data {
         let request = try buildRequest(segments: segments, metadata: metadata)
 
         var attempt = 0
@@ -95,11 +105,11 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
             let (data, response) = try await session.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse else {
-                return try Self.parseResponse(data)
+                return data
             }
 
             if (200...299).contains(httpResponse.statusCode) {
-                return try Self.parseResponse(data)
+                return data
             }
 
             // Bounded retry with backoff on rate-limit (429) and transient overload (503).
@@ -181,7 +191,7 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
         }
 
         let userContent = SummaryPromptBuilder.userMessage(metadata: metadata, segments: segments)
-        let prompt = SummaryPromptBuilder.systemMessage(dualStream: metadata.dualStream)
+        let prompt = SummaryPromptBuilder.systemMessage(metadata: metadata)
 
         let body: [String: Any] = [
             "model": model,
@@ -194,6 +204,15 @@ public struct OpenAISummaryProvider: SummaryProvider, Sendable {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
+    }
+
+    /// `parseResponse`, plus `truncated` from `choices[0].finish_reason == "length"` — the model
+    /// stopped because it hit its output limit, not because it was done (P14).
+    static func parseDetailedResponse(_ data: Data) throws -> SummaryResponse {
+        let markdown = try parseResponse(data)
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let finishReason = (json?["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String
+        return SummaryResponse(markdown: markdown, truncated: finishReason == "length")
     }
 
     static func parseResponse(_ data: Data) throws -> String {

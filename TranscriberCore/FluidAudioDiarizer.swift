@@ -47,9 +47,10 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     ///   "0 speakers" is not an answer, and pinning clustering to it would be worse than the
     ///   default. `nil` means "no answer given"; the configured/default behaviour applies.
     ///
-    ///   `maxSpeakers` is a target rather than a ceiling in practice: on `150633-Paul feedback`
-    ///   the unbounded default produced ONE speaker while `maxSpeakers` of 2/3/4 produced exactly
-    ///   2/3/4. That is why a user's answer is routed here and not to a `numSpeakers` hint.
+    ///   `maxSpeakers` is a target rather than a ceiling in practice: on a speakerphone call with
+    ///   two people on one mic (2026-09-02) the unbounded default produced ONE speaker while
+    ///   `maxSpeakers` of 2/3/4 produced exactly 2/3/4. That is why a user's answer is routed here
+    ///   and not to a `numSpeakers` hint.
     public nonisolated func makeOfflineConfig(forcedSpeakerCount: Int? = nil) -> OfflineDiarizerConfig {
         var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
         if let clusteringThreshold {
@@ -79,8 +80,37 @@ public actor FluidAudioDiarizer: DiarizationProvider {
 
         let mgr = try await ensureLoaded(forcedSpeakerCount: numSpeakers)
         let result = try await mgr.process(audioPath)
+        return Self.makeResult(segments: result.segments, speakerDatabase: result.speakerDatabase, startTime: startTime)
+    }
 
-        let segments = result.segments.map { seg in
+    /// - Parameter audio: mono samples at the diarizer's target sample rate (16 kHz), already
+    ///   decoded by the caller. See the protocol doc for why this overload exists (#204).
+    public func diarize(
+        audio: [Float],
+        numSpeakers: Int?,
+        progress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> DiarizationResult {
+        let startTime = ContinuousClock.now
+        Logger.transcription.info("FluidAudio diarization starting: \(audio.count, privacy: .public) samples (pre-decoded)")
+
+        let mgr = try await ensureLoaded(forcedSpeakerCount: numSpeakers)
+        let result = try await mgr.process(audio: audio, progressCallback: progress)
+        return Self.makeResult(segments: result.segments, speakerDatabase: result.speakerDatabase, startTime: startTime)
+    }
+
+    /// Shared segment-mapping + completion logging behind both `diarize` overloads above.
+    ///
+    /// Takes FluidAudio's raw segments/database rather than its `DiarizationResult` struct: that
+    /// type's name collides with OUR `DiarizationResult` (same bare name), and FluidAudio also
+    /// ships a top-level `public struct FluidAudio` — so `FluidAudio.DiarizationResult` resolves
+    /// to a (nonexistent) member of THAT struct, not a module-qualified type reference. Passing
+    /// the two fields separately sidesteps needing to name the colliding type at all.
+    private static func makeResult(
+        segments rawSegments: [TimedSpeakerSegment],
+        speakerDatabase rawSpeakerDatabase: [String: [Float]]?,
+        startTime: ContinuousClock.Instant
+    ) -> DiarizationResult {
+        let segments = rawSegments.map { seg in
             DiarizedSegment(
                 start: Double(seg.startTimeSeconds),
                 end: Double(seg.endTimeSeconds),
@@ -89,7 +119,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
             )
         }
 
-        let speakerDatabase = result.speakerDatabase ?? [:]
+        let speakerDatabase = rawSpeakerDatabase ?? [:]
 
         let elapsed = ContinuousClock.now - startTime
         let speakerCount = Set(segments.map(\.speaker)).count
@@ -99,6 +129,9 @@ public actor FluidAudioDiarizer: DiarizationProvider {
 
         return DiarizationResult(segments: segments, speakerDatabase: speakerDatabase)
     }
+
+    /// Its diarization model is cached — VAD is optional: the quality gate skips it (L review 232). A look, never a download.
+    public nonisolated func isReady() async -> Bool { Self.isDiarizationCached() }
 
     /// Returns true if all diarization model files are present in the local cache.
     /// Used by ensureLoaded() — does NOT require VAD so existing installs keep working.
