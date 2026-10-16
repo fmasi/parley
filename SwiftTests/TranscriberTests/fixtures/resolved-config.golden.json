@@ -18,6 +18,7 @@
   },
   "fluidaudio_offline_diarizer": {
     "clustering": {
+      "constrainedAssignment": true,
       "maxSpeakers": null,
       "minSpeakers": null,
       "numSpeakers": null,
