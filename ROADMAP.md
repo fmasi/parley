@@ -35,6 +35,7 @@ Remove the manual steps around a recorded meeting.
 - **Turnkey on-device summaries** — zero-setup summarisation on Apple's on-device models; no external
   endpoint to configure
 - **Cross-session speaker memory** — name someone once, and Parley recognises them in later meetings
+- **Model evaluation** — a more accurate default speech model, custom vocabulary for names and jargon, and FluidAudio-native CJK engines, each shipped only when a benchmark proves it ([evaluation](docs/fluidaudio-evaluation-2026-10.md))
 
 ## Later — `v0.11` · The private context layer
 Parley as a context source your agents can query — the part no cloud note-taker can safely offer.
