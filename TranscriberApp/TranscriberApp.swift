@@ -122,6 +122,11 @@ struct TranscriberApp: App {
     /// Owns the recording lifecycle and every crash path, launch recovery included (§8.3). Built here,
     /// once, and injected into `MenuView` — a view-owned coordinator would not exist yet at launch.
     private let coordinator: RecordingCoordinator
+    /// The naming-panel start flow and the one-click start, shared by the menu and meeting sensing (#118).
+    private let launcher: RecordingLauncher
+    /// Meeting sensing (#118): senses nothing until `activate()`, which runs only after launch recovery
+    /// and the permission gate.
+    private let meetingPresenter: MeetingPromptPresenter
     /// Sleep and wake forwarded to the coordinator for the app's lifetime (§8.10); a volume mount and a wake retry
     /// the pending sessions; the power-off notice only notes the termination's kind and marks a transcript being
     /// finished — the stop happens when the quit itself arrives (L review 110).
@@ -180,6 +185,14 @@ struct TranscriberApp: App {
             Task { @MainActor in await Self.verifyCrashProtection(appState: state) }
         }
         systemEvents = SystemEventObserver(coordinator: coordinator)
+        let recordingLauncher = RecordingLauncher(
+            coordinator: coordinator, configManager: ConfigManager.shared, calendarService: calendarService
+        )
+        launcher = recordingLauncher
+        meetingPresenter = MeetingPromptPresenter(
+            appState: state, configManager: ConfigManager.shared, coordinator: coordinator,
+            launcher: recordingLauncher, calendarService: calendarService
+        )
 
         // CLI mode: only enter for known subcommands (not system-injected args)
         if let first = CommandLine.arguments.dropFirst().first,
@@ -261,8 +274,20 @@ struct TranscriberApp: App {
 
         let gate = launchGate
         let cm = configManager
+        // The permission gate stays INDEPENDENT of recovery: Flow B can spend minutes transcribing a crashed
+        // session, and until the gate runs `permissionsReady` is false (it decides MenuView vs the Setup panel).
         Task { @MainActor in
             await gate.checkAndGate(configManager: cm)
+        }
+        // Sensing, and only sensing, waits for recovery: a relaunch mid-recording re-attaches inside
+        // recoverAtLaunch, and a sensor started before that would see an `.idle` phase with a call in
+        // progress — i.e. offer to record what is already being recorded (spec §1 Lifecycle). It also
+        // waits for the gate (Setup may still be open).
+        let presenter = meetingPresenter
+        Task { @MainActor in
+            await recovery.value
+            await Self.waitUntilReady(gate)
+            presenter.activate()
         }
 
         // L11: launchd's opinion is what relaunches us. Verify + repair at every launch; when we are
@@ -274,6 +299,32 @@ struct TranscriberApp: App {
         Task(priority: .utility) { @MainActor in
             await recovery.value
             await Self.verifyCrashProtection(appState: state)
+        }
+    }
+
+    /// Suspends until the launch gate reports permissions ready. `checkAndGate` returns immediately
+    /// when setup is still open, so this is what keeps sensing from starting behind the setup window.
+    ///
+    /// Cancellation is checked, because the flag is not guaranteed to arrive: a user who closes Setup
+    /// without granting leaves `permissionsReady` false forever, and an unguarded loop would then hold
+    /// the gate and the presenter for the life of the process. Returning on cancellation is the right
+    /// outcome there — permissions were refused, so sensing must not activate.
+    ///
+    /// What this does NOT do, deliberately: resume a wait that is *already* suspended when cancellation
+    /// arrives. `withObservationTracking` wakes only on the flag changing, and giving the continuation a
+    /// second wake path needs shared mutable state between the body and an `onCancel` handler — more
+    /// machinery than a launch-path helper earns, when nothing in the app cancels this task today. The
+    /// guard is here so a caller that does cancel (an app-quit path, a test) gets a clean exit instead
+    /// of an unkillable task.
+    @MainActor
+    private static func waitUntilReady(_ gate: LaunchGate) async {
+        while !gate.permissionsReady, !Task.isCancelled {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let once = ResumeOnce(continuation)
+                withObservationTracking { _ = gate.permissionsReady } onChange: { once.resume(()) }
+                // Cancelled before the tracking armed: resume now, or this wait would never be woken.
+                if Task.isCancelled { once.resume(()) }
+            }
         }
     }
 
@@ -518,8 +569,9 @@ struct TranscriberApp: App {
                 MenuView(
                     appState: appState,
                     coordinator: coordinator,
+                    launcher: launcher,
+                    presenter: meetingPresenter,
                     configManager: configManager,
-                    calendarService: calendarService,
                     updater: updaterController.updater,
                     permissionManager: launchGate.permissionManager
                 )

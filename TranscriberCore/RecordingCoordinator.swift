@@ -442,7 +442,16 @@ public final class RecordingCoordinator {
 
     // MARK: - Recording lifecycle
 
-    public func startRecording(sessionName: String, microphoneDeviceId: String?) async {
+    /// Returns whether THIS call started a recording: false when it was refused (not idle, a start already
+    /// in flight, a pre-flight refusal) or failed. Meeting sensing's one-click start reports it (#118).
+    @discardableResult
+    public func startRecording(sessionName: String, microphoneDeviceId: String?) async -> Bool {
+        let wasIdle = appState.isIdle && !startRunning
+        await performStart(sessionName: sessionName, microphoneDeviceId: microphoneDeviceId)
+        return wasIdle && appState.isRecording
+    }
+
+    private func performStart(sessionName: String, microphoneDeviceId: String?) async {
         startAnnounced = false   // taken over from here
         // One start at a time: the phase is still `.idle` while the first awaits the helper, so the
         // isIdle guard below alone let a second start through (L round 7). The loser changes nothing.

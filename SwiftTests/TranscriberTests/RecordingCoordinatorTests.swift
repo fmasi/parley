@@ -626,6 +626,30 @@ final class HungStep: @unchecked Sendable {
 
 // MARK: - Lifecycle orchestration (fake capture client)
 
+/// A one-shot latch: `wait()` suspends until `open()`; `untilWaiterArrives()` resumes once someone waits.
+private actor Latch {
+    private var opened = false
+    private var waiterArrived = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var arrival: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        waiterArrived = true
+        arrival?.resume(); arrival = nil
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func open() {
+        opened = true
+        waiters.forEach { $0.resume() }; waiters = []
+    }
+    func untilWaiterArrives() async {
+        if waiterArrived { return }
+        await withCheckedContinuation { arrival = $0 }
+    }
+}
+
+
 @MainActor
 @Suite struct RecordingCoordinatorLifecycleTests {
     @Test func startRecordingFailureCleansUpSentinelAndNotifies() async throws {
@@ -1336,6 +1360,41 @@ final class HungStep: @unchecked Sendable {
         #expect(h.client.startCalls.count == 1)
         #expect(RecordingSentinel.read(directory: h.tmp)?.sessionName == "a")
         #expect(!h.coordinator.isStartInFlight)
+    }
+
+    /// #118: `startRecording` reports whether THIS call started a recording (the one-click start needs it).
+    @Test func startRecordingReportsWhetherItStarted() async throws {
+        let h = try Harness()
+        h.config.update {
+            $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path
+            $0.engine = .fluidAudio
+        }
+        defer {
+            h.runner.stopChunkRotation()
+            h.runner.teardownChunkedPipeline()
+        }
+        let latch = Latch()
+        h.client.onStartAsync = { await latch.wait() }
+
+        async let first = h.coordinator.startRecording(sessionName: "A", microphoneDeviceId: nil)
+        await latch.untilWaiterArrives()                       // `first` is parked inside the helper start
+        #expect(h.coordinator.isStartInFlight)
+        let second = await h.coordinator.startRecording(sessionName: "B", microphoneDeviceId: nil)
+        #expect(second == false, "a second start must be refused while one is in flight")
+        await latch.open()
+        #expect(await first == true)
+        #expect(h.client.startCalls.count == 1)
+        #expect(h.appState.isRecording)
+    }
+
+    @Test func startIsRefusedUnlessIdle() async throws {
+        let h = try Harness()
+        h.appState.phase = .transcribing(progress: "Transcribing…")
+        #expect(await h.coordinator.startRecording(sessionName: "A", microphoneDeviceId: nil) == false)
+        #expect(h.client.startCalls.isEmpty)
+        h.appState.phase = .recording(since: Date())
+        #expect(await h.coordinator.startRecording(sessionName: "A", microphoneDeviceId: nil) == false)
+        #expect(h.client.startCalls.isEmpty)
     }
 
     /// L8: any failure after a successful helper start runs a bounded stop before reporting.

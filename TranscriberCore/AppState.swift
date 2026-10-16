@@ -2,6 +2,22 @@ import Foundation
 import Observation
 import os
 
+/// A meeting the sensor noticed and the user has not answered yet. Drives the menu-bar icon and the
+/// in-menu banner — the backup surfaces behind the island (#118).
+public struct DetectedMeeting: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        /// "Zoom call in progress" + Record.
+        case start
+        /// The user chose Record while transcribing; starts when the phase becomes idle.
+        case queued
+        /// "Zoom released the microphone" + Stop.
+        case stop
+    }
+    public let app: MeetingApp
+    public let kind: Kind
+    public init(app: MeetingApp, kind: Kind) { self.app = app; self.kind = kind }
+}
+
 @MainActor
 @Observable
 public final class AppState {
@@ -28,6 +44,8 @@ public final class AppState {
     /// Non-nil when recording failed unrecoverably (e.g. XPC crash with failed retry).
     /// Shown as a critical alert in the menu. Stays until user explicitly dismisses.
     public var criticalError: String?
+    /// Non-nil while a meeting-sensing offer is standing (start, queued, or stop).
+    public var detectedMeeting: DetectedMeeting?
     /// Sticky alarms (§6). Helper-owned kinds mirror the helper's snapshot; app-owned kinds are
     /// raised here. Nothing benign can overwrite them; `interruptionWarning` stays the transient slot.
     /// A single past-tense banner is exactly how #220 went unnoticed for 51 minutes.
@@ -126,8 +144,11 @@ public final class AppState {
         if criticalError != nil { return "exclamationmark.triangle.fill" }
         if errorMessage != nil { return "exclamationmark.triangle" }
         switch phase {
-        // Only kinds that outlive a recording can still be active while idle.
-        case .idle: return alarms.isEmpty ? "mic" : "exclamationmark.triangle"
+        // Only kinds that outlive a recording can still be active while idle. An alarm outranks a
+        // standing meeting offer.
+        case .idle:
+            if !alarms.isEmpty { return "exclamationmark.triangle" }
+            return detectedMeeting != nil ? "mic.badge.plus" : "mic"
         case .recording:
             if !alarms.isEmpty || interruptionWarning != nil { return "exclamationmark.bubble" }
             return "microphone.and.signal.meter.fill"

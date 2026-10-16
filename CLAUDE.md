@@ -24,7 +24,11 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Services/CalendarService.swift` -- EventKit lookup for current meeting title
 - `TranscriberApp/Services/CLIHandler.swift` -- CLI entry point dispatching parsed commands (transcribe, rename, rename-gui, summarize, download-models) to their handlers
 - `TranscriberApp/Services/CLIRename.swift` -- interactive CLI speaker rename: prompts per speaker and plays samples; collection + rename application live in TranscriptRenamer (TranscriberCore)
+- `TranscriberApp/Services/MeetingIslandController.swift` -- top-centre non-activating NSPanel hosting the island (#118): created on the first offer, released on withdraw, never becomes key so the call app keeps focus
+- `TranscriberApp/Services/MeetingPromptPresenter.swift` -- turns `MeetingSenseEngine` actions into the island / menu-bar icon / in-menu banner and routes the user's answers back (#118); owns the sensor, the engine state and the two observation loops (phase, `meeting_sensing` mode); queues a start chosen while transcribing. Never starts or stops a recording without a click
+- `TranscriberApp/Services/MeetingSensor.swift` -- meeting sensing (#118): Core Audio HAL wake listeners (input devices + process list + watched processes) -> 250 ms coalesced scan -> `CaptureSnapshot` of capturing bundle IDs; private serial queue, no polling, no repeating timer
 - `TranscriberApp/Services/MicSwitchWindowController.swift` -- opens mic switch dialog as floating NSPanel during recording
+- `TranscriberApp/Services/RecordingLauncher.swift` -- the two ways a recording starts (naming panel / one-click quick start), hoisted out of MenuView (#118); owns the remembered mic pick, falling back to the last mic saved in Settings
 - `TranscriberApp/Services/RenameWindowController.swift` -- opens speaker rename dialog as NSPanel; one off-main parse of the transcript gives the dialog its speaker rows, the saved channel names (#207) and the echo findings (`EchoNotice.Findings`, #244)
 - `TranscriberApp/Services/SessionNameWindowController.swift` -- opens session naming dialog as NSPanel
 - `TranscriberApp/Services/SetupWindowController.swift` -- opens permission setup window as NSWindow at launch
@@ -46,6 +50,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberApp/Views/SessionNameDialog.swift` -- session naming prompt before recording (includes mic picker)
 - `TranscriberApp/Views/MicrophonePicker.swift` -- mic device dropdown + live level meter (used in SessionNameDialog)
 - `TranscriberApp/Views/MicSwitchDialog.swift` -- mic device picker for switching microphone mid-recording
+- `TranscriberApp/Views/MeetingIslandView.swift` -- the island's pill: icon, title + subtitle, one primary button, chevron menu; collapses to a compact dot + app name after 20 s
 
 ### XPC Audio Capture Service (AudioCaptureHelperXPC target)
 - `AudioCaptureHelper/XPC/AudioCaptureService.swift` -- implements AudioCaptureProtocol; drives system-audio capture via the Core Audio tap (default) or ScreenCaptureKit (legacy), plus mic capture; owns the helper's alarm registry (`captureStatus` pull + `captureAlarmsChanged` push under an ordered `HelperSessionId`), the capture-session claim (`CaptureLifecycle`), the tap healer, the mic heal policy, write-progress checks and per-track coverage
@@ -84,6 +89,11 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SpeakerCountEnforcer.swift` -- makes a user-stated speaker count binding: merges the smallest clusters into their nearest surviving cluster (cosine over the result's embeddings, duration as fallback) until exactly N remain (#201); the diarizer's forced count is a target, not a ceiling. Clusters passed in `keeping` (echo clusters, #243) are never merged away, never merged into and not counted
 - `TranscriberCore/DiarizationProvider.swift` -- protocol for speaker diarization + DiarizedSegment model; `DiarizerThrow.isTooLittleSpeech` tells FluidAudio's "too little speech" throw (informational) from a real failure
 - `TranscriberCore/CalendarEventPicker.swift` -- pure logic: filter all-day events, pick most recent by start time
+- `TranscriberCore/MeetingApps.swift` -- meeting sensing (#118): the reviewable classification table mapping a bundle ID (including helper processes) to a `MeetingApp` family; Parley's own prefix is never classified and FaceTime is deliberately absent. `supportedDisplayNames` feeds the Settings disclosure, so the copy cannot drift from the table
+- `TranscriberCore/MeetingSenseEngine.swift` -- pure meeting-sensing engine: `step(state, input:mode:now:) -> (state, actions)`; start/stop offers, the watched set, the 30 s release debounce, per-episode suppression and the 5 min expansion cooldown. No Core Audio, no timers, no clock of its own
+- `TranscriberCore/MeetingOfferPresentation.swift` -- the pure halves of the offer UI: the offer copy (incl. the first-ever disclosure subtitle), `MeetingDisclosure` (shown once, ever) and `MeetingQueuedStart.decide` (never start a recording for a call that already ended)
+- `TranscriberCore/MeetingIslandPlacement.swift` -- island geometry (panel/pill sizes, top-centre placement below the menu bar) + `MeetingIslandCollapse`, the 20 s collapse loop with an injected sleep
+- `TranscriberCore/ListenerReconcile.swift` -- pure set diff deciding which HAL objects `MeetingSensor` should hold listeners on, and which process objects belong to a watched app
 - `TranscriberCore/SessionNameSuggestionPolicy.swift` -- pure decision: whether a late-arriving calendar title should replace the current session-name field value (#197)
 - `TranscriberCore/WavFileWriter.swift` -- WAV file writing with deferred sample rate/channel count, Float32->Int16 conversion + direct Int16 passthrough, 0.5s periodic sync (timed for `IOCycleStats`; `debug_skip_wav_sync` leaves out the `fsync` only, #247); throwing `FileHandle` writes are caught and surfaced as a write-failure anomaly instead of crashing the helper (#196)
 - `TranscriberCore/ExactZeroRunMonitor.swift` -- pure detector: fires after a sustained run of exact-zero mic samples (hardware-muted mic, e.g. lid closed on the built-in mic) (#193)
@@ -190,7 +200,6 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SpeechAnalyzerLocale.swift` -- locale resolution and the errors of the SpeechAnalyzer engine, kept apart from the macOS 26-only engine so it is pure, testable logic
 - `TranscriberCore/ModelManifest.swift` -- snapshot of a downloaded model: Hugging Face commit, download time, SHA-256 per file; stored under `model-manifests/` in the data directory
 - `TranscriberCore/ModelManifestService.swift` -- records and verifies a model's manifest (local only); `checkForUpdate` is the one network call and is opt-in (`model_update_check_enabled`)
-- `TranscriberCore/MeetingSenseDecider.swift` -- pure decision for meeting sensing (prompt only, never auto-record); tested, not referenced by the app or the helper yet
 
 ## Audio Capture Architecture (critical knowledge)
 - Swift captures TWO WAV files: system audio + microphone (separate streams)
@@ -218,7 +227,7 @@ bash scripts/swift-test.sh            # one suite: bash scripts/swift-test.sh <S
 # CommandLineTools -X flags. `just test` adds a canary. Never `CFFIXED_USER_HOME="$(…)" swift test` on one line: a
 # failed command leaves it empty, which means the REAL home, where a test with Config.default records into, and runs
 # the storage limit over, ~/Documents/Recordings (#313). The test bundle refuses to start there (SwiftTests/TestHomeGuard).
-# 2711 tests across 291 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
+# 2771 tests across 299 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest. Development uses Xcode 27; CI's toolchain is in AGENTS.md ("CI toolchain").
 # Test path: SwiftTests/TranscriberTests/ (the name dates from a Python tests/ directory, since removed)
 ```
