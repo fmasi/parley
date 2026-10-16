@@ -200,7 +200,6 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/SpeechAnalyzerLocale.swift` -- locale resolution and the errors of the SpeechAnalyzer engine, kept apart from the macOS 26-only engine so it is pure, testable logic
 - `TranscriberCore/ModelManifest.swift` -- snapshot of a downloaded model: Hugging Face commit, download time, SHA-256 per file; stored under `model-manifests/` in the data directory
 - `TranscriberCore/ModelManifestService.swift` -- records and verifies a model's manifest (local only); `checkForUpdate` is the one network call and is opt-in (`model_update_check_enabled`)
-- `TranscriberCore/MeetingSenseDecider.swift` -- pure decision for meeting sensing (prompt only, never auto-record); tested, not referenced by the app or the helper yet
 
 ## Audio Capture Architecture (critical knowledge)
 - Swift captures TWO WAV files: system audio + microphone (separate streams)

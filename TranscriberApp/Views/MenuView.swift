@@ -373,6 +373,7 @@ struct MenuView: View {
                 }
                 .controlSize(.small)
                 .tint(.red)
+                .disabled(coordinator.isStartInFlight)
             }
         }
         .padding(10)

@@ -75,6 +75,10 @@ final class RecordingLauncher {
         // this user is on" is exactly what an airgapped product must not write into the unified log in
         // the clear (gotcha #56). `started` stays public — it is what triage needs.
         let started = await coordinator.startRecording(sessionName: name, microphoneDeviceId: selectedMicId)
+        // After the recording is up (never gating it), as on the naming-panel path: a missing permission is
+        // fixed at the start of the meeting, not after it (#220). Matters most here — sensing is active
+        // even while a permission is still missing.
+        if started { await PermissionRepairWindowController.shared.verify(trigger: .recordStart) }
         Logger.state.info("""
             Quick start from meeting sensing — \(app.displayName, privacy: .private), \
             started: \(started, privacy: .public)

@@ -96,12 +96,17 @@ final class MeetingPromptPresenter {
         }
         // Decide before tearing the island down: a start the coordinator would refuse must leave the
         // offer standing rather than hide the island and leave a banner button that does nothing.
-        guard appState.isIdle else {
-            Logger.state.info("Record chosen while neither idle nor transcribing — ignoring")
+        // Main's own Record control is disabled while a start is in flight (a relaunch probe or a pending
+        // retry settling the helper counts); the island and the banner follow the same rule.
+        guard appState.isIdle, !coordinator.isStartInFlight else {
+            Logger.state.info("Record chosen while neither idle nor transcribing, or a start is in flight — ignoring")
             return
         }
         island.hide()
         let title = calendarTitle
+        // In flight from THIS turn: a crash-protection hand-over must never see the gap before the Task runs
+        // (L round 7). `startRecording` takes it over.
+        coordinator.announceStart()
         Task { [launcher] in
             let started = await launcher.quickStart(app: app, calendarTitle: title)
             // The only refusal left is the narrow window where a start is in flight with the phase
@@ -264,6 +269,7 @@ final class MeetingPromptPresenter {
     /// the rule itself is `MeetingQueuedStart`, so "never start a recording for a call that already
     /// ended" is pinned by tests rather than by this wiring.
     private func fireQueuedStartIfIdle() {
+        guard !coordinator.isStartInFlight else { return }   // a later phase flip looks again
         switch MeetingQueuedStart.decide(
             queued: queuedStart, isIdle: appState.isIdle, capturing: Set(state.capturing.keys)
         ) {
@@ -276,6 +282,7 @@ final class MeetingPromptPresenter {
         case .start(let app):
             queuedStart = nil
             let title = calendarTitle
+            coordinator.announceStart()
             Task { [launcher, appState] in
                 let started = await launcher.quickStart(app: app, calendarTitle: title)
                 guard !started else { return }
