@@ -23,8 +23,8 @@ import Testing
         return a
     }
 
-    private func drift(_ t: TimeInterval) -> [CaptureEvent] {
-        [event(t, .rateDrift, .anomaly, ["source": "system-tap", "declared": "48000", "actual": "44042", "onset_within_seconds": "3.0"]),
+    private func drift(_ t: TimeInterval, onsetWithin: String = "3.0") -> [CaptureEvent] {
+        [event(t, .rateDrift, .anomaly, ["source": "system-tap", "declared": "48000", "actual": "44042", "onset_within_seconds": onsetWithin]),
          event(t + 0.01, .restartInPlace, .warning, ["source": "system-tap", "reason": "rate drift remediation", "attempt": "1"])]
     }
 
@@ -461,18 +461,68 @@ import Testing
         #expect(unknown.drift?["after_last_speech"] == nil && unknown.line?.hasPrefix(driftLine + "\n") == true)
     }
 
-    /// A drift healed by its rebuild is announced as #311 does, wherever it sits; and it keeps a later, quiet-shaped
-    /// one announced with it.
-    @Test func onlyASideWhoseEveryDriftIsStopBoundedAfterSpeechIsQuiet() throws {
-        let healedAfterSpeech = try read(
-            [event(0, .captureStart)] + drift(3955) + [event(3956, .firstFrames, .info, ["track": "system"]),
-                                                       event(3960, .captureStop, .info, coverage().asDetail(prefix: "remote"))],
+    /// A drift healed by its rebuild after the remote side's last word (the headset changing rate at hang-up, with the
+    /// user still recording) touched no speech either: recorded, not announced.
+    @Test func aHealedDriftAfterTheLastRemoteWordIsRecordedNotAnnounced() throws {
+        let r = try read(
+            [event(0, .captureStart), firstFrames(0.5, "mic"), firstFrames(0.6, "system")] + drift(3955)
+                + [firstFrames(3956, "system"), event(3960, .captureStop, .info, coverage().asDetail(prefix: "remote"))],
             segments: [remote(endingAt: 3940)])
-        #expect(healedAfterSpeech.drift?["healed"] as? Bool == true && healedAfterSpeech.drift?["after_last_speech"] == nil)
-        #expect(healedAfterSpeech.line
-                == "Remote audio: captured; up to 4 s recorded at the wrong rate before Parley recovered (1 capture anomaly recorded)")
-        #expect(healedAfterSpeech.title == "Transcription Complete — brief capture glitch")
+        #expect(r.drift?["healed"] as? Bool == true && r.drift?["after_last_speech"] as? Bool == true)
+        #expect(r.remote["status"] as? String == "degraded" && r.remote["content_anomaly_count"] as? Int == 1)
+        #expect(r.line == nil && r.banner == nil)
+        #expect(r.title == "Transcription Complete" && r.noticeAnomalies == 0)
+    }
 
+    /// A real call (2026-10-28): a drift over the remote side's last word, healed in a second, then a second one after
+    /// it, healed too — 8.1 s and 8.2 s, over the 15 s bound together. The second touched no speech, so it does not
+    /// count against the bound: degraded, and said, since the first did touch speech.
+    @Test func aHealedDriftAfterTheLastWordDoesNotCountAgainstTheBound() throws {
+        let r = try read(
+            [event(0, .captureStart), firstFrames(0.5, "mic"), firstFrames(0.6, "system")]
+                + drift(2166, onsetWithin: "7.1") + [firstFrames(2167, "system")]
+                + drift(2191, onsetWithin: "7.2") + [firstFrames(2192, "system"),
+                                                     event(2294, .captureStop, .info, coverage().asDetail(prefix: "remote"))],
+            segments: [remote(endingAt: 2159.7)])
+        let windows = r.remote["rate_drift"] as? [[String: Any]] ?? []
+        #expect(windows.map { $0["after_last_speech"] as? Bool } == [false, true])
+        #expect(r.remote["status"] as? String == "degraded")
+        #expect(r.line?.contains("recorded at the wrong rate before Parley recovered (2 capture anomalies recorded)") == true)
+        #expect(r.title == "Transcription Complete — brief capture glitch" && r.noticeAnomalies == 2)
+    }
+
+    /// The windows after the last word leave the sum only while they are within the bound themselves: more wrong-rate
+    /// audio than that may hold speech the wrong rate kept out of the transcript. One long window, or several short
+    /// ones (review round 1), stays compromised as before.
+    @Test func aLongDriftAfterTheLastWordStillCountsAgainstTheBound() throws {
+        let r = try read(
+            [event(0, .captureStart), firstFrames(0.5, "mic"), firstFrames(0.6, "system")] + drift(3955, onsetWithin: "16.0")
+                + [firstFrames(3956, "system"), event(3990, .captureStop, .info, coverage().asDetail(prefix: "remote"))],
+            segments: [remote(endingAt: 3900)])
+        #expect(r.drift?["after_last_speech"] as? Bool == true)
+        #expect(r.remote["status"] as? String == "compromised")
+        #expect(r.noticeAnomalies == 1)
+
+        // Three 8 s hang-up flaps after the last word, 24 s in all.
+        let flaps = try read(
+            [event(0, .captureStart), firstFrames(0.5, "mic"), firstFrames(0.6, "system")]
+                + [3920.0, 3940, 3960].flatMap { drift($0, onsetWithin: "7.0") + [firstFrames($0 + 1, "system")] }
+                + [event(3990, .captureStop, .info, coverage().asDetail(prefix: "remote"))],
+            segments: [remote(endingAt: 3900)])
+        let windows = flaps.remote["rate_drift"] as? [[String: Any]] ?? []
+        #expect(windows.count == 3 && windows.allSatisfy { $0["after_last_speech"] as? Bool == true })
+        #expect(flaps.remote["status"] as? String == "compromised" && flaps.noticeAnomalies == 3)
+        // Two of them, 16 s: over the bound too.
+        let two = try read(
+            [event(0, .captureStart), firstFrames(0.5, "mic"), firstFrames(0.6, "system")]
+                + [3920.0, 3940].flatMap { drift($0, onsetWithin: "7.0") + [firstFrames($0 + 1, "system")] }
+                + [event(3990, .captureStop, .info, coverage().asDetail(prefix: "remote"))],
+            segments: [remote(endingAt: 3900)])
+        #expect(two.remote["status"] as? String == "compromised")
+    }
+
+    /// A drift that touched speech keeps a later, quiet-shaped one announced with it.
+    @Test func onlyASideWhoseEveryDriftIsAfterSpeechIsQuiet() throws {
         // An earlier drift healed in 2 s (5 s with its onset), then the incident's: 8.3 s in all, still degraded.
         let both = try read(
             [event(0, .captureStart), firstFrames(0.5, "mic"), firstFrames(0.6, "system")] + drift(100) + [firstFrames(102, "system")] + drift(3955)
@@ -495,15 +545,20 @@ import Testing
         #expect(r.body.contains("1 capture anomaly recorded") && !r.body.contains("briefly affected"))
     }
 
-    /// The reader's rule, on the stamped dictionary: `degraded`, and every window ended at the Stop after the last speech.
+    /// The reader's rule, on the stamped dictionary: `degraded`, and every window, healed or ended at the Stop, after
+    /// the last speech.
     @Test func theQuietRuleNeedsEveryPart() {
         let quiet: [String: Any] = ["ended_by": "stop", "after_last_speech": true, "healed": false]
+        let healedQuiet: [String: Any] = ["healed": true, "after_last_speech": true]
         func side(_ status: String, _ windows: [[String: Any]]) -> [String: Any] { ["status": status, "rate_drift": windows] }
         #expect(RateDriftWindow.unannounced(inSide: side("degraded", [quiet])) == 1)
         #expect(RateDriftWindow.unannounced(inSide: side("compromised", [quiet])) == 0)
         #expect(RateDriftWindow.unannounced(inSide: side("healthy", [quiet])) == 0)
         #expect(RateDriftWindow.unannounced(inSide: side("degraded", [])) == 0)
-        #expect(RateDriftWindow.unannounced(inSide: side("degraded", [quiet, ["healed": true, "after_last_speech": true]])) == 0)
+        #expect(RateDriftWindow.unannounced(inSide: side("degraded", [quiet, healedQuiet])) == 2)
+        #expect(RateDriftWindow.unannounced(inSide: side("degraded", [healedQuiet, ["healed": true, "after_last_speech": false]])) == 0)
+        #expect(RateDriftWindow.unannounced(inSide: side("degraded", [healedQuiet, ["healed": true]])) == 0)
+        #expect(RateDriftWindow.unannounced(inSide: side("degraded", [["healed": false, "after_last_speech": true]])) == 0)
         #expect(RateDriftWindow.unannounced(inSide: side("degraded", [["ended_by": "stop", "after_last_speech": false]])) == 0)
         #expect(RateDriftWindow.unannounced(inSide: side("degraded", [["ended_by": "stop"]])) == 0)
         #expect(RateDriftWindow.unannounced(inSide: ["status": "degraded"]) == 0)
