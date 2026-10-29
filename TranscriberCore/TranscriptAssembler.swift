@@ -169,8 +169,10 @@ public enum TranscriptAssembler {
         ]
     }
 
-    /// Whether each drift the capture stop ended began after the remote side's last speech (#333 R5): such a drift
-    /// touched nothing anybody said, so it is recorded, not announced (`RateDriftWindow.unannounced`).
+    /// Whether each drift that ended — healed, or cut short by the Stop — began after the remote side's last speech
+    /// (#333 R5): such a drift touched nothing anybody said, so it is recorded, not announced
+    /// (`RateDriftWindow.unannounced`), and it leaves the bound's sum (`RateDriftWindow.healedWithinBound`), which can
+    /// lift the side from `compromised` to `degraded`, never further.
     ///
     /// Answered HERE because this is the one place that holds both the capture record and the transcript's segments,
     /// and it is stamped into the record (`rate_drift[].after_last_speech`) rather than worked out by each reader: the
@@ -184,7 +186,8 @@ public enum TranscriptAssembler {
     /// the record's own clock: it must start more than `afterSpeechMarginSeconds` + that latency after the last word.
     ///
     /// Fail closed — a window is left unanswered, and so announced as #311 does, unless all of this holds:
-    /// - it ended at the Stop (R4). A drift a rebuild healed is mid-call: audio at the right rate followed it.
+    /// - it ended: a rebuild healed it, or the Stop did (R4). A healed drift with no remote segment after it means the
+    ///   other side said nothing more: the audio after the heal is at the right rate, and would have been transcribed.
     /// - the record is one helper session: one `captureStart`, one tallied helper (a helper that crashed before its
     ///   start was drained leaves a stand-in stop and no start), no recovery and no gap. Past any of those the two
     ///   clocks are apart by more than one latency. A `reconstructed` record is out too: its capture facts are the
@@ -194,7 +197,7 @@ public enum TranscriptAssembler {
     ///   wrong rate may be why it was filtered. A segment with no usable time could be anywhere.
     static func answeringAfterLastSpeech(_ provenance: CaptureProvenance, segments: [LabeledSegment],
                                          captureGaps: [CaptureGap]) -> CaptureProvenance {
-        guard var windows = provenance.remoteRateDrift, windows.contains(where: { $0.stoppedAfterSeconds != nil }),
+        guard var windows = provenance.remoteRateDrift, windows.contains(where: { $0.affectedSeconds != nil }),
               provenance.captureStarts == 1, provenance.helperSessions == 1, !provenance.recovered, !provenance.reconstructed,
               captureGaps.isEmpty,
               let latency = provenance.firstFramesAfterStartSeconds, latency.isFinite, latency >= 0
@@ -202,12 +205,20 @@ public enum TranscriptAssembler {
         let ends = segments.filter { $0.source != "local" }.map(\.end)
         guard ends.allSatisfy(\.isFinite), let lastSpeech = ends.max() else { return provenance }
         let margin = RateDriftWindow.afterSpeechMarginSeconds + latency
-        for i in windows.indices where windows[i].stoppedAfterSeconds != nil {
+        for i in windows.indices where windows[i].affectedSeconds != nil {
             guard let start = windows[i].startOffsetSeconds else { continue }
             windows[i].afterLastSpeech = start > lastSpeech + margin
         }
         var answered = provenance
         answered.remoteRateDrift = windows
+        // A drift after the last speech leaves the bound's sum: the side may now be `degraded`. Only ever lifted from
+        // `compromised` to `degraded`, recomputed from the same coverage and count the stamp was made from.
+        if provenance.remoteStatus == TrackAccounting.Status.compromised.rawValue,
+           let coverage = provenance.remoteCoverage, let anomalies = provenance.remoteContentAnomalyCount,
+           coverage.status(isTap: true, contentAnomalies: anomalies,
+                           healedDrifts: RateDriftWindow.healedWithinBound(windows)) == .degraded {
+            answered.remoteStatus = TrackAccounting.Status.degraded.rawValue
+        }
         return answered
     }
 

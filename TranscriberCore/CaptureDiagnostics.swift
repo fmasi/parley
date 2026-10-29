@@ -278,7 +278,9 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     /// `TrackAccounting.Status.rawValue` for each side, computed once at `makeProvenance` time from
     /// the coverage plus that side's content anomalies. `nil` exactly when the matching coverage is.
     public let localStatus: String?
-    public let remoteStatus: String?
+    /// `var`: `TranscriptAssembler` may lift `compromised` to `degraded` once it knows which drifts came after the side's
+    /// last speech (`RateDriftWindow.healedWithinBound`).
+    public var remoteStatus: String?
     /// How many ring events were evicted before this stamp was built (#101/L14) — the ring's own
     /// admission that it does not hold the session's whole story. Always emitted (default 0).
     public let eventsDropped: Int
@@ -294,7 +296,7 @@ public struct CaptureProvenance: Codable, Equatable, Sendable {
     public let remoteContentAnomalyCount: Int?
     /// Each rate drift on the remote side, in order (#308): where it sits, how long audio was at the wrong rate, and
     /// whether it healed. nil exactly when the remote coverage is (and in provenance written before this field).
-    /// `var`: `TranscriptAssembler` answers each stop-bounded window's `afterLastSpeech` (#333 R5).
+    /// `var`: `TranscriptAssembler` answers each ended window's `afterLastSpeech` (#333 R5).
     public var remoteRateDrift: [RateDriftWindow]?
     /// How many `captureStart` the record holds (#333 R5). Drift offsets (wall-clock from the first start) can be
     /// compared with transcript times only within one helper session: one start AND one `helperSessions`. nil in
@@ -692,8 +694,11 @@ public struct CaptureDiagnostics: Sendable {
         let stops = helperStops.sorted()
         return drifts.enumerated().map { i, drift in
             let next = i + 1 < drifts.count ? drifts[i + 1].at : .distantFuture
+            // `>=`, not `>`: the helper's events reach the app with whole-second times (`CaptureEvent`'s ISO 8601), so a
+            // rebuild that delivered within the second it started reads as simultaneous (a real call, 2026-10-21). An
+            // earlier generation's first frames can't share that second: a drift is judged over seconds of delivery.
             let healedAt = remediations.first { $0 >= drift.at && $0 < next }
-                .flatMap { rebuild in firsts.first { $0 > rebuild } }
+                .flatMap { rebuild in firsts.first { $0 >= rebuild } }
             let stoppedAt = healedAt != nil ? nil : stops.first { $0 >= drift.at }.flatMap { stop in
                 stop < next && !captureStarts.contains { $0 > drift.at && $0 < stop } ? stop : nil
             }

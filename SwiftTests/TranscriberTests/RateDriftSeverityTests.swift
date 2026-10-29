@@ -189,6 +189,19 @@ import Testing
         #expect(provenance(events).remoteStatus == "degraded")
     }
 
+    /// A real call (2026-10-21): the drift, its remediation, the rebuild and its first frames all within one second.
+    /// The helper's events reach the app with whole-second times, so the four read as simultaneous. The heal was
+    /// missed, and the Stop 24 minutes later bounded the drift: 1452.6 s "at the wrong rate", the side compromised,
+    /// with every later remote word transcribed.
+    @Test func aHealInTheSameWholeSecondAsItsRebuildHeals() throws {
+        let p = provenance([start(), drift(1781, onsetWithin: "7.6"), remediation(1781), rebuildDone(1781), firstFrames(1781),
+                            stop(3226, remote: coverage(expected: 3226, delivered: 3226))])
+        #expect(p.remoteStatus == "degraded")
+        let entry = try #require(driftEntries(p).first)
+        #expect(entry["healed"] as? Bool == true && entry["healed_after_seconds"] as? Double == 0)
+        #expect(entry["affected_seconds"] as? Double == 7.6 && entry["ended_by"] == nil)
+    }
+
     /// Merges present events in any order (a drain split across two pulls, the live log at finalize).
     @Test func pairingDoesNotDependOnTheOrderEventsArrive() {
         var d = CaptureDiagnostics()
