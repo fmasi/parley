@@ -52,14 +52,13 @@ public final class LocalVQEEchoCanceller {
         }
         modelSHA256 = weightsSHA
 
+        window = try Self.floats(assetsDirectory.appendingPathComponent(Self.windowName))
+        guard window.count == Self.fftSize else { throw Failure.assetMissing(Self.windowName) }
         let controller = try Self.floats(assetsDirectory.appendingPathComponent(Self.controllerName))
         guard controller.count == localvqe_daf_weight_count(),
               let daf = controller.withUnsafeBufferPointer({ localvqe_daf_create($0.baseAddress, $0.count) })
         else { throw Failure.controllerRejected }
         self.daf = daf
-
-        window = try Self.floats(assetsDirectory.appendingPathComponent(Self.windowName))
-        guard window.count == Self.fftSize else { localvqe_daf_destroy(daf); throw Failure.assetMissing(Self.windowName) }
 
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuOnly  // same speed as the Neural Engine here, and the same answer on every Mac

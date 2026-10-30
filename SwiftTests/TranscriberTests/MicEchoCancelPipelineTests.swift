@@ -404,6 +404,8 @@ private struct ThrowingCanceller: MicEchoCancelling {
     }
 
     /// One stereo archive (mic 440 Hz left, system 1760 Hz right) and a transcript over it.
+    func makeRecordingForFallback() async throws -> (transcript: URL, cleanup: () -> Void) { try await makeRecording(cancelled: true) }
+
     private func makeRecording(cancelled: Bool) async throws -> (transcript: URL, cleanup: () -> Void) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-aec-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -453,5 +455,22 @@ private struct ThrowingCanceller: MicEchoCancelling {
         _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1,
                                                      diarizer: RecordingDiarizer(), echoCanceller: canceller)
         #expect(canceller.calls.isEmpty)
+    }
+}
+
+extension RediarizeEchoCancelTests {
+    struct ThrowingSampleCanceller: MicEchoSampleCancelling {
+        func cancelEcho(microphone: [Float], reference: [Float]) throws -> (samples: [Float], framesReverted: Int) {
+            throw LocalVQEEchoCanceller.Failure.assetChecksumMismatch("daf_controller.f32")
+        }
+    }
+
+    /// A canceller that cannot run (a damaged bundle) leaves the raw mic, as the pipeline does; the re-detect completes.
+    @Test func aFailingCancellerFallsBackToTheRawMic() async throws {
+        let (t, cleanup) = try await makeRecordingForFallback(); defer { cleanup() }
+        let diarizer = RecordingDiarizer()
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "local", speakerCount: 1, diarizer: diarizer,
+                                                     echoCanceller: ThrowingSampleCanceller())
+        #expect(!diarizer.audio.isEmpty)
     }
 }

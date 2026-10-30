@@ -806,8 +806,14 @@ public enum TranscriptRediarizer {
                             stereoAac: chunk, outputDirectory: scratchDirectory, channel: .remote)
                         defer { try? FileManager.default.removeItem(at: reference) }
                         let far = try AudioDecode.mono16kHzFloat(contentsOf: reference)
-                        decodedChunk = try await ChunkProcessor.offThePool(qos: .userInitiated) {
-                            try echoCanceller.cancelEcho(microphone: samples, reference: far).samples
+                        do {
+                            decodedChunk = try await ChunkProcessor.offThePool(qos: .userInitiated) {
+                                try echoCanceller.cancelEcho(microphone: samples, reference: far).samples
+                            }
+                        } catch {
+                            // As in the pipeline: a canceller that cannot run leaves the raw mic, never a failed re-detect.
+                            Logger.transcription.error("Re-detect: mic echo cancellation failed for chunk \(position + 1, privacy: .public), diarizing its raw mic: \(ChunkProcessor.echoCancelFailureDetail(error), privacy: .private)")
+                            decodedChunk = samples
                         }
                     } else {
                         decodedChunk = samples
