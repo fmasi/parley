@@ -48,7 +48,7 @@ public actor VadSpeechMap {
     public init() {}
 
     /// Analyze audio and return speech regions with probabilities.
-    /// Returns nil if VAD model is not cached (graceful degradation).
+    /// Returns nil if VAD model is not cached (graceful degradation), or if the file holds no samples.
     public func analyze(audioPath: URL) async throws -> [SpeechRegion]? {
         guard Self.isModelCached() else {
             Logger.transcription.debug("VAD model not cached — skipping speech map analysis")

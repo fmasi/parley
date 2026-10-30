@@ -1279,3 +1279,10 @@ speakers, not headphones) so the mic hears the far side.
 - [ ] **I-07 CLI.** `Parley transcribe -i <app recording>.m4a --split --echo-cancel` writes a transcript
   with `metadata.mic_echo_cancel`.
 
+## Pipeline memory (gotcha 98)
+
+- [ ] **P-01 Peak memory per chunk.** Record (or re-transcribe with the CLI) a call of an hour or more and
+  watch Parley's memory (Activity Monitor, or `ps -o rss= -p <pid>` every second). PASS: the peak while a
+  30-minute chunk is processed stays near 1 GB (it was about 1.6 GB before the VAD read change), and the
+  transcript's words and timings match the previous build's on the same audio.
+- [ ] **P-02 MacBook Air M1.** The same on the Air: note the peak and the seconds per chunk in the PR.

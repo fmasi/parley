@@ -180,10 +180,10 @@ Notes:
 
 **Model:** Silero VAD (bundled in FluidAudio, ~few MB).
 
-**Input:** WAV file URL. Output: `[SpeechRegion](start, end, probability)` or `nil` if model not cached (graceful degradation).
+**Input:** WAV file URL, read a block at a time to 16 kHz by `VadSpeechMap.samples16k` (never `VadManager.process(URL)`, which decodes the whole file at its own rate first: gotcha 98). Output: `[SpeechRegion](start, end, probability)` or `nil` if model not cached (graceful degradation).
 
 **Key code path:**
-- `TranscriberCore/VadSpeechMap.swift` — `analyze(audioPath:)` → `mgr.process()` → chunk duration from `VadManager.chunkSize / VadManager.sampleRate`
+- `TranscriberCore/VadSpeechMap.swift` — `analyze(audioPath:)` → `samples16k` → `mgr.process(samples)` → chunk duration from `VadManager.chunkSize / VadManager.sampleRate`
 
 ### Stage 6 — Speaker Assignment
 

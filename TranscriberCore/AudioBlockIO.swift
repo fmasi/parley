@@ -13,6 +13,7 @@ final class Mono16kReader {
     private let nativeBlock: AVAudioFrameCount
     private var fileDone = false
     private var finished = false
+    private var readAny = false
 
     init(url: URL) throws {
         file = try AVAudioFile(forReading: url)
@@ -74,8 +75,16 @@ final class Mono16kReader {
         guard remaining > 0,
               let raw = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: min(maxFrames, remaining))
         else { fileDone = true; return nil }
-        try file.read(into: raw)
+        do {
+            try file.read(into: raw)
+        } catch where file.framePosition > 0 || readAny {
+            // An AAC file's length is an estimate: reading its padded tail can throw after the real
+            // audio. Past the first read that is the end, as FluidAudio's own reader treats it.
+            fileDone = true
+            return nil
+        }
         guard raw.frameLength > 0 else { fileDone = true; return nil }
+        readAny = true
         let format = raw.format
         if format.channelCount == 1, format.commonFormat == .pcmFormatFloat32, !format.isInterleaved { return raw }
         let samples = try AudioDecode.monoFloat32(from: raw)
