@@ -1,8 +1,14 @@
 #!/bin/bash
-# Vendors LocalVQE's streaming engine (and the ggml it pins) into ThirdParty/CLocalVQE, the sources
-# SwiftPM builds as the CLocalVQE target (#342). Only what the CPU backend needs is copied: no Metal,
-# BLAS, CUDA, Vulkan, GTCRN, CLI or tests. Re-run it to move to another upstream commit, then
-# review the diff like any other code change.
+# Vendors the adaptive-filter front end of LocalVQE v1.4-AEC (daf_frontend.{h,cpp}) into
+# ThirdParty/CLocalVQE/upstream, the C++ half of Parley's mic echo canceller (#342). The neural half is
+# a Core ML model (ThirdParty/LocalVQE-CoreML, built by scripts/build-localvqe-coreml.py).
+#
+# Upstream compiles the filter inside its ggml engine; the filter itself is plain C++ (its weights are
+# loaded through ggml types only). The script drops the two ggml-typed loaders and keeps the
+# tensor-map loader, then checks no ggml reference is left. Parley's own C API is
+# ThirdParty/CLocalVQE/localvqe_daf.cpp, which this script never touches.
+#
+# Re-run it to move to another upstream commit, then review the diff like any other code change.
 #
 #   bash scripts/vendor-localvqe.sh [<localvqe-commit>]
 set -euo pipefail
@@ -11,57 +17,46 @@ LOCALVQE_REPO="https://github.com/localai-org/LocalVQE.git"
 LOCALVQE_COMMIT="${1:-7f61cd05095d42e56a135b303f5bb4d761da22b9}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEST="$ROOT/ThirdParty/CLocalVQE"
+DEST="$ROOT/ThirdParty/CLocalVQE/upstream"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 git clone --quiet "$LOCALVQE_REPO" "$WORK/LocalVQE"
 git -C "$WORK/LocalVQE" checkout --quiet "$LOCALVQE_COMMIT"
-git -C "$WORK/LocalVQE" submodule update --quiet --init --depth 1 ggml/vendor/ggml
 SRC="$WORK/LocalVQE/ggml"
-GGML="$SRC/vendor/ggml"
-GGML_COMMIT="$(git -C "$GGML" rev-parse HEAD)"
-
-# The patch upstream's CMake applies at configure time (ggml/patches/README.md): the fused GRU op.
-# Only the GTCRN backend uses it, but the engine is tested upstream against the patched tree.
-git -C "$GGML" apply --whitespace=nowarn "$SRC/patches/ggml-gru.patch"
 
 rm -rf "$DEST"
-mkdir -p "$DEST/include" "$DEST/localvqe" "$DEST/ggml/include" "$DEST/ggml/src/ggml-cpu/arch/arm" \
-         "$DEST/ggml/src/ggml-cpu/amx"
+mkdir -p "$DEST"
+/usr/bin/python3 -I - "$SRC" "$DEST" <<'EOF'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
 
-cp "$SRC/localvqe_api.h" "$DEST/include/"
-for f in common.cpp common.h localvqe_api.cpp localvqe_graph.cpp localvqe_graph.h model_hash.cpp \
-         model_hash.h daf_frontend.cpp daf_frontend.h noise_gate.h localvqe_model.h; do
-    cp "$SRC/$f" "$DEST/localvqe/"
-done
+h = open(f"{src}/daf_frontend.h").read()
+old_inc = '#include "localvqe_graph.h"\n#include <vector>'
+assert old_inc in h, "daf_frontend.h: include block changed upstream"
+h = h.replace(old_inc, "#include <cstdint>\n#include <map>\n#include <string>\n#include <vector>\n\n"
+              "// Parley: the one type the tensor-map loader needs, instead of upstream's ggml headers.\n"
+              "struct NpyArray { std::vector<float> data; std::vector<int64_t> shape; };")
+h, n = re.subn(r"/// Load daf\.\* tensors from the model\..*?bool daf_init_npy\(daf_frontend& fe, const localvqe_model& m\);\n",
+               "", h, flags=re.S)
+assert n == 1, "daf_frontend.h: ggml-typed loaders changed upstream"
 
-cp "$GGML"/include/*.h "$DEST/ggml/include/"
-cp "$GGML"/src/*.h "$DEST/ggml/src/"
-for f in ggml-alloc.c ggml-backend-dl.cpp ggml-backend-reg.cpp ggml-backend.cpp ggml-opt.cpp \
-         ggml-quants.c ggml-threading.cpp ggml.c ggml.cpp gguf.cpp; do
-    cp "$GGML/src/$f" "$DEST/ggml/src/"
-done
-cp "$GGML"/src/ggml-cpu/*.h "$DEST/ggml/src/ggml-cpu/"
-for f in binary-ops.cpp ggml-cpu.c ggml-cpu.cpp hbm.cpp ops.cpp quants.c repack.cpp traits.cpp \
-         unary-ops.cpp vec.cpp; do
-    cp "$GGML/src/ggml-cpu/$f" "$DEST/ggml/src/ggml-cpu/"
-done
-cp "$GGML"/src/ggml-cpu/arch/arm/* "$DEST/ggml/src/ggml-cpu/arch/arm/"
-cp "$GGML"/src/ggml-cpu/amx/*.h "$DEST/ggml/src/ggml-cpu/amx/"   # included unconditionally, x86-only code
+c = open(f"{src}/daf_frontend.cpp").read()
+c, n1 = re.subn(r"static bool fetchw\(const dvqe_graph_model& m.*?\n}\n\n", "", c, flags=re.S)
+c, n2 = re.subn(r"bool daf_init_npy\(daf_frontend& fe, const localvqe_model& m\) \{.*?\n}\n\n"
+                r"bool daf_init\(daf_frontend& fe, const dvqe_graph_model& m\) \{.*?\n}\n\n", "", c, flags=re.S)
+assert (n1, n2) == (1, 1), "daf_frontend.cpp: ggml-typed loaders changed upstream"
 
-# Parley's one change: never scan directories for backend dylibs. The CPU backend is linked in
-# statically, so the engine never dlopens anything (LOCALVQE_STATIC_BACKENDS, set in Package.swift).
-GRAPH="$DEST/localvqe/localvqe_graph.cpp"
-grep -q '^#ifdef __EMSCRIPTEN__$' "$GRAPH"
-sed -i '' 's/^#ifdef __EMSCRIPTEN__$/#if defined(__EMSCRIPTEN__) || defined(LOCALVQE_STATIC_BACKENDS)/' "$GRAPH"
+for name, text in (("daf_frontend.h", h), ("daf_frontend.cpp", c)):
+    assert not re.search(r"#include\s+\"(ggml|localvqe_graph|localvqe_model)|dvqe_graph_model|localvqe_model\b|ggml_\w+", text), f"{name} still references ggml"
+    open(f"{dst}/{name}", "w").write(text)
+EOF
 
 cp "$WORK/LocalVQE/LICENSE" "$DEST/LICENSE-LocalVQE"
-cp "$GGML/LICENSE" "$DEST/LICENSE-ggml"
 cat > "$DEST/VERSION" <<EOF
 LocalVQE $LOCALVQE_REPO @ $LOCALVQE_COMMIT (Apache-2.0)
-ggml (LocalVQE's submodule) @ $GGML_COMMIT, with ggml/patches/ggml-gru.patch applied (MIT)
-Parley change: localvqe_graph.cpp skips backend discovery under LOCALVQE_STATIC_BACKENDS
-Generated by scripts/vendor-localvqe.sh
+ggml/daf_frontend.{h,cpp}: the v1.4-AEC adaptive filter (gated GCC-PHAT prealignment, PBFDKF, the
+2,742-parameter controller). Parley change: the two ggml-typed weight loaders are removed; weights come
+through daf_init_tensors. Generated by scripts/vendor-localvqe.sh
 EOF
-echo "Vendored $(find "$DEST" -type f | wc -l | tr -d ' ') files into ThirdParty/CLocalVQE"
+echo "Vendored $(wc -l < "$DEST/daf_frontend.cpp" | tr -d ' ') lines of daf_frontend.cpp into ThirdParty/CLocalVQE/upstream"

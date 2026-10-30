@@ -1,0 +1,4 @@
+LocalVQE v1.4-AEC (https://github.com/localai-org/LocalVQE, Apache-2.0).
+Residual mask: Core ML export by soniqo (https://huggingface.co/aufklarer/LocalVQE-v1.4-AEC-200K-CoreML, Apache-2.0),
+rebuilt by Parley's scripts/build-localvqe-coreml.py with its seven states packed into one.
+Controller weights and analysis window: from LocalAI-io/LocalVQE/localvqe-v1.4-aec-200K-f32.gguf.

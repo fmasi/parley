@@ -12,7 +12,7 @@ differently (2026-10-29 call: 50 echo lines flagged, 52 still visible). The fix 
 in the audio, using the system track as the far-end reference, on a **derived copy** of the mic that
 only ASR and diarization read. The raw mic, the archive and the speaker samples stay untouched.
 
-## Why v1.4-AEC, and why the upstream engine
+## Why v1.4-AEC
 
 Measured 2026-10-29/30 on three real calls (French, desktop speakers, a webcam and a Bluetooth mic)
 and on FluidAudio's 200-clip English set. "Near-end cut" is the share of 100 ms frames inside
@@ -29,29 +29,32 @@ echo, so anything cut there is the user's words.
   the room, soft speech). v1.4-AEC removes only the echo and keeps voice, noise and room. That is the
   courtroom rule: echo left in can be seen and flagged; a word removed is silent loss.
 - FluidAudio ships v1.2 and v1.3 only. Its docs list v1.4-AEC as "not included" (GGUF-only, a C++
-  adaptive-filter front end). A feature request for it is drafted. Until it lands we use the
-  upstream engine (route 2); if FluidAudio adds it, we switch and delete the vendored code.
+  adaptive-filter front end). A feature request for it is drafted.
 - On weak echo it removes less than the joint models (call B: 15 echo-like lines left, against 3–4).
   `EchoDeduplicator` stays and still flags what's left.
 
-## Engine facts (measured)
+## Engine: LocalVQE's filter in C++, the residual mask on Core ML (decided 2026-10-30)
 
-- Upstream `localai-org/LocalVQE` at `7f61cd0`, ggml vendored at `c044a8e` with LocalVQE's
-  `ggml-gru.patch`. Apache-2.0 (LocalVQE) and MIT (ggml). Model
-  `localvqe-v1.4-aec-200K-f32.gguf`, 2.9 MB.
-- **It builds from source with SwiftPM**: 75 files (2.8 MB), CPU backend + Accelerate, no Metal and
-  no BLAS. A clean release build takes 10 s. Its output matches the upstream CLI to 61.7 dB SNR (the CLI
-  writes 16-bit). Prototype in the session scratchpad (`pkg/LocalVQEKit`).
-- **Threads**: auto is min(4, cores). On an idle M5 Pro, 25 min of audio takes 171 / 126 / 98 / 102 /
-  121 s on 1 / 2 / 4 / 6 / 8 threads, with identical output. 4 is the knee; more is slower. Measure on
-  the M1 Air; it may need min(4, performance cores).
-- **Speed against FluidAudio's Core ML models**, same call: v1.2 24 s (64× real time), v1.3 40 s (37×),
-  v1.4-AEC 98 s (15×). v1.4 runs on the CPU in 16 ms hops; about 2 extra minutes per 30-minute chunk.
-- **No splitting a chunk into parallel pieces.** The model gets better over a long continuous run.
-  Eight parallel pieces took 46 s instead of 100 s but left 4–6 echo lines instead of 0, even with a 30 s
-  overlap. One context per chunk, run in order.
-- Delay mic vs reference on call A: ~63 ms drifting to ~57 ms over 25 min. Alignment is inside the
-  model.
+- **Filter**: upstream `daf_frontend.{h,cpp}` (localai-org/LocalVQE @ `7f61cd0`, Apache-2.0), about 450
+  lines of plain C++, vendored by `scripts/vendor-localvqe.sh` into `ThirdParty/CLocalVQE/upstream` with
+  its two ggml-typed loaders removed. No ggml.
+- **Mask**: soniqo's Core ML export of the same model (HF `aufklarer/LocalVQE-v1.4-AEC-200K-CoreML` @
+  `10e904d`, built from our exact GGUF). It does not load on macOS 27.0.1: Core ML refuses any stateful
+  model with more than one state, or one state and more than one output (reproduced with a 4-element
+  toy model). `scripts/build-localvqe-coreml.py` rebuilds the same program, op for op with the same
+  fp16 weights, with its seven states packed into one, into `ThirdParty/LocalVQE-CoreML` (0.7 MB).
+  `model.mil` and the weights rebuild byte for byte; Core ML's `coremldata.bin` differs per compile.
+- **Speed** (25-min call, M5 Pro): 34 s (44× real time), against 98 s for the ggml engine on 4 threads
+  and 40 s for FluidAudio's v1.3. CPU, GPU and ANE take the same time; we run CPU-only, the same answer on
+  every Mac. Measure on the M1 Air.
+- **Against the ggml engine**: 21 dB SNR, not bit-identical. Ruled out: the filter (soniqo's port and
+  upstream's are bit-identical), the delay estimate, fp32 arithmetic, fp32 weights, the STFT (the
+  model's learned transform is the windowed DFT to 1e-4). Left: the export of the mask itself. Scored on
+  the three calls it removes the same echo (visible echo lines 0 / 15 / 15, ggml 0 / 15 / 12) and cuts
+  slightly more near-end speech where the far end is silent (0.4 / 0.2 / 0.8 %, ggml 0.0 / 0.1 / 0.3 %):
+  the frames the near-end guard reverts.
+- ggml timings, for the record (idle M5 Pro, 25 min): 1 / 2 / 4 / 6 / 8 threads = 171 / 126 / 98 / 102 /
+  121 s. Splitting a chunk into parallel pieces left echo behind; the Core ML path makes it moot.
 
 ## Design
 
@@ -76,30 +79,27 @@ echo, so anything cut there is the user's words.
    apply the same cancellation (same model, same guard) when the transcript says it was used, or
    speakers drift between the first pass and a re-detect.
 7. **CLI** `transcribe --split` gets `--echo-cancel` so the benchmark path matches the app.
-8. **Model**: bundled in the app (2.9 MB, Apache-2.0) and verified by SHA-256 at load. No download,
-   so the airgap rule holds trivially. `ModelManifest` records it.
-9. **Dynamic loading**: ggml's `ggml_backend_load_all*` scans directories for backend dylibs. Patch it
-   out (CPU backend registered statically) so the engine never `dlopen`s anything.
+8. **Model**: bundled in the app (`Contents/Resources/LocalVQE-CoreML`, 0.7 MB, Apache-2.0); every file
+   is checked against `MANIFEST.json` (SHA-256) at load. No download, so the airgap rule holds.
 
 ## Tasks
 
 | # | Task | Model, effort | Why |
 |---|---|---|---|
-| 1 | `scripts/vendor-localvqe.sh`: fetch the pinned commits, apply the patch, copy the 75 files to `ThirdParty/LocalVQE`, write `VERSION` + licences; `CLocalVQE` target in `Package.swift` | Sonnet, medium | Mechanical; the file list and defines are known from the prototype |
-| 2 | Patch out dynamic backend loading; check no `dlopen` is left | Opus, medium | Small, but it's a security property |
-| 3 | `MicEchoCanceller` (Swift wrapper over the C API: whole-chunk, thread cap, SHA check) + the pure `NearEndGuard` with tests (synthetic tone echo, near-end tone kept, guard reverts injected cuts) | Opus, high | New seam, numerics, tests must be red-first |
+| 1 | Vendor the filter (`scripts/vendor-localvqe.sh`), build the Core ML mask (`scripts/build-localvqe-coreml.py`), `CLocalVQE` target | done (Opus) | |
+| 2 | ~~Patch out ggml's dynamic backend loading~~ | dropped: no ggml left | |
+| 3 | `LocalVQEEchoCanceller` (filter + STFT + Core ML mask, manifest check), the pure `NearEndGuard`, the file-level `LocalVQEMicEchoCanceller` seam, with tests | done (Opus) | |
 | 4 | Wire into `ChunkProcessor` + config key + failure path + metadata + issue codes | Opus, high | Pipeline; touches the record |
 | 5 | `TranscriptRediarizer` + CLI flag | Sonnet, high | Follows 3–4's API |
-| 6 | Settings toggle + docs (CLAUDE.md map, parameters, pipeline, gotchas: 8-thread slowdown, no chunk splitting; README models + licences) | Sonnet, medium | Copy and docs |
+| 6 | Settings toggle + docs (CLAUDE.md map, parameters, pipeline, gotchas: macOS 27 multi-state Core ML models, coremldata.bin not reproducible; README models + licences) | Sonnet, medium | Copy and docs |
 | 7 | Review: code council over the diff, then `/ci-review` in rounds | Fable, high (reviewer ≠ builder) | Final review |
 | 8 | Device test on real speakerphone calls + a known-text test (one person reading a page, a video playing through the speakers, a second person across the room) | Owner + Haiku, low for scoring | Measurement in the PR |
 
-## Owner decisions before task 1
+## Owner decisions (2026-10-30)
 
-1. Vendor the sources into this repo (auditable, no binary; +2.8 MB of C/C++), or a separate package
-   repo? **Recommended: vendor, with the script.**
-2. Bundle the model in the app (recommended) or download it at Setup?
-3. Default `off` for the first release, with `auto` (speaker route only) after the device test?
+1. Vendor in this repo: yes. 2. Bundle the model in the app, no download and no opt-out yet: yes.
+3. Off for the first release; `auto` (speaker route only) after the device test: yes.
+4. The Core ML path rather than the ggml engine: yes.
 
 ## Not in scope
 

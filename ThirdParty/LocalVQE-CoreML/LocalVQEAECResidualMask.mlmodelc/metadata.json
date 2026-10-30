@@ -1,0 +1,100 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "shortDescription" : "LocalVQE v1.4-AEC residual echo mask (soniqo's Core ML export, states packed into one for macOS 27; Apache-2.0)",
+    "outputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 2 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[1, 2, 1, 256]",
+        "name" : "enhanced_spectrum",
+        "type" : "MultiArray"
+      }
+    ],
+    "storagePrecision" : "Float16",
+    "modelParameters" : [
+
+    ],
+    "specificationVersion" : 9,
+    "mlProgramOperationTypeHistogram" : {
+      "Ios18.expandDims" : 4,
+      "Ios18.softmax" : 1,
+      "Ios18.mul" : 141,
+      "Ios18.rsqrt" : 26,
+      "Ios18.batchNorm" : 29,
+      "Identity" : 1,
+      "Ios16.reduceMean" : 52,
+      "Ios18.readState" : 1,
+      "Ios18.add" : 85,
+      "Ios16.reduceSum" : 4,
+      "Ios18.writeState" : 1,
+      "Ios18.reshape" : 59,
+      "Pad" : 26,
+      "Ios18.inverse" : 2,
+      "Ios18.conv" : 32,
+      "Ios18.concat" : 37,
+      "Ios18.linear" : 2,
+      "Ios18.sub" : 63,
+      "Ios18.silu" : 23,
+      "Ios18.pow" : 2,
+      "Ios18.sqrt" : 2,
+      "Ios18.sliceByIndex" : 117
+    },
+    "computePrecision" : "Mixed (Float16, Float32, Int32)",
+    "isUpdatable" : "0",
+    "stateSchema" : [
+      {
+        "dataType" : "Float16",
+        "isOptional" : "0",
+        "formattedType" : "State (Float16 1 × 112704)",
+        "shortDescription" : "",
+        "shape" : "[1, 112704]",
+        "name" : "state_workaround",
+        "type" : "State"
+      }
+    ],
+    "availability" : {
+      "macOS" : "15.0",
+      "tvOS" : "18.0",
+      "visionOS" : "2.0",
+      "watchOS" : "11.0",
+      "iOS" : "18.0",
+      "macCatalyst" : "18.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "inputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 2 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[1, 2, 1, 256]",
+        "name" : "mic_spectrum",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 2 × 1 × 256)",
+        "shortDescription" : "",
+        "shape" : "[1, 2, 1, 256]",
+        "name" : "reference_spectrum",
+        "type" : "MultiArray"
+      }
+    ],
+    "userDefinedMetadata" : {
+      "com.github.apple.coremltools.version" : "9.0",
+      "com.github.apple.coremltools.source" : "milinternal",
+      "com.github.apple.coremltools.conversion_date" : "2026-10-30"
+    },
+    "generatedClassName" : "LocalVQEAECResidualMask",
+    "method" : "predict"
+  }
+]
