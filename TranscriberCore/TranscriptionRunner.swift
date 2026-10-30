@@ -115,7 +115,8 @@ public final class TranscriptionRunner {
         micAudio: URL?,
         outputDirectory: URL,
         config: Config,
-        provenance: CaptureProvenance? = nil
+        provenance: CaptureProvenance? = nil,
+        micEchoCancel: MicEchoCancelSetup = .off
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
@@ -158,6 +159,11 @@ public final class TranscriptionRunner {
         // so `reconcileRecoverySegments` can reconcile them into one global namespace below.
         var perSegmentRemoteDb: [[String: [Float]]] = []
         var perSegmentLocalDb: [[String: [Float]]] = []
+        // Mic echo cancellation (#342), per segment: the CLI's `--echo-cancel`. The cleaned copies are scratch.
+        var echoRecords: [MicEchoCancelRecord] = []
+        var echoFailures = 0
+        var echoScratch: [URL] = []
+        defer { for url in echoScratch { try? FileManager.default.removeItem(at: url) } }
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -191,8 +197,24 @@ public final class TranscriptionRunner {
                                                             key: micPath.path, seconds: folderReadSeconds, { FileManager.default.fileExists(atPath: micPath.path) })
                 else { throw FolderNotAnswering() }
                 if micThere {
+                    var micForASR = micPath
+                    if case .on(let canceller) = micEchoCancel {
+                        let cleaned = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("parley-mic-aec-\(UUID().uuidString).wav")
+                        do {
+                            echoRecords.append(try canceller.cancelEcho(micURL: micPath, systemURL: segmentPair.system, outputURL: cleaned))
+                            echoScratch.append(cleaned)
+                            micForASR = cleaned
+                        } catch {
+                            try? FileManager.default.removeItem(at: cleaned)
+                            echoFailures += 1
+                            Logger.transcription.error("Mic echo cancellation failed, the raw mic is used: \(ChunkProcessor.echoCancelFailureDetail(error), privacy: .private)")
+                        }
+                    } else if case .unavailable = micEchoCancel {
+                        echoFailures += 1
+                    }
                     let micResult = try await transcribeStream(
-                        audioPath: micPath,
+                        audioPath: micForASR,
                         fileSize: found.sizes[micPath.path] ?? 0,
                         source: "local",
                         transcriber: transcriber,
@@ -358,6 +380,7 @@ public final class TranscriptionRunner {
             dualStream: isDualStream,
             echoSegmentsFlagged: echoFlagged,
             echoClusters: echoClusters,
+            micEchoCancel: Self.micEchoCancelDictionary(records: echoRecords, failed: echoFailures),
             provenance: provenance,
             // No in-memory session start here (CLI / crash-recovery / single-file path), so
             // use the source audio's creation time as the recording-start stamp (#49).
@@ -862,8 +885,12 @@ public final class TranscriptionRunner {
     /// cancelled and failed, seconds processed, frames the near-end guard gave back, the engine and
     /// model. nil (the key left out) when it neither ran nor failed on any chunk: the setting was off.
     nonisolated static func micEchoCancelDictionary(chunks: [ProcessedChunk]) -> [String: Any]? {
-        let records = chunks.compactMap(\.micEchoCancel)
-        let failed = chunks.filter { $0.issues.contains { $0.code == .echoCancelFailed } }.count
+        micEchoCancelDictionary(records: chunks.compactMap(\.micEchoCancel),
+                                failed: chunks.filter { $0.issues.contains { $0.code == .echoCancelFailed } }.count)
+    }
+
+    /// The same, from the records and the failure count directly (the single-file path).
+    nonisolated static func micEchoCancelDictionary(records: [MicEchoCancelRecord], failed: Int) -> [String: Any]? {
         guard !records.isEmpty || failed > 0 else { return nil }
         var d: [String: Any] = [
             "chunks": records.count,

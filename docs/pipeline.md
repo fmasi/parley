@@ -35,6 +35,8 @@ Transcriber is a macOS menu bar app (macOS 15+, Apple Silicon) that records meet
            │  │ 1. ASR Transcription │   │
            │  │    system WAV → []TranscriptSegment
            │  │    mic WAV    → []TranscriptSegment
+           │  │    (mic_echo_cancel on: the mic is cleaned
+           │  │     against the system WAV first, see Stage 3a)
            │  └──────────┬───────────┘   │
            │             │               │
            │  ┌──────────▼───────────┐   │
@@ -140,6 +142,22 @@ Notes:
 - Model unloads after 60-minute idle timeout to reclaim memory.
 - ITN (`TextNormalizer`) converts spoken numbers to written form, e.g., "three hundred" → "300". Uses a native C library via `dlsym`; gracefully no-ops if unavailable.
 - Decimal-dot guard: does not split on `.` when next token starts with a digit (e.g., "1.5 million").
+
+### Stage 3a — Mic Echo Cancellation (optional, #342)
+
+**What it does:** With `mic_echo_cancel` = `"on"` (config.json only; default `"off"`), `ChunkProcessor.cancelMicEcho` runs alongside the system-audio ASR pass, after the system WAV is known and before the mic pass. It cancels the speaker echo in the chunk's mic WAV with the system WAV as the far-end reference: LocalVQE v1.4-AEC, upstream's adaptive filter in C++ plus a Core ML residual mask, then `NearEndGuard`, which gives the raw mic back in any 100 ms frame where the far end is silent and the cleaned mic is 20 dB or more quieter than the raw one (a word the canceller removed is silent loss; echo left behind is only visible). Only ASR and diarization of the local stream read the cleaned copy, a scratch WAV deleted afterwards. The raw mic stays the archive and the speaker-sample source, and `EchoDeduplicator` (Stage 7) still runs and flags what is left.
+
+**Failure is never a missing local transcript.** If the cancel throws, or the build has no model, the raw mic is used and the chunk gets `echo_cancel_failed` (informational, not content-affecting). Frames the guard restored are counted in `echo_cancel_reverted` (`count` = frames, `track` = `local`).
+
+**Record:** per chunk, a `mic_echo_cancel` entry in `session.json`; in the transcript, `metadata.mic_echo_cancel` = `{chunks, chunks_failed, seconds, frames_reverted, engine, model_sha256}`, absent when it never ran.
+
+**Re-detect:** `TranscriptRediarizer` on the mic channel of a transcript that has `metadata.mic_echo_cancel` cancels each archive's mic side again, with its system side as reference, before diarizing.
+
+**Key code path:**
+- `TranscriberCore/MicEchoCanceller.swift`, `LocalVQEEchoCanceller.swift`, `NearEndGuard.swift`
+- `TranscriberCore/ChunkProcessor.swift` — `cancelMicEcho(chunkIndex:micURL:systemURL:)`; `TranscriptionRunner.micEchoCancelDictionary` for the CLI/finalize metadata
+- Model: `ThirdParty/LocalVQE-CoreML` (0.7 MB, Apache-2.0), bundled by `package_app.sh`, every file checked against `MANIFEST.json` (SHA-256) at load. No download.
+- Log: `mic echo cancelled (… s of audio in … s …)`
 
 ### Stage 4 — Diarization
 
@@ -257,11 +275,16 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `metadata.echo_clusters` — why each local cluster was or was not judged to be echo, numbers and labels only, never text: `[{track, chunk?, label, segments, matched_segments, seconds, matched_seconds, words, matched_words, share, verdict, embedding_similarity?, matched_remote}]`. One entry per (chunk, local cluster); `chunk` is absent when the dedup ran over the whole file (the single-file / CLI path). `label` and the keys of `matched_remote` (`{remote label: seconds}`) are in the transcript's global speaker namespace — the labels its segments carry at finalize; a later rename does not rewrite them. Only unflagged local segments are counted. `share` = `matched_seconds / seconds`; `verdict` is `"echo"` or `"kept"`; `embedding_similarity` is the cluster's best voice similarity to any remote speaker, evidence only, absent when there is no embedding. Written for every dual-stream transcript (`[]` when there was no local speech); absent when no mic stream was captured. A re-detect of the mic channel replaces the `local` entries with its own — see "Re-detect" below.
 - `processing_issues` codes `echo_flagged` (`count` = segments) and `echo_cluster` (`count` = local clusters judged echo in that chunk), both informational.
 
+**Mic echo cancellation** (#342, Stage 3a):
+- `metadata.mic_echo_cancel` — `{chunks, chunks_failed, seconds, frames_reverted, engine, model_sha256}`: chunks cancelled, chunks that fell back to the raw mic, seconds of mic audio cleaned, frames `NearEndGuard` restored. Absent when `mic_echo_cancel` was off or never ran.
+- `processing_issues` codes `echo_cancel_failed` (`track` = `local`, `detail` = why) and `echo_cancel_reverted` (`count` = frames), both informational: neither counts in `processing_issue_count`.
+
 **Re-detect** (the rename dialog's per-channel speaker count; Section 4, "Re-detect at a stated speaker count"):
 - `metadata.speaker_count_local` / `metadata.speaker_count_remote` — how many PEOPLE the channel ended up with: its labels that are neither `Unknown` nor an echo cluster, counted over unflagged lines. Can be 0 (a mic channel that holds only the other side's voice). Absent on a transcript that was never re-detected.
 - `metadata.rediarized_channels` — the channels a re-detect has rewritten (`"local"` / `"remote"`), each once, in the order they were first re-detected. Absent on a transcript that never was. A channel listed here no longer carries the labels the pipeline wrote. A rename reads it (#245): a flagged segment is never given to a person by a re-detect — on a listed channel every flagged segment carries the channel's unattributed label, or (an `echo` line of the mic channel) its echo cluster's label (#277, #296), and a channel re-detected by an older build can still hold an earlier diarization's label, which may now be somebody else's — and the rename leaves it alone; on a channel that was never re-detected it is renamed like any other segment, so the JSON never shows two labels for one person. A channel with a `speaker_count_<channel>` counts as listed (builds before this key stamped only the count), a flagged segment with no `source` is renamed only when no channel was re-detected, and a `rediarized_channels` that is not a list of strings protects every flagged segment.
 - `metadata.echo_clusters`, after a re-detect of the mic channel: the track's entries are that pass's. No `chunk` (it runs over the whole channel); one entry per RAW cluster the diarizer returned, under the label its lines now carry, so clusters the stated count merged share a label (an echo cluster is never merged, so an `"echo"` entry's label is its own); the unattributed lines are judged as a group and appear as `Local Unknown`, or under the stated speaker's label when a count of 1 folded them in. Lines already flagged `echo` are counted as well as the unflagged ones. No `embedding_similarity`: the transcript holds no embedding for the other channel.
 - `processing_issues`, after a re-detect of the mic channel: the track's `echo_flagged` / `echo_cluster` entries are replaced by one of each for the whole channel (no `chunk`), when there is something to report. A transcript with no `processing_issues` key (the CLI path) gets none.
+- `metadata.mic_echo_cancel` is left as the pipeline wrote it: a re-detect of the mic channel cancels the archive's mic again (from the AAC, so close to, not identical with, the first pass) but records nothing new.
 - `metadata.echo_segments_flagged` follows the segments: it is the number carrying `echo: true` after the rewrite.
 - `metadata.speaker_names_previous` — the names a re-detect cleared from the channel, kept so a mistaken one is recoverable.
 
@@ -557,6 +580,7 @@ Options:
   --engine <id>             Engine override: fluid_audio, speech_analyzer
   --split                   Force L/R channel split for stereo AAC (L=mic, R=system)
   --no-split                Force single-stream processing (external recordings)
+  --echo-cancel             Cancel speaker echo in the mic before transcribing it (needs --split or two inputs; as mic_echo_cancel "on")
   --debug                   Stream the unified log to stderr while it runs
 ```
 

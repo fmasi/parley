@@ -236,6 +236,14 @@ private struct ThrowingCanceller: MicEchoCancelling {
         #expect(try decode("auto").micEchoCancel == .off)
     }
 
+    @Test func theCLIFlagIsOffUnlessGiven() throws {
+        guard case .transcribe(let on) = try CLIParser.parse(["Parley", "transcribe", "-i", "a.m4a", "--split", "--echo-cancel"]),
+              case .transcribe(let off) = try CLIParser.parse(["Parley", "transcribe", "-i", "a.m4a", "--split"])
+        else { Issue.record("expected transcribe"); return }
+        #expect(on.echoCancel)
+        #expect(!off.echoCancel)
+    }
+
     @Test func resolvesToNothingWhenOff() {
         guard case .off = MicEchoCancelSetup.resolve(.default) else { Issue.record("expected .off"); return }
     }
