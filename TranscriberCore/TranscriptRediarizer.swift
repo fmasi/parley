@@ -720,6 +720,10 @@ public enum TranscriptRediarizer {
             guard let url = wantsLocal ? local : remote,
                   FileManager.default.fileExists(atPath: url.path)
             else { throw RediarizeError.noAudioForChannel(source) }
+            if wantsLocal, echoCanceller != nil {
+                // Two WAVs (a CLI `--echo-cancel` transcript): not re-cancelled here.
+                Logger.transcription.error("Re-detect: a two-file transcript's mic was echo-cancelled; diarizing the raw mic")
+            }
             return .path(url)
 
         case .chunkedArchives(let chunks):
@@ -802,7 +806,9 @@ public enum TranscriptRediarizer {
                             stereoAac: chunk, outputDirectory: scratchDirectory, channel: .remote)
                         defer { try? FileManager.default.removeItem(at: reference) }
                         let far = try AudioDecode.mono16kHzFloat(contentsOf: reference)
-                        decodedChunk = try echoCanceller.cancelEcho(microphone: samples, reference: far).samples
+                        decodedChunk = try await ChunkProcessor.offThePool(qos: .userInitiated) {
+                            try echoCanceller.cancelEcho(microphone: samples, reference: far).samples
+                        }
                     } else {
                         decodedChunk = samples
                     }

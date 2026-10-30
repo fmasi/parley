@@ -202,7 +202,10 @@ public final class TranscriptionRunner {
                         let cleaned = FileManager.default.temporaryDirectory
                             .appendingPathComponent("parley-mic-aec-\(UUID().uuidString).wav")
                         do {
-                            echoRecords.append(try canceller.cancelEcho(micURL: micPath, systemURL: segmentPair.system, outputURL: cleaned))
+                            let system = segmentPair.system
+                            echoRecords.append(try await ChunkProcessor.offThePool(qos: config.resolvedQos) {
+                                try canceller.cancelEcho(micURL: micPath, systemURL: system, outputURL: cleaned)
+                            })
                             echoScratch.append(cleaned)
                             micForASR = cleaned
                         } catch {

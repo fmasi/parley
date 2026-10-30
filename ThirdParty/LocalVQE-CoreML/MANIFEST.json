@@ -78,10 +78,11 @@
     ]
   },
   "coremltools": "9.0",
+  "coremlcompiler": "3600.25.1",
   "files": {
     "LICENSE": "84afcb26750e77daeecc0150a6bd031d0d561abd75ef7f2a42508dcdade70d54",
-    "LocalVQEAECResidualMask.mlmodelc/analytics/coremldata.bin": "fa9c969b8578e9738362bf28e828d4b03fd94186490c357a9fe261a56f20f04a",
-    "LocalVQEAECResidualMask.mlmodelc/coremldata.bin": "4f2742890fa963b3c3125b7ade1c565391b33383fd0fe7797ae6cc82d6ff2963",
+    "LocalVQEAECResidualMask.mlmodelc/analytics/coremldata.bin": "d55f24b68382cd25eff6177260127e4db2360499a7aa661cfb2b547f4c6a93f4",
+    "LocalVQEAECResidualMask.mlmodelc/coremldata.bin": "bd91c70d62cee02589a616e06721fc5e13da0fc3a2d3bf45add48376e39e9503",
     "LocalVQEAECResidualMask.mlmodelc/metadata.json": "4534b16ebe8ae42184d4a13b04fb9d9a34b61629c6fd2000ec43b005dcd94b1f",
     "LocalVQEAECResidualMask.mlmodelc/model.mil": "839ac38dc8997bb38693514888aa7f5829254b951ab20553a6ba8a03c56cc2fd",
     "LocalVQEAECResidualMask.mlmodelc/weights/weight.bin": "f49a23b35e91c871f39f1137d29c5614f52fc62179b95733c5f2dd88a6fe91ea",

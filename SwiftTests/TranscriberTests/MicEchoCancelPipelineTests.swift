@@ -39,6 +39,29 @@ private final class CopyingCanceller: MicEchoCancelling, @unchecked Sendable {
     }
 }
 
+/// Decodes the mic as the real canceller does and remembers how many samples it read.
+private final class DecodingCanceller: MicEchoCancelling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [Int] = []
+    var sampleCounts: [Int] { lock.withLock { counts } }
+    func cancelEcho(micURL: URL, systemURL: URL, outputURL: URL) throws -> MicEchoCancelRecord {
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: micURL)
+        lock.withLock { counts.append(samples.count) }
+        try FileManager.default.copyItem(at: micURL, to: outputURL)
+        return MicEchoCancelRecord(engine: "fake", modelSHA256: "", framesReverted: 0, seconds: Double(samples.count) / 16_000)
+    }
+}
+
+/// Rewrites a WAV's size fields to claim `seconds` of 48 kHz mono Int16: a crash orphan whose header lags its data.
+private func underReport(_ url: URL, seconds: Double) throws {
+    var data = try Data(contentsOf: url)
+    func put(_ value: UInt32, at offset: Int) { withUnsafeBytes(of: value.littleEndian) { data.replaceSubrange(offset..<offset + 4, with: $0) } }
+    let bytes = UInt32(seconds * 48_000) * 2
+    put(36 + bytes, at: 4)
+    put(bytes, at: 40)
+    try data.write(to: url)
+}
+
 private struct ThrowingCanceller: MicEchoCancelling {
     func cancelEcho(micURL: URL, systemURL: URL, outputURL: URL) throws -> MicEchoCancelRecord {
         FileManager.default.createFile(atPath: outputURL.path, contents: Data([1, 2, 3]))  // a partial write
@@ -146,6 +169,78 @@ private struct ThrowingCanceller: MicEchoCancelling {
         let dir3 = try makeDir(); defer { try? FileManager.default.removeItem(at: dir3) }
         let systemOnly = try #require(try await process(.unavailable(reason: "no model"), engine: PathRecordingEngine(), in: dir3, writeMic: false))
         #expect(!systemOnly.issues.contains { $0.code == .echoCancelFailed })
+    }
+
+    @Test func repairsACrashOrphansHeadersBeforeCancelling() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        try underReport(mic, seconds: 0.5)
+        try underReport(sys, seconds: 0.5)
+        let canceller = DecodingCanceller()
+        _ = try await process(.on(canceller), engine: PathRecordingEngine(), in: dir, writeSystem: false, writeMic: false)
+        // The whole second, not the half the header claimed: the end of the chunk is not lost.
+        #expect(canceller.sampleCounts == [16_000])
+    }
+
+    @Test func leavesAMicThatDeliveredNothingOnItsEmptyStreamPath() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent("meeting-0_mic.wav"), seconds: 0)  // a header only
+        let canceller = CopyingCanceller()
+        let chunk = try #require(try await process(.on(canceller), engine: PathRecordingEngine(), in: dir, writeMic: false))
+        #expect(canceller.calls == 0)
+        #expect(chunk.issues.contains(ChunkIssue(code: .streamEmpty, track: "local", count: nil)))
+        #expect(!chunk.issues.contains { $0.affectsContent })
+    }
+
+    @Test func recordsNothingWhenThereIsNoFarEndToCancel() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let chunk = try #require(try await process(.unavailable(reason: "no model"), engine: PathRecordingEngine(), in: dir, writeSystem: false))
+        #expect(!chunk.issues.contains { $0.code == .echoCancelFailed })
+    }
+
+    @Test func finalizeStampsWhatCancellationDid() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        let processor = ChunkProcessor(
+            config: .default, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0),
+                                       engine: "fluidAudio", chunkDurationMinutes: 10, chunks: []),
+            transcriber: PathRecordingEngine(), diarizer: FakeDiarizer(), scratchDirectory: dir,
+            micEchoCancel: .on(CopyingCanceller(framesReverted: 2)))
+        await processor.processLastChunk(ChunkRotator.FinalizedChunk(
+            index: 0, systemPath: sys.path, micPath: mic.path, startTime: Date(timeIntervalSince1970: 0)))
+        let result = try await TranscriptionRunner().finalize(sessionState: await processor.getSessionState(),
+                                                              outputDirectory: dir, config: .default)
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any]
+        let stamp = try #require((json?["metadata"] as? [String: Any])?["mic_echo_cancel"] as? [String: Any])
+        #expect(stamp["chunks"] as? Int == 1)
+        #expect(stamp["frames_reverted"] as? Int == 2)
+        #expect(stamp["engine"] as? String == "fake")
+    }
+
+    @Test func theSingleFilePathTranscribesTheCleanedMicAndStampsIt() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("m.wav"), mic = dir.appendingPathComponent("m_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        let engine = PathRecordingEngine(), canceller = CopyingCanceller(framesReverted: 1)
+        let runner = TranscriptionRunner()
+        runner.engineFactoryForTesting = { _ in (engine, FakeDiarizer()) }
+        let result = try await runner.run(systemAudio: sys, micAudio: mic, outputDirectory: dir, config: .default,
+                                          micEchoCancel: .on(canceller))
+        let cleaned = try #require(canceller.lastOutput)
+        #expect(engine.path(for: .microphone) == cleaned)
+        #expect(!FileManager.default.fileExists(atPath: cleaned.path))
+        let metadata = try #require((try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])?["metadata"] as? [String: Any])
+        #expect((metadata["mic_echo_cancel"] as? [String: Any])?["chunks"] as? Int == 1)
+        // The record lists the recording's own audio, never the scratch copy.
+        let listed = try #require(metadata["audio_paths"] as? [String])
+        #expect(!listed.isEmpty)
+        #expect(!listed.contains { $0.contains("parley-mic-aec") })
     }
 
     @Test func theRecordSurvivesSessionJSON() throws {

@@ -73,6 +73,12 @@ public protocol MicEchoSampleCancelling: Sendable {
 public struct LocalVQEMicEchoCanceller: MicEchoCancelling, MicEchoSampleCancelling {
     public static let engine = "localvqe-v1.4-aec-coreml"
 
+    public enum Failure: Error, Equatable {
+        /// The mic WAV decoded to no samples: nothing to cancel, and a 0-frame copy would read as a
+        /// broken stream instead of an empty one.
+        case emptyMicrophone
+    }
+
     public let assetsDirectory: URL
     public let guardParameters: NearEndGuard.Parameters
 
@@ -98,6 +104,7 @@ public struct LocalVQEMicEchoCanceller: MicEchoCancelling, MicEchoSampleCancelli
         // AudioDecode: the 16 kHz mono reader the re-detect path uses (FluidAudio's own converter is
         // unreachable by name from this module; see AudioDecode).
         let mic = try AudioDecode.mono16kHzFloat(contentsOf: micURL)
+        guard !mic.isEmpty else { throw Failure.emptyMicrophone }
         let reference = try AudioDecode.mono16kHzFloat(contentsOf: systemURL)
         let (cleaned, reverted, modelSHA256) = try run(microphone: mic, reference: reference)
         try Self.writeWAV(cleaned, to: outputURL, sampleRate: LocalVQEEchoCanceller.sampleRate)

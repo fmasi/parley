@@ -409,6 +409,13 @@ public final class ChunkProcessor {
         // 1. Transcribe + diarize system audio. Mic echo cancellation (#342) runs alongside it: it
         //    only reads the two WAVs, and writes the copy of the mic that step 2 transcribes.
         let (echoMic, echoReference) = (micURL, systemURL)
+        // A crash orphan's headers under-report by up to one sync interval, and cancellation reads
+        // both WAVs before `transcribeStream` would repair them: repair first, or the cleaned mic
+        // ASR reads ends early and the user's last words are lost (council, #342). Idempotent.
+        if case .off = micEchoCancel {} else {
+            _ = WavFileWriter.repairHeader(path: micURL.path)
+            _ = WavFileWriter.repairHeader(path: systemURL.path)
+        }
         async let echoCancel = cancelMicEcho(chunkIndex: chunk.index, micURL: echoMic, systemURL: echoReference)
         let systemResult = await transcribeStream(
             audioPath: systemURL, source: "remote", audioSource: .system, label: "chunk-\(chunk.index)-system"
@@ -648,7 +655,14 @@ public final class ChunkProcessor {
     private nonisolated func cancelMicEcho(chunkIndex: Int, micURL: URL, systemURL: URL) async
         -> (cleanedMic: URL?, record: MicEchoCancelRecord?, issues: [ChunkIssue]) {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: micURL.path) else { return (nil, nil, []) }
+        if case .off = micEchoCancel { return (nil, nil, []) }
+        // Both streams with audio past the header, or there is nothing to cancel: a header-only mic
+        // (the mic delivered nothing) keeps its `stream_empty` path, a missing or empty system WAV
+        // means no far end to cancel. Neither is a failure.
+        func hasAudio(_ url: URL) -> Bool {
+            ((try? fm.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0) > wavHeaderSize
+        }
+        guard hasAudio(micURL), hasAudio(systemURL) else { return (nil, nil, []) }
         switch micEchoCancel {
         case .off:
             return (nil, nil, [])
@@ -656,7 +670,6 @@ public final class ChunkProcessor {
             Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): mic echo cancellation is on but cannot run: \(reason, privacy: .private)")
             return (nil, nil, [ChunkIssue(code: .echoCancelFailed, track: "local", count: nil, detail: reason)])
         case .on(let canceller):
-            guard fm.fileExists(atPath: systemURL.path) else { return (nil, nil, []) }
             let output = scratchDirectory.appendingPathComponent("parley-mic-aec-\(chunkIndex)-\(UUID().uuidString).wav")
             let started = Date()
             do {
@@ -686,7 +699,7 @@ public final class ChunkProcessor {
     }
 
     /// Runs CPU-bound synchronous work on a global queue instead of holding a cooperative thread.
-    private nonisolated static func offThePool<T: Sendable>(qos: DispatchQoS.QoSClass, _ work: @escaping @Sendable () throws -> T) async throws -> T {
+    nonisolated static func offThePool<T: Sendable>(qos: DispatchQoS.QoSClass, _ work: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: qos).async {
                 continuation.resume(with: Result { try work() })

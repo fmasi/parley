@@ -15,7 +15,7 @@ little-endian float32. MANIFEST.json records every input and output by SHA-256.
 
 Needs coremltools, numpy and gguf, in a conda env (never on the host):
     conda create -n localvqe-coreml python=3.12 && conda run -n localvqe-coreml \
-        pip install coremltools==9.0 numpy gguf
+        pip install coremltools==9.0 numpy==2.5.4 gguf==0.19.0
     conda run -n localvqe-coreml python -I scripts/build-localvqe-coreml.py
 """
 import hashlib
@@ -256,6 +256,8 @@ def main():
                                "sha256": GGUF_SHA},
             "packed_state": {"values": total, "layout": [[n, list(s)] for n, s in states]},
             "coremltools": ct.__version__,
+            "coremlcompiler": subprocess.run(["xcrun", "coremlcompiler", "version"], capture_output=True,
+                                             text=True).stdout.strip(),
             "files": dict(sorted(outputs.items())),
         }
         with open(os.path.join(DEST, "MANIFEST.json"), "w") as f:

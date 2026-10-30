@@ -238,4 +238,20 @@ private let assetsDirectory = URL(fileURLWithPath: #filePath)
         #expect(report.engine == "localvqe-v1.4-aec-coreml")
         #expect(abs(report.seconds - 4) < 0.01)
     }
+
+    /// The guard runs on the engine's output: with a threshold every frame trips, every loud frame
+    /// with the far end silent is the raw mic again, and the record counts them.
+    @Test func runsTheNearEndGuardOnTheEnginesOutput() throws {
+        var everything = NearEndGuard.Parameters()
+        everything.maxCutDB = -200
+        let mic = voice(seconds: 3, seed: 61)
+        let out = try LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory, guardParameters: everything)
+            .cancelEcho(microphone: mic, reference: [Float](repeating: 0, count: mic.count))
+        #expect(out.framesReverted > 10)
+        let loudFrame = (12 * 1600)..<(13 * 1600)
+        if rmsDB(mic[loudFrame]) >= -45 { #expect(Array(out.samples[loudFrame]) == Array(mic[loudFrame])) }
+        let untouched = try LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory)
+            .cancelEcho(microphone: mic, reference: [Float](repeating: 0, count: mic.count))
+        #expect(untouched.framesReverted == 0)
+    }
 }
