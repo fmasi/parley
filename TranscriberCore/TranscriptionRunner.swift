@@ -689,6 +689,7 @@ public final class TranscriptionRunner {
             // Each chunk's own verdicts (no second dedup pass here), in the transcript's speaker
             // namespace: the same per-chunk mapping the merger applied to the segments.
             echoClusters: isDualStream ? Self.echoClusterDictionaries(chunks: sortedChunks, speakerMapping: speakerMapping) : nil,
+            micEchoCancel: Self.micEchoCancelDictionary(chunks: sortedChunks),
             provenance: sessionState.provenance,
             // The wall-clock time the meeting actually began (#49).
             recordedAt: sessionState.meetingStart,
@@ -857,6 +858,26 @@ public final class TranscriptionRunner {
             + sessionIssues.map { $0.issue.metadataDictionary(chunk: $0.chunk) }
     }
 
+    /// `metadata.mic_echo_cancel` (#342): what mic echo cancellation did across the session — chunks
+    /// cancelled and failed, seconds processed, frames the near-end guard gave back, the engine and
+    /// model. nil (the key left out) when it neither ran nor failed on any chunk: the setting was off.
+    nonisolated static func micEchoCancelDictionary(chunks: [ProcessedChunk]) -> [String: Any]? {
+        let records = chunks.compactMap(\.micEchoCancel)
+        let failed = chunks.filter { $0.issues.contains { $0.code == .echoCancelFailed } }.count
+        guard !records.isEmpty || failed > 0 else { return nil }
+        var d: [String: Any] = [
+            "chunks": records.count,
+            "chunks_failed": failed,
+            "seconds": records.reduce(0) { $0 + $1.seconds },
+            "frames_reverted": records.reduce(0) { $0 + $1.framesReverted },
+        ]
+        // One engine and model per session in practice; a resume across an update could mix two.
+        let engines = Set(records.map(\.engine)).sorted(), models = Set(records.map(\.modelSHA256)).sorted()
+        if !engines.isEmpty { d["engine"] = engines.count == 1 ? engines[0] as Any : engines as Any }
+        if !models.isEmpty { d["model_sha256"] = models.count == 1 ? models[0] as Any : models as Any }
+        return d
+    }
+
     /// `metadata.echo_clusters` for a chunked session: one entry per (chunk, local cluster), the
     /// labels remapped from the chunk's own speaker numbering to the transcript's global one with
     /// `speakerMapping` — what `TranscriptMerger.merge` applies to the segments. A label the mapping
@@ -984,7 +1005,8 @@ public final class TranscriptionRunner {
             diarizer: diarizer,
             // Its session.json writes on the folder's queue, within the write bound (L review 234).
             folderReads: folderReads,
-            writeSeconds: folderWriteSeconds
+            writeSeconds: folderWriteSeconds,
+            micEchoCancel: .resolve(config)
         )
         self.chunkProcessor = processor
         // The session has state on disk from its start, not from its first chunk (#294): no quota pass deletes the first

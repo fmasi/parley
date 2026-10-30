@@ -40,7 +40,8 @@ public enum ChunkedSessionRecovery {
         // Its session.json writes on the folder's queue, within the transcript's write bound (L review 234).
         let processor = ChunkProcessor(config: config, outputDirectory: outputDirectory,
                                        sessionState: baseState, transcriber: transcriber, diarizer: diarizer,
-                                       folderReads: reads, writeSeconds: runner.folderWriteSeconds)
+                                       folderReads: reads, writeSeconds: runner.folderWriteSeconds,
+                                       micEchoCancel: .resolve(config))
         for (orphan, start) in orphans {
             let sysURL = outputDirectory.appendingPathComponent(orphan.baseName + ".wav")
             let micURL = outputDirectory.appendingPathComponent(orphan.baseName + "_mic.wav")

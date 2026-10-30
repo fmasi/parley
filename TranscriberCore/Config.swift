@@ -177,6 +177,10 @@ public struct Config: Codable, Equatable, Sendable {
     /// Meeting sensing (#118): `.prompt` offers to record when a meeting app starts using the mic;
     /// `.off` disables sensing entirely. Default ON with disclosure (D6). Never auto-records.
     public var meetingSensing: MeetingSenseMode
+    /// Mic echo cancellation (#342): `.on` cancels the far end coming back through the speakers in a
+    /// copy of each chunk's mic that ASR and diarization read; the raw mic stays the recording.
+    /// Default `.off` until the device test.
+    public var micEchoCancel: MicEchoCancelMode
     public var summary: SummaryConfig?
 
     /// Returns `chunkDurationMinutes` clamped to a minimum of 10.
@@ -228,6 +232,7 @@ public struct Config: Codable, Equatable, Sendable {
         modelUpdateCheckEnabled: false,
         calendarLookaheadMinutes: 10,
         meetingSensing: .prompt,
+        micEchoCancel: .off,
         summary: nil
     )
 
@@ -263,6 +268,7 @@ public struct Config: Codable, Equatable, Sendable {
         modelUpdateCheckEnabled: Bool = false,
         calendarLookaheadMinutes: Int = 10,
         meetingSensing: MeetingSenseMode = .prompt,
+        micEchoCancel: MicEchoCancelMode = .off,
         summary: SummaryConfig? = nil
     ) {
         self.recordingDirectory = recordingDirectory
@@ -296,6 +302,7 @@ public struct Config: Codable, Equatable, Sendable {
         self.modelUpdateCheckEnabled = modelUpdateCheckEnabled
         self.calendarLookaheadMinutes = calendarLookaheadMinutes
         self.meetingSensing = meetingSensing
+        self.micEchoCancel = micEchoCancel
         self.summary = summary
     }
 
@@ -331,6 +338,7 @@ public struct Config: Codable, Equatable, Sendable {
         case modelUpdateCheckEnabled = "model_update_check_enabled"
         case calendarLookaheadMinutes = "calendar_lookahead_minutes"
         case meetingSensing = "meeting_sensing"
+        case micEchoCancel = "mic_echo_cancel"
         case summary
     }
 
@@ -370,6 +378,7 @@ public struct Config: Codable, Equatable, Sendable {
         modelUpdateCheckEnabled = try c.decodeIfPresent(Bool.self, forKey: .modelUpdateCheckEnabled) ?? false
         calendarLookaheadMinutes = try c.decodeIfPresent(Int.self, forKey: .calendarLookaheadMinutes) ?? 10
         meetingSensing = try c.decodeIfPresent(MeetingSenseMode.self, forKey: .meetingSensing) ?? .prompt
+        micEchoCancel = try c.decodeIfPresent(MicEchoCancelMode.self, forKey: .micEchoCancel) ?? .off
         summary = try c.decodeIfPresent(SummaryConfig.self, forKey: .summary)
     }
 }

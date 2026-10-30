@@ -84,6 +84,14 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// is missing.
         public static let mergeSkippedFolderNotAnswering = Code(rawValue: "merge_skipped_folder_not_answering")
 
+        /// Mic echo cancellation was on but did not run for this chunk (model missing or rejected, the
+        /// engine threw): the local side was transcribed from the raw mic, as it is with the setting off
+        /// (#342). Informational: nothing is missing, echo may show (and is still flagged).
+        public static let echoCancelFailed = Code(rawValue: "echo_cancel_failed")
+        /// The near-end guard gave the raw mic back in `count` 100 ms frames that cancellation had cut
+        /// while the far end was silent (#342). Informational: those frames are the raw mic.
+        public static let echoCancelReverted = Code(rawValue: "echo_cancel_reverted")
+
         /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
         /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An
         /// unknown code (from a newer build) is not one either.
@@ -251,6 +259,8 @@ public struct ProcessedChunk: Codable {
     /// What went wrong or was removed while processing this chunk (P3). Absent in legacy
     /// session.json → `[]`.
     public let issues: [ChunkIssue]
+    /// What mic echo cancellation did for this chunk (#342); nil when it did not run.
+    public let micEchoCancel: MicEchoCancelRecord?
 
     public init(
         index: Int,
@@ -262,7 +272,8 @@ public struct ProcessedChunk: Codable {
         echoSegmentsFlagged: Int = 0,
         echoClusters: [EchoDeduplicator.ClusterVerdict] = [],
         isDualStream: Bool = false,
-        issues: [ChunkIssue] = []
+        issues: [ChunkIssue] = [],
+        micEchoCancel: MicEchoCancelRecord? = nil
     ) {
         self.index = index
         self.startTime = startTime
@@ -274,6 +285,7 @@ public struct ProcessedChunk: Codable {
         self.echoClusters = echoClusters
         self.isDualStream = isDualStream
         self.issues = issues
+        self.micEchoCancel = micEchoCancel
     }
 
     // MARK: - Codable
@@ -289,6 +301,7 @@ public struct ProcessedChunk: Codable {
         case echoClusters = "echo_clusters"
         case isDualStream = "is_dual_stream"
         case issues
+        case micEchoCancel = "mic_echo_cancel"
     }
 
     /// The count's key before #231 ("removed" — nothing is). Read only, so a session.json written
@@ -318,6 +331,8 @@ public struct ProcessedChunk: Codable {
             isDualStream = segments.contains { $0.source == "local" }
         }
         issues = try c.decodeIfPresent([ChunkIssue].self, forKey: .issues) ?? []
+        // Provenance, never worth a chunk: a record this build cannot read is dropped.
+        micEchoCancel = (try? c.decodeIfPresent(MicEchoCancelRecord.self, forKey: .micEchoCancel)) ?? nil
     }
 }
 

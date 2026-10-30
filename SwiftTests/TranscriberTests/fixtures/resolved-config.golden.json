@@ -9,6 +9,7 @@
     "launch_on_startup": true,
     "meeting_sensing": "prompt",
     "merge_chunked_audio": true,
+    "mic_echo_cancel": "off",
     "model_update_check_enabled": false,
     "output_format": "txt",
     "recording_directory": "~/Documents/Recordings",

@@ -25,6 +25,8 @@ public final class ChunkProcessor {
     private nonisolated let taskPriority: TaskPriority
     /// Where an archive-only chunk is split into scratch WAVs (the temp folder; a test's own folder).
     private nonisolated let scratchDirectory: URL
+    /// Mic echo cancellation (#342): off, a canceller, or the setting on with no model to run.
+    private nonisolated let micEchoCancel: MicEchoCancelSetup
     /// The recording file (base name, e.g. `meeting-0`) behind every chunk index this processor
     /// knows: the seeded session's settled chunks plus every chunk scheduled here. An index is never
     /// released. The same index from the SAME file again is a true duplicate (the orphan re-ingested
@@ -221,9 +223,11 @@ public final class ChunkProcessor {
         diarizer: (any DiarizationProvider)?,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         folderReads: FolderReads = .shared,
-        writeSeconds: Double = 30
+        writeSeconds: Double = 30,
+        micEchoCancel: MicEchoCancelSetup = .off
     ) {
         self.config = config
+        self.micEchoCancel = micEchoCancel
         self.outputDirectory = outputDirectory
         self.stateStore = StateStore(sessionState: sessionState, directory: outputDirectory, reads: folderReads, writeSeconds: writeSeconds)
         self.writeSeconds = writeSeconds
@@ -402,10 +406,15 @@ public final class ChunkProcessor {
         }
         defer { if let scratch { try? FileManager.default.removeItem(at: scratch) } }
 
-        // 1. Transcribe + diarize system audio
+        // 1. Transcribe + diarize system audio. Mic echo cancellation (#342) runs alongside it: it
+        //    only reads the two WAVs, and writes the copy of the mic that step 2 transcribes.
+        let (echoMic, echoReference) = (micURL, systemURL)
+        async let echoCancel = cancelMicEcho(chunkIndex: chunk.index, micURL: echoMic, systemURL: echoReference)
         let systemResult = await transcribeStream(
             audioPath: systemURL, source: "remote", audioSource: .system, label: "chunk-\(chunk.index)-system"
         )
+        let echo = await echoCancel
+        defer { if let cleaned = echo.cleanedMic { try? FileManager.default.removeItem(at: cleaned) } }
 
         // 2. Transcribe mic audio (skip if file missing or empty)
         // Dual-stream is a property of the CAPTURE, not of whether the user spoke. Deriving it from
@@ -416,13 +425,15 @@ public final class ChunkProcessor {
         let hasDualStream = FileManager.default.fileExists(atPath: micURL.path)
         let micResult: StreamResult
         if hasDualStream {
+            // The echo-cancelled copy when there is one: ASR and diarization only. The raw mic is
+            // still what is archived and what speaker samples are cut from.
             micResult = await transcribeStream(
-                audioPath: micURL, source: "local", audioSource: .microphone, label: "chunk-\(chunk.index)-mic"
+                audioPath: echo.cleanedMic ?? micURL, source: "local", audioSource: .microphone, label: "chunk-\(chunk.index)-mic"
             )
         } else {
             micResult = StreamResult(segments: [], speakerDatabase: [:])
         }
-        var issues = extraIssues + archiveIssues + systemResult.issues + micResult.issues
+        var issues = extraIssues + archiveIssues + systemResult.issues + echo.issues + micResult.issues
         if !hasDualStream { issues.append(ChunkIssue(code: .micStreamAbsent, track: "local", count: nil)) }
 
         // 3. Merge segments
@@ -575,7 +586,8 @@ public final class ChunkProcessor {
             echoSegmentsFlagged: echoFlagged,
             echoClusters: echoClusters,
             isDualStream: hasDualStream,
-            issues: issues
+            issues: issues,
+            micEchoCancel: echo.record
         )
 
         // 8. Actor-isolated append + persist; only then may the source WAVs go (C-I4). A chunk that
@@ -630,6 +642,58 @@ public final class ChunkProcessor {
     /// when it has any (so the reconciler's namespaces agree), else when the mic channel holds any
     /// non-zero sample. nil when the archive can't be read — the chunk is then recorded with its
     /// system stream missing, never dropped.
+    /// Writes the chunk's echo-cancelled mic into the scratch folder (#342). Nothing to do with the
+    /// setting off, without a mic WAV, or without a system WAV to use as the reference. Any failure
+    /// leaves the raw mic in use and records `echo_cancel_failed`: never a missing local transcript.
+    private nonisolated func cancelMicEcho(chunkIndex: Int, micURL: URL, systemURL: URL) async
+        -> (cleanedMic: URL?, record: MicEchoCancelRecord?, issues: [ChunkIssue]) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: micURL.path) else { return (nil, nil, []) }
+        switch micEchoCancel {
+        case .off:
+            return (nil, nil, [])
+        case .unavailable(let reason):
+            Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): mic echo cancellation is on but cannot run: \(reason, privacy: .private)")
+            return (nil, nil, [ChunkIssue(code: .echoCancelFailed, track: "local", count: nil, detail: reason)])
+        case .on(let canceller):
+            guard fm.fileExists(atPath: systemURL.path) else { return (nil, nil, []) }
+            let output = scratchDirectory.appendingPathComponent("parley-mic-aec-\(chunkIndex)-\(UUID().uuidString).wav")
+            let started = Date()
+            do {
+                let record = try await Self.offThePool(qos: config.resolvedQos) {
+                    try canceller.cancelEcho(micURL: micURL, systemURL: systemURL, outputURL: output)
+                }
+                Logger.transcription.info(
+                    "Chunk \(chunkIndex, privacy: .public): mic echo cancelled (\(record.seconds, format: .fixed(precision: 0), privacy: .public) s of audio in \(Date().timeIntervalSince(started), format: .fixed(precision: 1), privacy: .public) s, \(record.framesReverted, privacy: .public) frames given back to the raw mic)"
+                )
+                let reverted = record.framesReverted > 0
+                    ? [ChunkIssue(code: .echoCancelReverted, track: "local", count: record.framesReverted)] : []
+                return (output, record, reverted)
+            } catch {
+                try? fm.removeItem(at: output)
+                let detail = Self.echoCancelFailureDetail(error)
+                Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): mic echo cancellation failed, the raw mic is used: \(detail, privacy: .private)")
+                return (nil, nil, [ChunkIssue(code: .echoCancelFailed, track: "local", count: nil, detail: detail)])
+            }
+        }
+    }
+
+    /// Why cancellation failed, without paths or audio: the engine's own failure, or the error's domain and code.
+    nonisolated static func echoCancelFailureDetail(_ error: Error) -> String {
+        if let failure = error as? LocalVQEEchoCanceller.Failure { return "\(failure)" }
+        let ns = error as NSError
+        return "\(ns.domain) \(ns.code)"
+    }
+
+    /// Runs CPU-bound synchronous work on a global queue instead of holding a cooperative thread.
+    private nonisolated static func offThePool<T: Sendable>(qos: DispatchQoS.QoSClass, _ work: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: qos).async {
+                continuation.resume(with: Result { try work() })
+            }
+        }
+    }
+
     private nonisolated func splitArchive(_ archive: URL, chunkIndex: Int, micWavLeft: Bool) async -> (directory: URL, system: URL, mic: URL?)? {
         let directory = scratchDirectory.appendingPathComponent("parley-archive-\(UUID().uuidString)")
         do {
