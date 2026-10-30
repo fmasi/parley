@@ -1,3 +1,4 @@
+import AVFoundation
 import Testing
 import Foundation
 @testable import TranscriberCore
@@ -79,5 +80,48 @@ struct VadSpeechMapAnalyzeSamplesTests {
         let samples = [Float](repeating: 0, count: 1600)
         let result = try await VadSpeechMap().analyze(samples: samples)
         #expect(result == nil)
+    }
+}
+
+/// `analyze(audioPath:)` reads the file itself, a block at a time at 16 kHz, instead of FluidAudio's file
+/// path, which decoded a whole chunk at 48 kHz first (2.0 GB and 20 s for 61 minutes). The samples it
+/// hands the VAD are the ones the whole-file reader produces.
+@Suite("VadSpeechMap block reading")
+struct VadSpeechMapBlockReadingTests {
+    private func wav(_ samples: [Float], rate: Double) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("vad-\(UUID().uuidString).wav")
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
+        let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        if !samples.isEmpty {
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
+            buffer.frameLength = AVAudioFrameCount(samples.count)
+            samples.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: samples.count) }
+            try file.write(from: buffer)
+        }
+        return url
+    }
+
+    private func tone(seconds: Double, rate: Double) -> [Float] {
+        (0..<Int(seconds * rate)).map { Float(0.3 * sin(2 * .pi * 220 * Double($0) / rate)) }
+    }
+
+    @Test func a48kHzFileReadsAsTheWholeFileReaderReadsIt() throws {
+        let url = try wav(tone(seconds: 5.3, rate: 48_000), rate: 48_000); defer { try? FileManager.default.removeItem(at: url) }
+        let blocks = try VadSpeechMap.samples16k(contentsOf: url)
+        let whole = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        #expect(abs(blocks.count - whole.count) <= 1)
+        let worst = zip(blocks, whole).map { abs($0 - $1) }.max() ?? 1
+        #expect(worst < 1e-3, "differs by \(worst)")
+    }
+
+    @Test func a16kHzFileIsReadUnchanged() throws {
+        let samples = tone(seconds: 2, rate: 16_000)
+        let url = try wav(samples, rate: 16_000); defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try VadSpeechMap.samples16k(contentsOf: url) == samples)
+    }
+
+    @Test func anEmptyFileHasNoSamples() throws {
+        let url = try wav([], rate: 48_000); defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try VadSpeechMap.samples16k(contentsOf: url).isEmpty)
     }
 }
