@@ -42,9 +42,11 @@ echo, so anything cut there is the user's words.
 - **It builds from source with SwiftPM**: 75 files (2.8 MB), CPU backend + Accelerate, no Metal and
   no BLAS. A clean release build takes 10 s. Its output matches the upstream CLI to 61.7 dB SNR (the CLI
   writes 16-bit). Prototype in the session scratchpad (`pkg/LocalVQEKit`).
-- **Threads**: auto is min(4, cores). On the M5 Pro, 25 min of audio takes 180 s on 1 thread, 100 s
-  on 4 and **481 s on 8** (oversubscription). Never go above 4. Measure on the M1 Air; it may need
-  min(4, performance cores).
+- **Threads**: auto is min(4, cores). On an idle M5 Pro, 25 min of audio takes 171 / 126 / 98 / 102 /
+  121 s on 1 / 2 / 4 / 6 / 8 threads, with identical output. 4 is the knee; more is slower. Measure on
+  the M1 Air; it may need min(4, performance cores).
+- **Speed against FluidAudio's Core ML models**, same call: v1.2 24 s (64× real time), v1.3 40 s (37×),
+  v1.4-AEC 98 s (15×). v1.4 runs on the CPU in 16 ms hops; about 2 extra minutes per 30-minute chunk.
 - **No splitting a chunk into parallel pieces.** The model gets better over a long continuous run.
   Eight parallel pieces took 46 s instead of 100 s but left 4–6 echo lines instead of 0, even with a 30 s
   overlap. One context per chunk, run in order.
