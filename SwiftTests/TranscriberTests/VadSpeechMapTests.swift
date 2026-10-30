@@ -125,3 +125,21 @@ struct VadSpeechMapBlockReadingTests {
         #expect(try VadSpeechMap.samples16k(contentsOf: url).isEmpty)
     }
 }
+
+extension VadSpeechMapBlockReadingTests {
+    /// A file whose header claims more audio than it holds (a lagging writer, a truncated copy): the
+    /// reader returns the audio that is there and stops, it does not throw the whole file away.
+    @Test(arguments: [16_000.0, 48_000.0])
+    func aHeaderThatOverReportsReadsTheAudioThatIsThere(rate: Double) throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("vad-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try RecoveryFixtures.writeFakeWav(at: url, seconds: 1, sampleRate: Int(rate))
+        var data = try Data(contentsOf: url)
+        let claimed = UInt32(2 * rate) * 2  // two seconds of 16-bit mono, against one written
+        withUnsafeBytes(of: (36 + claimed).littleEndian) { data.replaceSubrange(4..<8, with: $0) }
+        withUnsafeBytes(of: claimed.littleEndian) { data.replaceSubrange(40..<44, with: $0) }
+        try data.write(to: url)
+        let samples = try VadSpeechMap.samples16k(contentsOf: url)
+        #expect(abs(samples.count - 16_000) <= 64, "read \(samples.count) samples")
+    }
+}
