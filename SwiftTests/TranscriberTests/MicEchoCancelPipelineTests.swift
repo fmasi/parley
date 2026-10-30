@@ -404,9 +404,7 @@ private struct ThrowingCanceller: MicEchoCancelling {
     }
 
     /// One stereo archive (mic 440 Hz left, system 1760 Hz right) and a transcript over it.
-    func makeRecordingForFallback() async throws -> (transcript: URL, cleanup: () -> Void) { try await makeRecording(cancelled: true) }
-
-    private func makeRecording(cancelled: Bool) async throws -> (transcript: URL, cleanup: () -> Void) {
+    fileprivate func makeRecording(cancelled: Bool) async throws -> (transcript: URL, cleanup: () -> Void) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rediar-aec-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let sys = dir.appendingPathComponent("call-0.wav"), mic = dir.appendingPathComponent("call-0_mic.wav")
@@ -423,7 +421,7 @@ private struct ThrowingCanceller: MicEchoCancelling {
     }
 
     /// Zero crossings per second: tells the 440 Hz side from the 1760 Hz side.
-    private func crossingsPerSecond(_ x: [Float]) -> Double {
+    fileprivate func crossingsPerSecond(_ x: [Float]) -> Double {
         let n = zip(x, x.dropFirst()).filter { ($0 < 0) != ($1 < 0) }.count
         return Double(n) / (Double(x.count) / 16_000)
     }
@@ -467,10 +465,10 @@ extension RediarizeEchoCancelTests {
 
     /// A canceller that cannot run (a damaged bundle) leaves the raw mic, as the pipeline does; the re-detect completes.
     @Test func aFailingCancellerFallsBackToTheRawMic() async throws {
-        let (t, cleanup) = try await makeRecordingForFallback(); defer { cleanup() }
+        let (t, cleanup) = try await makeRecording(cancelled: true); defer { cleanup() }
         let diarizer = RecordingDiarizer()
         _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "local", speakerCount: 1, diarizer: diarizer,
                                                      echoCanceller: ThrowingSampleCanceller())
-        #expect(!diarizer.audio.isEmpty)
+        #expect(abs(crossingsPerSecond(diarizer.audio) - 880) < 60, "the raw 440 Hz mic, not nothing or the far end")
     }
 }
