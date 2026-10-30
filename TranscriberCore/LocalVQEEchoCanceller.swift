@@ -87,65 +87,140 @@ public final class LocalVQEEchoCanceller {
 
     /// Cancels the echo of `reference` in `microphone` (same length, 16 kHz mono) and returns the
     /// cleaned microphone, sample-aligned with the input: the STFT's one hop of latency is removed.
+    /// A whole clip in memory; `Stream` is the same processing a block at a time.
     public func process(microphone: [Float], reference: [Float]) throws -> [Float] {
         guard microphone.count == reference.count else {
             throw Failure.lengthMismatch(microphone: microphone.count, reference: reference.count)
         }
-        guard microphone.allSatisfy(\.isFinite), reference.allSatisfy(\.isFinite) else { throw Failure.nonFiniteInput }
-        let n = microphone.count
-        if n == 0 { return [] }
+        if microphone.isEmpty { return [] }
+        let stream = try Stream(self)
+        var output = try microphone.withUnsafeBufferPointer { m in
+            try reference.withUnsafeBufferPointer { r in try stream.push(microphone: m, reference: r) }
+        }
+        output.append(contentsOf: try stream.finish())
+        return output
+    }
 
-        localvqe_daf_reset(daf)
-        let state = model.makeState()
-        let hop = Self.hop
-        // One extra hop flushes the overlap-add, whose output runs one hop behind its input.
-        let padded = ((n + hop - 1) / hop + 1) * hop
-        var mic = microphone, ref = reference
-        mic.append(contentsOf: repeatElement(0, count: padded - n))
-        ref.append(contentsOf: repeatElement(0, count: padded - n))
+    /// One clip's cancellation, fed in blocks of any length (#342): what lets a 30-minute chunk be
+    /// cancelled without holding it in memory. `push` returns the cleaned samples completed so far,
+    /// sample-aligned with the input; `finish` flushes the rest, so the output is exactly as long as
+    /// the input. Starting a stream resets the canceller: one stream at a time per canceller.
+    public final class Stream {
+        private let canceller: LocalVQEEchoCanceller
+        private let state: MLState
+        private let micInput: MLMultiArray
+        private let refInput: MLMultiArray
+        private var residual: [Float], estimate: [Float]
+        private var residualHistory: [Float], estimateHistory: [Float]
+        private var overlap: [Float]
+        private var spectrum: [Float]
+        /// Input not yet a whole hop.
+        private var pendingMic: [Float] = [], pendingRef: [Float] = []
+        /// The first hop out of the overlap-add belongs to before the clip: it is dropped.
+        private var dropped = false
+        private var samplesIn = 0, samplesOut = 0
 
-        let micInput = try MLMultiArray(shape: [1, 2, 1, NSNumber(value: Self.bins)], dataType: .float16)
-        let refInput = try MLMultiArray(shape: [1, 2, 1, NSNumber(value: Self.bins)], dataType: .float16)
-        var residual = [Float](repeating: 0, count: hop), estimate = [Float](repeating: 0, count: hop)
-        var residualHistory = [Float](repeating: 0, count: hop), estimateHistory = [Float](repeating: 0, count: hop)
-        var overlap = [Float](repeating: 0, count: Self.fftSize)
-        var spectrum = [Float](repeating: 0, count: 2 * Self.bins)
-        var output = [Float]()
-        output.reserveCapacity(padded)
+        public init(_ canceller: LocalVQEEchoCanceller) throws {
+            self.canceller = canceller
+            localvqe_daf_reset(canceller.daf)
+            state = canceller.model.makeState()
+            micInput = try MLMultiArray(shape: [1, 2, 1, NSNumber(value: LocalVQEEchoCanceller.bins)], dataType: .float16)
+            refInput = try MLMultiArray(shape: [1, 2, 1, NSNumber(value: LocalVQEEchoCanceller.bins)], dataType: .float16)
+            let hop = LocalVQEEchoCanceller.hop
+            residual = [Float](repeating: 0, count: hop); estimate = residual
+            residualHistory = residual; estimateHistory = residual
+            overlap = [Float](repeating: 0, count: LocalVQEEchoCanceller.fftSize)
+            spectrum = [Float](repeating: 0, count: 2 * LocalVQEEchoCanceller.bins)
+        }
 
-        for offset in stride(from: 0, to: padded, by: hop) {
-            let ok = mic.withUnsafeBufferPointer { m in
-                ref.withUnsafeBufferPointer { r in
-                    localvqe_daf_process(daf, m.baseAddress! + offset, r.baseAddress! + offset, hop,
-                                         &residual, &estimate)
+        /// Feeds `microphone` and `reference` (same length) and returns the cleaned samples now complete.
+        public func push(microphone: UnsafeBufferPointer<Float>, reference: UnsafeBufferPointer<Float>) throws -> [Float] {
+            guard microphone.count == reference.count else {
+                throw Failure.lengthMismatch(microphone: microphone.count, reference: reference.count)
+            }
+            guard microphone.allSatisfy(\.isFinite), reference.allSatisfy(\.isFinite) else { throw Failure.nonFiniteInput }
+            samplesIn += microphone.count
+            let hop = LocalVQEEchoCanceller.hop
+            var output = [Float]()
+            output.reserveCapacity(microphone.count + hop)
+            var offset = 0
+            if !pendingMic.isEmpty {  // complete the partial hop first
+                let take = min(hop - pendingMic.count, microphone.count)
+                pendingMic.append(contentsOf: microphone[0..<take]); pendingRef.append(contentsOf: reference[0..<take])
+                offset = take
+                if pendingMic.count == hop {
+                    let (m, r) = (pendingMic, pendingRef)
+                    pendingMic.removeAll(keepingCapacity: true); pendingRef.removeAll(keepingCapacity: true)
+                    try m.withUnsafeBufferPointer { mp in
+                        try r.withUnsafeBufferPointer { rp in try hopThrough(mp.baseAddress!, rp.baseAddress!, into: &output) }
+                    }
                 }
             }
-            guard ok else { throw Failure.controllerRejected }
-            analyze(frame: residual, history: &residualHistory, into: &spectrum)
-            Self.write(spectrum, to: micInput)
-            analyze(frame: estimate, history: &estimateHistory, into: &spectrum)
-            Self.write(spectrum, to: refInput)
+            while offset + hop <= microphone.count {
+                try hopThrough(microphone.baseAddress! + offset, reference.baseAddress! + offset, into: &output)
+                offset += hop
+            }
+            if offset < microphone.count {
+                pendingMic.append(contentsOf: microphone[offset...]); pendingRef.append(contentsOf: reference[offset...])
+            }
+            return output
+        }
+
+        /// Flushes the partial hop and the overlap-add (one hop of zeros), and returns the rest of the
+        /// output: in total, exactly as many samples as were pushed.
+        public func finish() throws -> [Float] {
+            let hop = LocalVQEEchoCanceller.hop
+            var output = [Float]()
+            let zeros = [Float](repeating: 0, count: hop)
+            let owed = samplesIn - samplesOut  // what the output still lacks; the flush makes up to a hop more
+            if !pendingMic.isEmpty {
+                let fill = hop - pendingMic.count
+                pendingMic.append(contentsOf: zeros[0..<fill]); pendingRef.append(contentsOf: zeros[0..<fill])
+                let (m, r) = (pendingMic, pendingRef)
+                pendingMic.removeAll(); pendingRef.removeAll()
+                try m.withUnsafeBufferPointer { mp in
+                    try r.withUnsafeBufferPointer { rp in try hopThrough(mp.baseAddress!, rp.baseAddress!, into: &output) }
+                }
+            }
+            try zeros.withUnsafeBufferPointer { z in try hopThrough(z.baseAddress!, z.baseAddress!, into: &output) }
+            if output.count > owed { output.removeLast(output.count - owed) }
+            samplesOut = samplesIn
+            return output
+        }
+
+        private func hopThrough(_ mic: UnsafePointer<Float>, _ ref: UnsafePointer<Float>, into output: inout [Float]) throws {
+            let c = canceller
+            guard localvqe_daf_process(c.daf, mic, ref, LocalVQEEchoCanceller.hop, &residual, &estimate) else {
+                throw Failure.controllerRejected
+            }
+            c.analyze(frame: residual, history: &residualHistory, into: &spectrum)
+            LocalVQEEchoCanceller.write(spectrum, to: micInput)
+            c.analyze(frame: estimate, history: &estimateHistory, into: &spectrum)
+            LocalVQEEchoCanceller.write(spectrum, to: refInput)
             try autoreleasepool {
                 let inputs = try MLDictionaryFeatureProvider(dictionary: [
                     "mic_spectrum": MLFeatureValue(multiArray: micInput),
                     "reference_spectrum": MLFeatureValue(multiArray: refInput),
                 ])
-                let result = try model.prediction(from: inputs, using: state)
+                let result = try c.model.prediction(from: inputs, using: state)
                 guard let enhanced = result.featureValue(for: "enhanced_spectrum")?.multiArrayValue,
-                      enhanced.count == 2 * Self.bins
+                      enhanced.count == 2 * LocalVQEEchoCanceller.bins
                 else { throw Failure.modelOutputMissing }
-                Self.read(enhanced, into: &spectrum)
+                LocalVQEEchoCanceller.read(enhanced, into: &spectrum)
             }
-            synthesize(spectrum: spectrum, overlap: &overlap, appendingTo: &output)
+            var completed = [Float]()
+            completed.reserveCapacity(LocalVQEEchoCanceller.hop)
+            c.synthesize(spectrum: spectrum, overlap: &overlap, appendingTo: &completed)
+            guard completed.allSatisfy(\.isFinite) else { throw Failure.nonFiniteOutput }
+            if !dropped { dropped = true; return }
+            samplesOut += completed.count
+            output.append(contentsOf: completed)
         }
-        let aligned = Array(output[hop..<(hop + n)])
-        guard aligned.allSatisfy(\.isFinite) else { throw Failure.nonFiniteOutput }
-        return aligned
     }
 
     // MARK: - STFT (512 / 256, bins 1...256; real bins then imaginary bins)
 
-    private func analyze(frame: [Float], history: inout [Float], into spectrum: inout [Float]) {
+    fileprivate func analyze(frame: [Float], history: inout [Float], into spectrum: inout [Float]) {
         var real = [Float](repeating: 0, count: Self.fftSize), imaginary = [Float](repeating: 0, count: Self.fftSize)
         var windowed = history + frame
         vDSP.multiply(windowed, window, result: &windowed)
@@ -158,7 +233,7 @@ public final class LocalVQEEchoCanceller {
         }
     }
 
-    private func synthesize(spectrum: [Float], overlap: inout [Float], appendingTo output: inout [Float]) {
+    fileprivate func synthesize(spectrum: [Float], overlap: inout [Float], appendingTo output: inout [Float]) {
         var real = [Float](repeating: 0, count: Self.fftSize), imaginary = [Float](repeating: 0, count: Self.fftSize)
         for bin in 0..<(Self.bins - 1) {
             real[bin + 1] = spectrum[bin]
@@ -179,12 +254,12 @@ public final class LocalVQEEchoCanceller {
         for i in Self.hop..<Self.fftSize { overlap[i] = 0 }
     }
 
-    private static func write(_ values: [Float], to array: MLMultiArray) {
+    fileprivate static func write(_ values: [Float], to array: MLMultiArray) {
         let pointer = array.dataPointer.bindMemory(to: Float16.self, capacity: values.count)
         for i in values.indices { pointer[i] = Float16(values[i]) }
     }
 
-    private static func read(_ array: MLMultiArray, into values: inout [Float]) {
+    fileprivate static func read(_ array: MLMultiArray, into values: inout [Float]) {
         switch array.dataType {
         case .float16:
             let pointer = array.dataPointer.bindMemory(to: Float16.self, capacity: values.count)

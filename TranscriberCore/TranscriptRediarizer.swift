@@ -910,7 +910,7 @@ enum AudioDecode {
 
     /// Extract mono Float32 samples from a buffer, mixing channels down if the source isn't
     /// already mono (our chunk files always are, by construction — this is a defensive fallback).
-    private static func monoFloat32(from buffer: AVAudioPCMBuffer) throws -> [Float] {
+    static func monoFloat32(from buffer: AVAudioPCMBuffer) throws -> [Float] {
         let format = buffer.format
         let frameCount = Int(buffer.frameLength)
         guard frameCount > 0 else { return [] }

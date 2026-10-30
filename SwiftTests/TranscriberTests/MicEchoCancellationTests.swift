@@ -255,3 +255,121 @@ private let assetsDirectory = URL(fileURLWithPath: #filePath)
         #expect(untouched.framesReverted == 0)
     }
 }
+
+/// Block-at-a-time processing (#342) gives the answer the whole-clip processing gives, so a chunk's
+/// length never sets the memory it takes.
+@Suite(.serialized) struct EchoCancelStreamingTests {
+    @Test func feedingTheEngineInOddBlocksGivesTheWholeClipAnswer() throws {
+        let canceller = try LocalVQEEchoCanceller(assetsDirectory: assetsDirectory)
+        let far = voice(seconds: 5, seed: 71, level: 0.2)
+        let mic = zip(echo(of: far, delaySeconds: 0.06, gain: 0.5), voice(seconds: 5, seed: 72)).map { $0 + $1 }
+        let whole = try canceller.process(microphone: mic, reference: far)
+        let stream = try LocalVQEEchoCanceller.Stream(canceller)
+        var streamed = [Float](), offset = 0
+        for size in [1, 255, 257, 1000, 37, 16_000, 3, 9999].cycled(toCover: mic.count) {
+            let n = min(size, mic.count - offset)
+            if n == 0 { break }
+            streamed += try mic.withUnsafeBufferPointer { m in
+                try far.withUnsafeBufferPointer { r in
+                    try stream.push(microphone: UnsafeBufferPointer(rebasing: m[offset..<(offset + n)]),
+                                    reference: UnsafeBufferPointer(rebasing: r[offset..<(offset + n)]))
+                }
+            }
+            offset += n
+        }
+        streamed += try stream.finish()
+        #expect(streamed.count == mic.count)
+        #expect(streamed == whole)
+    }
+
+    @Test func theFilePathMatchesTheSamplesPath() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lvqe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let far = voice(seconds: 9, seed: 81, level: 0.2)
+        var near = [Float](repeating: 0, count: far.count)
+        for (k, v) in voice(seconds: 2, seed: 82, level: 0.1).enumerated() { near[5 * rate + k] = v }
+        let mic = zip(echo(of: far, delaySeconds: 0.05, gain: 0.4), near).map { $0 + $1 }
+        let shortFar = Array(far[0..<(7 * rate)])  // the reference ends early: silence past it
+        let micURL = dir.appendingPathComponent("mic.wav"), sysURL = dir.appendingPathComponent("sys.wav")
+        let outURL = dir.appendingPathComponent("out.wav")
+        try LocalVQEMicEchoCanceller.writeWAV(mic, to: micURL, sampleRate: rate)
+        try LocalVQEMicEchoCanceller.writeWAV(shortFar, to: sysURL, sampleRate: rate)
+        var strict = NearEndGuard.Parameters()
+        strict.maxCutDB = -200  // every loud frame with the far end silent reverts, so the blend is compared too
+        let canceller = LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory, guardParameters: strict)
+        let record = try canceller.cancelEcho(micURL: micURL, systemURL: sysURL, outputURL: outURL)
+        let fromFile = try AudioDecode.mono16kHzFloat(contentsOf: outURL)
+        let fromSamples = try canceller.cancelEcho(microphone: mic, reference: shortFar)
+        #expect(fromFile == fromSamples.samples)
+        #expect(record.framesReverted == fromSamples.framesReverted)
+        #expect(record.framesReverted > 0)
+        // No scratch file is left beside the output.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["mic.wav", "out.wav", "sys.wav"])
+    }
+
+    @Test func theBlockReaderReadsWhatTheWholeFileReaderReads() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lvqe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("48k.wav")
+        try LocalVQEMicEchoCanceller.writeWAV(voice(seconds: 3.3, seed: 91).flatMap { [$0, $0, $0] }, to: url, sampleRate: 48_000)
+        let whole = try AudioDecode.mono16kHzFloat(contentsOf: url)
+        let reader = try Mono16kReader(url: url)
+        var blocks = [Float]()
+        while true {
+            let b = try reader.read(maxFrames: 7_777)
+            if b.isEmpty { break }
+            blocks += b
+        }
+        #expect(abs(blocks.count - whole.count) <= 1)
+        let n = min(blocks.count, whole.count)
+        let worst = (0..<n).map { abs(blocks[$0] - whole[$0]) }.max() ?? 0
+        #expect(worst < 1e-3, "block reader differs by \(worst)")
+    }
+}
+
+/// The per-sample blend (the guard a block at a time) against the whole-array rule it replaced.
+@Suite struct NearEndGuardBlendTests {
+    /// The original two-pass rule: 1 in reverted frames, a linear ramp over `fade` samples beside them.
+    private func referenceGain(mask: [Bool], frame: Int, count: Int, fade: Int) -> [Float] {
+        var gain = [Float](repeating: 0, count: count)
+        for f in mask.indices where mask[f] { for s in (f * frame)..<min(count, (f + 1) * frame) { gain[s] = 1 } }
+        var d = Int.max / 2
+        for s in 0..<count {
+            d = gain[s] == 1 ? 0 : d + 1
+            if d > 0 && d <= fade { gain[s] = max(gain[s], 1 - Float(d) / Float(fade + 1)) }
+        }
+        d = Int.max / 2
+        for s in stride(from: count - 1, through: 0, by: -1) {
+            d = gain[s] == 1 ? 0 : d + 1
+            if d > 0 && d <= fade { gain[s] = max(gain[s], 1 - Float(d) / Float(fade + 1)) }
+        }
+        return gain
+    }
+
+    @Test(arguments: [0.05, 0.25])  // a fade shorter than a frame (the default) and one longer than two
+    func matchesTheWholeArrayRule(crossfade: Double) {
+        var p = NearEndGuard.Parameters()
+        p.crossfadeSeconds = crossfade
+        var rng = SystemRandomNumberGenerator()
+        for trial in 0..<20 {
+            let count = 1600 * 30 + Int.random(in: 0..<1600, using: &rng)  // a partial last frame
+            let frames = (count + 1599) / 1600
+            let mask = (0..<frames).map { _ in Bool.random(using: &rng) && Bool.random(using: &rng) }
+            let blend = NearEndGuard.Blend(mask: mask, frame: 1600, count: count, sampleRate: 16_000, parameters: p)
+            let reference = referenceGain(mask: mask, frame: 1600, count: count, fade: blend.fade)
+            let mismatch = (0..<count).first { blend.gain(at: $0) != reference[$0] }
+            #expect(mismatch == nil, "trial \(trial): sample \(mismatch ?? -1)")
+        }
+    }
+}
+
+private extension Array {
+    /// The sizes repeated until their sum covers `total`.
+    func cycled(toCover total: Int) -> [Element] where Element == Int {
+        var out = [Int](), sum = 0
+        while sum < total { for x in self { out.append(x); sum += x; if sum >= total { break } } }
+        return out
+    }
+}

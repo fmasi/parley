@@ -27,54 +27,123 @@ public enum NearEndGuard {
     }
 
     /// `microphone`, `cleaned` and `reference` are one stream each, same sample rate. `cleaned` must be
-    /// as long as `microphone`; a shorter `reference` counts as silent past its end.
+    /// as long as `microphone`; a shorter `reference` counts as silent past its end. A whole stream in
+    /// memory: `Frames` + `revertMask` + `Blend` are the same rule a block at a time.
     public static func apply(microphone: [Float], cleaned: [Float], reference: [Float], sampleRate: Int,
                              parameters p: Parameters = Parameters()) -> Result {
         precondition(microphone.count == cleaned.count, "cleaned and raw mic must be the same length")
-        let frame = max(1, Int((p.frameSeconds * Double(sampleRate)).rounded()))
+        let frame = frameLength(sampleRate: sampleRate, parameters: p)
         let frames = (microphone.count + frame - 1) / frame
         guard frames > 0 else { return Result(samples: cleaned, revertedFrames: 0) }
+        let mask = revertMask(micDB: levels(microphone, frame: frame, frames: frames),
+                              cleanDB: levels(cleaned, frame: frame, frames: frames),
+                              refDB: levels(reference, frame: frame, frames: frames), parameters: p)
+        let blend = Blend(mask: mask, frame: frame, count: microphone.count, sampleRate: sampleRate, parameters: p)
+        guard blend.revertedFrames > 0 else { return Result(samples: cleaned, revertedFrames: 0) }
+        var out = cleaned
+        blend.apply(microphone: microphone[...], to: &out[...], from: 0)
+        return Result(samples: out, revertedFrames: blend.revertedFrames)
+    }
 
-        let micDB = levels(microphone, frame: frame, frames: frames)
-        let cleanDB = levels(cleaned, frame: frame, frames: frames)
-        let refDB = levels(reference, frame: frame, frames: frames)
+    static func frameLength(sampleRate: Int, parameters p: Parameters) -> Int {
+        max(1, Int((p.frameSeconds * Double(sampleRate)).rounded()))
+    }
+
+    /// Which frames get the raw mic back, from each stream's RMS per frame (dBFS).
+    static func revertMask(micDB: [Double], cleanDB: [Double], refDB: [Double], parameters p: Parameters) -> [Bool] {
+        let frames = micDB.count
         let margin = Int((p.silenceMarginSeconds / p.frameSeconds).rounded())
-
         // Far end silent across the margin: a sliding count of loud reference frames.
         var loud = [Int](repeating: 0, count: frames + 1)
-        for i in 0..<frames { loud[i + 1] = loud[i] + (refDB[i] >= p.farEndSilentDBFS ? 1 : 0) }
-        var revert = [Bool](repeating: false, count: frames)
-        var count = 0
         for i in 0..<frames {
+            let ref = i < refDB.count ? refDB[i] : -200
+            loud[i + 1] = loud[i] + (ref >= p.farEndSilentDBFS ? 1 : 0)
+        }
+        return (0..<frames).map { i in
             let lo = max(0, i - margin), hi = min(frames, i + margin + 1)
-            let farSilent = loud[hi] - loud[lo] == 0
-            if farSilent && micDB[i] >= p.micActiveDBFS && micDB[i] - cleanDB[i] >= p.maxCutDB {
-                revert[i] = true
-                count += 1
+            return loud[hi] - loud[lo] == 0 && micDB[i] >= p.micActiveDBFS && micDB[i] - cleanDB[i] >= p.maxCutDB
+        }
+    }
+
+    /// Per-frame RMS accumulated a block at a time: feed every block of a stream in order, then `levels`.
+    struct Frames {
+        let frame: Int
+        private var sums: [Double] = []
+        private var counts: [Int] = []
+        private var position = 0
+        init(frame: Int) { self.frame = frame }
+
+        mutating func add(_ block: UnsafeBufferPointer<Float>) {
+            for x in block {
+                let f = position / frame
+                if f == sums.count { sums.append(0); counts.append(0) }
+                sums[f] += Double(x) * Double(x)
+                counts[f] += 1
+                position += 1
             }
         }
-        guard count > 0 else { return Result(samples: cleaned, revertedFrames: 0) }
 
-        // Gain toward the raw mic: 1 inside reverted frames, ramping to 0 over the crossfade outside
-        // them (into frames whose far end is silent too, by the margin, so no echo comes back).
-        let fade = max(1, Int((p.crossfadeSeconds * Double(sampleRate)).rounded()))
-        var gain = [Float](repeating: 0, count: microphone.count)
-        for i in 0..<frames where revert[i] {
-            for s in (i * frame)..<min(microphone.count, (i + 1) * frame) { gain[s] = 1 }
+        /// dBFS per frame, padded with silence (-200) to `frames`.
+        func levels(frames: Int) -> [Double] {
+            (0..<frames).map { f in
+                guard f < sums.count, counts[f] > 0 else { return -200 }
+                let rms = (sums[f] / Double(counts[f])).squareRoot()
+                return rms > 0 ? 20 * log10(rms) : -200
+            }
         }
-        var distance = Int.max / 2
-        for s in 0..<gain.count {  // forward pass: distance since the last reverted sample
-            distance = gain[s] == 1 ? 0 : distance + 1
-            if distance > 0 && distance <= fade { gain[s] = max(gain[s], 1 - Float(distance) / Float(fade + 1)) }
+    }
+
+    /// The crossfaded mix toward the raw mic that a mask asks for, computed per sample: 1 inside a
+    /// reverted frame, ramping to 0 over the crossfade outside it (into frames whose far end is silent
+    /// too, by the margin, so no echo comes back).
+    struct Blend {
+        let mask: [Bool]
+        let frame: Int
+        let count: Int
+        let fade: Int
+        /// The nearest reverted frame at or before / at or after each frame.
+        private let previous: [Int?], next: [Int?]
+        var revertedFrames: Int { mask.lazy.filter { $0 }.count }
+
+        init(mask: [Bool], frame: Int, count: Int, sampleRate: Int, parameters p: Parameters) {
+            self.mask = mask
+            self.frame = frame
+            self.count = count
+            fade = max(1, Int((p.crossfadeSeconds * Double(sampleRate)).rounded()))
+            var previous = [Int?](repeating: nil, count: mask.count), next = previous
+            var last: Int? = nil
+            for f in mask.indices { if mask[f] { last = f }; previous[f] = last }
+            last = nil
+            for f in mask.indices.reversed() { if mask[f] { last = f }; next[f] = last }
+            self.previous = previous
+            self.next = next
         }
-        distance = Int.max / 2
-        for s in stride(from: gain.count - 1, through: 0, by: -1) {  // backward pass
-            distance = gain[s] == 1 ? 0 : distance + 1
-            if distance > 0 && distance <= fade { gain[s] = max(gain[s], 1 - Float(distance) / Float(fade + 1)) }
+
+        func gain(at s: Int) -> Float {
+            let f = s / frame
+            if mask[f] { return 1 }
+            var g: Float = 0
+            if let p = previous[f] {  // samples since the last reverted sample
+                let distance = s - (min(count, (p + 1) * frame) - 1)
+                if distance <= fade { g = max(g, 1 - Float(distance) / Float(fade + 1)) }
+            }
+            if let n = next[f] {  // samples until the next reverted sample
+                let distance = n * frame - s
+                if distance <= fade { g = max(g, 1 - Float(distance) / Float(fade + 1)) }
+            }
+            return g
         }
-        var out = cleaned
-        for s in out.indices where gain[s] > 0 { out[s] = gain[s] * microphone[s] + (1 - gain[s]) * cleaned[s] }
-        return Result(samples: out, revertedFrames: count)
+
+        /// Mixes `microphone` into `cleaned` in place, both starting at stream sample `start`.
+        func apply(microphone: ArraySlice<Float>, to cleaned: inout ArraySlice<Float>, from start: Int) {
+            precondition(microphone.count == cleaned.count)
+            var m = microphone.startIndex
+            for c in cleaned.indices {
+                let g = gain(at: start + (c - cleaned.startIndex))
+                if g > 0 { cleaned[c] = g * microphone[m] + (1 - g) * cleaned[c] }
+                m += 1
+            }
+        }
     }
 
     /// RMS per frame in dBFS (silence is -200).

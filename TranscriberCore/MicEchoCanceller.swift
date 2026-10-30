@@ -100,35 +100,122 @@ public struct LocalVQEMicEchoCanceller: MicEchoCancelling, MicEchoSampleCancelli
         bundledAssetsDirectory(bundle: bundle).map { LocalVQEMicEchoCanceller(assetsDirectory: $0) }
     }
 
+    /// Seconds of audio read, cancelled and written per step: what bounds the memory a chunk takes.
+    static let blockSeconds = 4
+
+    /// A block at a time, in two passes over the files, so a chunk's length never sets the memory (#342):
+    /// pass 1 streams both WAVs through the canceller, writes the 16 kHz mic and the cleaned mic to scratch
+    /// files and keeps only each stream's RMS per 100 ms frame; the guard's decision needs the far end
+    /// half a second ahead, which those levels give. Pass 2 reads the two scratch files back and writes
+    /// the guarded output. The result is the same as `cancelEcho(microphone:reference:)` on the decoded files.
     public func cancelEcho(micURL: URL, systemURL: URL, outputURL: URL) throws -> MicEchoCancelRecord {
-        // AudioDecode: the 16 kHz mono reader the re-detect path uses (FluidAudio's own converter is
-        // unreachable by name from this module; see AudioDecode).
-        let mic = try AudioDecode.mono16kHzFloat(contentsOf: micURL)
-        guard !mic.isEmpty else { throw Failure.emptyMicrophone }
-        let reference = try AudioDecode.mono16kHzFloat(contentsOf: systemURL)
-        let (cleaned, reverted, modelSHA256) = try run(microphone: mic, reference: reference)
-        try Self.writeWAV(cleaned, to: outputURL, sampleRate: LocalVQEEchoCanceller.sampleRate)
-        return MicEchoCancelRecord(engine: Self.engine, modelSHA256: modelSHA256, framesReverted: reverted,
-                                   seconds: Double(mic.count) / Double(LocalVQEEchoCanceller.sampleRate))
-    }
-
-    public func cancelEcho(microphone: [Float], reference: [Float]) throws -> (samples: [Float], framesReverted: Int) {
-        let (cleaned, reverted, _) = try run(microphone: microphone, reference: reference)
-        return (cleaned, reverted)
-    }
-
-    private func run(microphone mic: [Float], reference: [Float]) throws -> ([Float], Int, String) {
-        var reference = reference
-        if reference.count > mic.count {
-            reference.removeLast(reference.count - mic.count)
-        } else {
-            reference.append(contentsOf: repeatElement(0, count: mic.count - reference.count))
+        let rate = LocalVQEEchoCanceller.sampleRate
+        let block = Self.blockSeconds * rate
+        let micReader = try Mono16kReader(url: micURL), refReader = try Mono16kReader(url: systemURL)
+        let scratch = outputURL.deletingLastPathComponent()
+        let mic16URL = scratch.appendingPathComponent("parley-aec-mic16-\(UUID().uuidString).wav")
+        let cleanURL = scratch.appendingPathComponent("parley-aec-clean-\(UUID().uuidString).wav")
+        defer {
+            try? FileManager.default.removeItem(at: mic16URL)
+            try? FileManager.default.removeItem(at: cleanURL)
         }
         let canceller = try LocalVQEEchoCanceller(assetsDirectory: assetsDirectory)
-        let cleaned = try canceller.process(microphone: mic, reference: reference)
-        let guarded = NearEndGuard.apply(microphone: mic, cleaned: cleaned, reference: reference,
-                                         sampleRate: LocalVQEEchoCanceller.sampleRate, parameters: guardParameters)
-        return (guarded.samples, guarded.revertedFrames, canceller.modelSHA256)
+        let stream = try LocalVQEEchoCanceller.Stream(canceller)
+        let frame = NearEndGuard.frameLength(sampleRate: rate, parameters: guardParameters)
+        var micLevels = NearEndGuard.Frames(frame: frame), refLevels = micLevels, cleanLevels = micLevels
+        var micCount = 0
+        do {
+            let mic16 = try MonoWavWriter(url: mic16URL, sampleRate: rate)
+            let clean = try MonoWavWriter(url: cleanURL, sampleRate: rate)
+            while true {
+                let micBlock = try micReader.read(maxFrames: block)
+                if micBlock.isEmpty { break }
+                // The reference is cut to the mic, and silence past its own end.
+                var refBlock = try refReader.read(maxFrames: micBlock.count)
+                while refBlock.count < micBlock.count {
+                    let more = try refReader.read(maxFrames: micBlock.count - refBlock.count)
+                    if more.isEmpty { break }
+                    refBlock.append(contentsOf: more)
+                }
+                if refBlock.count < micBlock.count { refBlock.append(contentsOf: repeatElement(0, count: micBlock.count - refBlock.count)) }
+                micCount += micBlock.count
+                let cleaned = try micBlock.withUnsafeBufferPointer { m in
+                    try refBlock.withUnsafeBufferPointer { r in
+                        micLevels.add(m); refLevels.add(r)
+                        return try stream.push(microphone: m, reference: r)
+                    }
+                }
+                try mic16.write(micBlock)
+                try clean.write(cleaned)
+                cleaned.withUnsafeBufferPointer { cleanLevels.add($0) }
+            }
+            let tail = try stream.finish()
+            try clean.write(tail)
+            tail.withUnsafeBufferPointer { cleanLevels.add($0) }
+        }
+        guard micCount > 0 else { throw Failure.emptyMicrophone }
+
+        let frames = (micCount + frame - 1) / frame
+        let mask = NearEndGuard.revertMask(micDB: micLevels.levels(frames: frames), cleanDB: cleanLevels.levels(frames: frames),
+                                           refDB: refLevels.levels(frames: frames), parameters: guardParameters)
+        let blend = NearEndGuard.Blend(mask: mask, frame: frame, count: micCount, sampleRate: rate, parameters: guardParameters)
+        let micBack = try Mono16kReader(url: mic16URL), cleanBack = try Mono16kReader(url: cleanURL)
+        let out = try MonoWavWriter(url: outputURL, sampleRate: rate)
+        var position = 0
+        while position < micCount {
+            var cleaned = try cleanBack.read(maxFrames: block)
+            if cleaned.isEmpty { break }
+            let raw = try micBack.read(maxFrames: cleaned.count)
+            guard raw.count == cleaned.count else {
+                throw LocalVQEEchoCanceller.Failure.lengthMismatch(microphone: raw.count, reference: cleaned.count)
+            }
+            if blend.revertedFrames > 0 { blend.apply(microphone: raw[...], to: &cleaned[...], from: position) }
+            try out.write(cleaned)
+            position += cleaned.count
+        }
+        return MicEchoCancelRecord(engine: Self.engine, modelSHA256: canceller.modelSHA256,
+                                   framesReverted: blend.revertedFrames, seconds: Double(micCount) / Double(rate))
+    }
+
+    /// On samples already in memory (re-detect): the canceller streams over them a block at a time and the
+    /// guard mixes in place, so only the input and the output are held.
+    public func cancelEcho(microphone mic: [Float], reference: [Float]) throws -> (samples: [Float], framesReverted: Int) {
+        let rate = LocalVQEEchoCanceller.sampleRate
+        let canceller = try LocalVQEEchoCanceller(assetsDirectory: assetsDirectory)
+        let stream = try LocalVQEEchoCanceller.Stream(canceller)
+        let frame = NearEndGuard.frameLength(sampleRate: rate, parameters: guardParameters)
+        var micLevels = NearEndGuard.Frames(frame: frame), refLevels = micLevels
+        let block = Self.blockSeconds * rate
+        var cleaned = [Float]()
+        cleaned.reserveCapacity(mic.count)
+        let zeros = [Float](repeating: 0, count: block)
+        try mic.withUnsafeBufferPointer { m in
+            try reference.withUnsafeBufferPointer { r in
+                var offset = 0
+                while offset < m.count {
+                    let n = min(block, m.count - offset)
+                    let micBlock = UnsafeBufferPointer(rebasing: m[offset..<(offset + n)])
+                    // The reference is cut to the mic, and silence past its own end.
+                    let available = max(0, min(n, r.count - offset))
+                    var refBlock = available > 0 ? Array(r[offset..<(offset + available)]) : []
+                    if available < n { refBlock.append(contentsOf: zeros[0..<(n - available)]) }
+                    try refBlock.withUnsafeBufferPointer { rb in
+                        micLevels.add(micBlock); refLevels.add(rb)
+                        cleaned.append(contentsOf: try stream.push(microphone: micBlock, reference: rb))
+                    }
+                    offset += n
+                }
+            }
+        }
+        cleaned.append(contentsOf: try stream.finish())
+        let frames = (mic.count + frame - 1) / frame
+        var cleanLevels = NearEndGuard.Frames(frame: frame)
+        cleaned.withUnsafeBufferPointer { cleanLevels.add($0) }
+        let mask = NearEndGuard.revertMask(micDB: micLevels.levels(frames: frames), cleanDB: cleanLevels.levels(frames: frames),
+                                           refDB: refLevels.levels(frames: frames), parameters: guardParameters)
+        let blend = NearEndGuard.Blend(mask: mask, frame: frame, count: mic.count, sampleRate: rate, parameters: guardParameters)
+        if blend.revertedFrames > 0 { blend.apply(microphone: mic[...], to: &cleaned[...], from: 0) }
+        return (cleaned, blend.revertedFrames)
     }
 
     static func writeWAV(_ samples: [Float], to url: URL, sampleRate: Int) throws {
