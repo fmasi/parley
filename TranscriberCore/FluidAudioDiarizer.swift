@@ -6,15 +6,21 @@ import FluidAudio
 /// Where the diarizer's segmentation, embedding and PLDA models run (`diarization_compute_units`).
 /// `.all` lets Core ML choose, which on Apple silicon puts them on the GPU: the fastest, and the largest
 /// footprint. `.neuralEngine` measured the same speakers at about half the memory (30-min stream on an
-/// M5 Pro: 1.02 -> 0.53 GB, 3.4 -> 5.2 s); `.cpuOnly` the same memory as the Neural Engine at three
-/// times the time. An unknown value reads as `.all`.
+/// M5 Pro: 1.02 -> 0.53 GB, 3.4 -> 5.2 s); `.cpuOnly` the same memory as the Neural Engine at twice its
+/// time (three times the GPU's). An unknown value reads as `.all`, with a warning in the log.
 public enum DiarizationComputeUnits: String, Codable, Equatable, Sendable {
     case all
     case neuralEngine = "neural_engine"
     case cpuOnly = "cpu_only"
 
     public init(from decoder: Decoder) throws {
-        self = DiarizationComputeUnits(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .all
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        guard let value = DiarizationComputeUnits(rawValue: raw) else {
+            Logger.config.warning("diarization_compute_units \"\(raw, privacy: .public)\" is not all, neural_engine or cpu_only — using all (the GPU)")
+            self = .all
+            return
+        }
+        self = value
     }
 
     /// The model configuration to load with; nil keeps FluidAudio's own default (`.all`) exactly.
