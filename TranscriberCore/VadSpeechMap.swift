@@ -48,7 +48,7 @@ public actor VadSpeechMap {
     public init() {}
 
     /// Analyze audio and return speech regions with probabilities.
-    /// Returns nil if VAD model is not cached (graceful degradation).
+    /// Returns nil if VAD model is not cached (graceful degradation), or if the file holds no samples.
     public func analyze(audioPath: URL) async throws -> [SpeechRegion]? {
         guard Self.isModelCached() else {
             Logger.transcription.debug("VAD model not cached — skipping speech map analysis")
@@ -56,7 +56,12 @@ public actor VadSpeechMap {
         }
         let startTime = ContinuousClock.now
         let mgr = try await ensureLoaded()
-        let results = try await mgr.process(audioPath)
+        // Not `mgr.process(audioPath)`: FluidAudio's file path decodes the whole file at its own rate
+        // first, then resamples it in one pass. A 61-minute 48 kHz chunk took 2.0 GB and 20 s that way;
+        // read a block at a time to 16 kHz, the same audio takes about a fifth of that.
+        let samples = try Self.samples16k(contentsOf: audioPath)
+        guard !samples.isEmpty else { return nil }
+        let results = try await mgr.process(samples)
         return Self.regions(from: results, startTime: startTime)
     }
 
@@ -82,6 +87,18 @@ public actor VadSpeechMap {
         let mgr = try await ensureLoaded()
         let results = try await mgr.process(samples)
         return Self.regions(from: results, startTime: startTime)
+    }
+
+    /// The file as 16 kHz mono samples, read a block at a time (only the 16 kHz result is ever whole).
+    static func samples16k(contentsOf url: URL) throws -> [Float] {
+        let reader = try Mono16kReader(url: url)
+        var samples = [Float]()
+        while true {
+            let block = try reader.read(maxFrames: 1 << 16)
+            if block.isEmpty { break }
+            samples.append(contentsOf: block)
+        }
+        return samples
     }
 
     /// Shared region-building + logging behind both `analyze` overloads above.

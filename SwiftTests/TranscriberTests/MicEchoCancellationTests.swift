@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import TranscriberCore
@@ -371,5 +372,66 @@ private extension Array {
         var out = [Int](), sum = 0
         while sum < total { for x in self { out.append(x); sum += x; if sum >= total { break } } }
         return out
+    }
+}
+
+/// A read error is the end of a file only where the stated length is an estimate (AAC); on a WAV it is
+/// an error, and echo cancellation refuses a mic read that ends short (the chunk then uses the raw mic).
+@Suite(.serialized) struct BlockReaderShortReadTests {
+    private func dir() throws -> URL {
+        let d = FileManager.default.temporaryDirectory.appendingPathComponent("lvqe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    @Test func onlyACompressedFilesLengthIsAnEstimate() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let wav = d.appendingPathComponent("a.wav"), m4a = d.appendingPathComponent("a.m4a")
+        try LocalVQEMicEchoCanceller.writeWAV(voice(seconds: 1, seed: 101), to: wav, sampleRate: rate)
+        let aac: [String: Any] = [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 48_000, AVNumberOfChannelsKey: 1]
+        do {  // the writer closes at the end of this scope
+            let file = try AVAudioFile(forWriting: m4a, settings: aac)
+            let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000)!
+            buffer.frameLength = 48_000
+            try file.write(from: buffer)
+        }
+        #expect(try Mono16kReader(url: wav).lengthIsEstimate == false)
+        #expect(try Mono16kReader(url: m4a).lengthIsEstimate == true)
+    }
+
+    @Test func aPCMReadThatEndsShortIsRefusedAndAnEstimatedOneIsNot() throws {
+        #expect(throws: LocalVQEMicEchoCanceller.Failure.shortRead(read: 16_000, expected: 32_000)) {
+            try LocalVQEMicEchoCanceller.checkComplete(read: 16_000, expected: 32_000, lengthIsEstimate: false)
+        }
+        try LocalVQEMicEchoCanceller.checkComplete(read: 31_900, expected: 32_000, lengthIsEstimate: false)  // rounding
+        try LocalVQEMicEchoCanceller.checkComplete(read: 16_000, expected: 32_000, lengthIsEstimate: true)   // AAC estimate
+    }
+
+    /// The rate the capture helper writes: a resampled mic is read, cancelled and written whole.
+    /// (`shortRead` itself needs a file shrinking under the reader; `checkComplete` is tested directly above.)
+    @Test func a48kHzMicIsCancelledToItsFullLength() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let mic = d.appendingPathComponent("mic.wav"), sys = d.appendingPathComponent("sys.wav"), out = d.appendingPathComponent("out.wav")
+        try LocalVQEMicEchoCanceller.writeWAV(voice(seconds: 3.3, seed: 111).flatMap { [$0, $0, $0] }, to: mic, sampleRate: 48_000)
+        try LocalVQEMicEchoCanceller.writeWAV(voice(seconds: 3.3, seed: 112).flatMap { [$0, $0, $0] }, to: sys, sampleRate: 48_000)
+        let record = try LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory).cancelEcho(micURL: mic, systemURL: sys, outputURL: out)
+        #expect(abs(record.seconds - 3.3) < 0.01)
+        #expect(abs(try AudioDecode.mono16kHzFloat(contentsOf: out).count - Int(3.3 * 16_000)) <= 1)
+    }
+
+    @Test func aWAVWhoseHeaderOverReportsIsReadToItsRealEnd() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let mic = d.appendingPathComponent("mic.wav"), sys = d.appendingPathComponent("sys.wav")
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1, sampleRate: 16_000)
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1, sampleRate: 16_000)
+        var data = try Data(contentsOf: mic)  // the header claims two seconds; the file holds one
+        withUnsafeBytes(of: UInt32(36 + 64_000).littleEndian) { data.replaceSubrange(4..<8, with: $0) }
+        withUnsafeBytes(of: UInt32(64_000).littleEndian) { data.replaceSubrange(40..<44, with: $0) }
+        try data.write(to: mic)
+        // AVAudioFile caps the length at the data held, so this is a complete read of one second.
+        let record = try LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory)
+            .cancelEcho(micURL: mic, systemURL: sys, outputURL: d.appendingPathComponent("out.wav"))
+        #expect(abs(record.seconds - 1) < 0.01)
     }
 }

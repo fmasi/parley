@@ -13,9 +13,20 @@ final class Mono16kReader {
     private let nativeBlock: AVAudioFrameCount
     private var fileDone = false
     private var finished = false
+    /// A compressed file (AAC) whose stated length is only an estimate: a read that throws after real
+    /// audio is its padded tail. Never true for PCM (WAV), whose length is exact: there a throw is a real
+    /// read error and is reported.
+    let lengthIsEstimate: Bool
+
+    /// The file's length as 16 kHz samples (its stated length, converted): what a complete read returns,
+    /// give or take the resampler's rounding.
+    var expectedFrames: Int {
+        Int((Double(file.length) * Self.sampleRate / file.processingFormat.sampleRate).rounded())
+    }
 
     init(url: URL) throws {
         file = try AVAudioFile(forReading: url)
+        lengthIsEstimate = file.fileFormat.streamDescription.pointee.mFormatID != kAudioFormatLinearPCM
         let rate = file.processingFormat.sampleRate
         guard let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false),
               let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Self.sampleRate, channels: 1,
@@ -74,7 +85,14 @@ final class Mono16kReader {
         guard remaining > 0,
               let raw = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: min(maxFrames, remaining))
         else { fileDone = true; return nil }
-        try file.read(into: raw)
+        do {
+            try file.read(into: raw)
+        } catch where lengthIsEstimate && file.framePosition > 0 {
+            // Only a compressed file's padded tail (its length is an estimate), past real audio, as
+            // FluidAudio's own reader treats it. A PCM read error propagates.
+            fileDone = true
+            return nil
+        }
         guard raw.frameLength > 0 else { fileDone = true; return nil }
         let format = raw.format
         if format.channelCount == 1, format.commonFormat == .pcmFormatFloat32, !format.isInterleaved { return raw }

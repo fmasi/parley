@@ -36,7 +36,9 @@ struct RenameDialog: View {
     /// One instance for the dialog's lifetime. `FluidAudioDiarizer` caches a loaded manager per
     /// speaker count, and a fresh instance per press would throw that away — re-loading the models
     /// from disk on every Re-detect, including the common "try 2, then try 3" flow.
-    @State private var diarizer = FluidAudioDiarizer()
+    /// On the units the user chose (`diarization_compute_units`): re-detect diarizes a whole channel in
+    /// one pass, so it is where the Neural Engine's lower footprint matters most.
+    @State private var diarizer = FluidAudioDiarizer(computeUnits: ConfigManager.shared.config.diarizationComputeUnits)
     /// Held so Cancel/close can abort a running re-detect. Without it the unstructured Task
     /// outlives the dialog and rewrites the transcript after the user asked it not to.
     @State private var rediarizeTask: Task<Void, Never>?

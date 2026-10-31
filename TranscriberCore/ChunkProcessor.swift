@@ -694,6 +694,7 @@ public final class ChunkProcessor {
     /// Why cancellation failed, without paths or audio: the engine's own failure, or the error's domain and code.
     nonisolated static func echoCancelFailureDetail(_ error: Error) -> String {
         if let failure = error as? LocalVQEEchoCanceller.Failure { return "\(failure)" }
+        if let failure = error as? LocalVQEMicEchoCanceller.Failure { return "\(failure)" }
         let ns = error as NSError
         return "\(ns.domain) \(ns.code)"
     }

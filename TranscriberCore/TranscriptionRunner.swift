@@ -77,7 +77,7 @@ public final class TranscriptionRunner {
     private var diarizerIsDefault = true
     /// The settings the current default diarizer was built with. Rebuilding it on every job would
     /// discard the actor's cached OfflineDiarizerManager and reload the ML models each recording.
-    private var diarizerSettings: (threshold: Double?, maxSpeakers: Int?, excludeOverlap: Bool)?
+    private var diarizerSettings: (threshold: Double?, maxSpeakers: Int?, excludeOverlap: Bool, computeUnits: DiarizationComputeUnits)?
     private let vadSpeechMap = VadSpeechMap()
 
     public private(set) var chunkRotator: ChunkRotator?
@@ -1092,7 +1092,8 @@ public final class TranscriptionRunner {
         let wanted = (
             threshold: config.diarizationClusteringThreshold,
             maxSpeakers: config.diarizationMaxSpeakers,
-            excludeOverlap: config.resolvedDiarizationExcludeOverlap
+            excludeOverlap: config.resolvedDiarizationExcludeOverlap,
+            computeUnits: config.diarizationComputeUnits
         )
         // Only rebuild when the settings actually changed — a fresh actor drops its cached
         // OfflineDiarizerManager, so an unconditional rebuild reloads the models every recording.
@@ -1100,13 +1101,15 @@ public final class TranscriptionRunner {
            current.threshold == wanted.threshold,
            current.maxSpeakers == wanted.maxSpeakers,
            current.excludeOverlap == wanted.excludeOverlap,
+           current.computeUnits == wanted.computeUnits,
            diarizer != nil {
             return
         }
         diarizer = FluidAudioDiarizer(
             clusteringThreshold: wanted.threshold,
             maxSpeakers: wanted.maxSpeakers,
-            excludeOverlap: wanted.excludeOverlap
+            excludeOverlap: wanted.excludeOverlap,
+            computeUnits: wanted.computeUnits
         )
         diarizerSettings = wanted
     }

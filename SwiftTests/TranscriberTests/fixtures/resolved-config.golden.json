@@ -5,6 +5,7 @@
     "calendar_lookahead_minutes": 10,
     "chunk_duration_minutes": 30,
     "chunk_processing_qos": "utility",
+    "diarization_compute_units": "all",
     "engine": "<os-resolved: speechAnalyzer on macOS 26+, else fluidAudio>",
     "launch_on_startup": true,
     "meeting_sensing": "prompt",

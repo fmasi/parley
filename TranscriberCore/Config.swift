@@ -141,6 +141,9 @@ public struct Config: Codable, Equatable, Sendable {
     /// wrong (the mask marks frames where two SPEAKERS overlap) and it silently destroyed speaker
     /// identity on every multi-party recording for months.
     public var diarizationExcludeOverlap: Bool?
+    /// Where the diarizer's models run (`DiarizationComputeUnits`): `.all` (the default, the GPU),
+    /// `.neuralEngine` (about half the memory, a little slower), `.cpuOnly`.
+    public var diarizationComputeUnits: DiarizationComputeUnits
     /// The value actually handed to the diarizer. Lives here, not as a `??` at the call site, so a
     /// regression to `false` FAILS A TEST instead of shipping green: the call site is in the app
     /// target, which the unit suite cannot reach, and the ground-truth AMI guard runs in a separate
@@ -216,6 +219,7 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMaxSpeakers: nil,
         diarizationMinSpeakerShare: nil,
         diarizationExcludeOverlap: nil,
+        diarizationComputeUnits: .all,
         preserveSourceWAV: nil,
         tapAutoStart: nil,
         remoteExactZeroSoftAlarmSeconds: nil,
@@ -252,6 +256,7 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMaxSpeakers: Int? = nil,
         diarizationMinSpeakerShare: Double? = nil,
         diarizationExcludeOverlap: Bool? = nil,
+        diarizationComputeUnits: DiarizationComputeUnits = .all,
         preserveSourceWAV: Bool? = nil,
         tapAutoStart: Bool? = nil,
         remoteExactZeroSoftAlarmSeconds: Int? = nil,
@@ -286,6 +291,7 @@ public struct Config: Codable, Equatable, Sendable {
         self.diarizationMaxSpeakers = diarizationMaxSpeakers
         self.diarizationMinSpeakerShare = diarizationMinSpeakerShare
         self.diarizationExcludeOverlap = diarizationExcludeOverlap
+        self.diarizationComputeUnits = diarizationComputeUnits
         self.preserveSourceWAV = preserveSourceWAV
         self.tapAutoStart = tapAutoStart
         self.remoteExactZeroSoftAlarmSeconds = remoteExactZeroSoftAlarmSeconds
@@ -322,6 +328,7 @@ public struct Config: Codable, Equatable, Sendable {
         case diarizationMaxSpeakers = "diarization_max_speakers"
         case diarizationMinSpeakerShare = "diarization_min_speaker_share"
         case diarizationExcludeOverlap = "diarization_exclude_overlap"
+        case diarizationComputeUnits = "diarization_compute_units"
         case preserveSourceWAV = "preserve_source_wav"
         case tapAutoStart = "tap_auto_start"
         case remoteExactZeroSoftAlarmSeconds = "remote_exact_zero_soft_alarm_seconds"
@@ -362,6 +369,7 @@ public struct Config: Codable, Equatable, Sendable {
         diarizationMaxSpeakers = try c.decodeIfPresent(Int.self, forKey: .diarizationMaxSpeakers)
         diarizationMinSpeakerShare = try c.decodeIfPresent(Double.self, forKey: .diarizationMinSpeakerShare)
         diarizationExcludeOverlap = try c.decodeIfPresent(Bool.self, forKey: .diarizationExcludeOverlap)
+        diarizationComputeUnits = try c.decodeIfPresent(DiarizationComputeUnits.self, forKey: .diarizationComputeUnits) ?? .all
         preserveSourceWAV = try c.decodeIfPresent(Bool.self, forKey: .preserveSourceWAV)
         tapAutoStart = try c.decodeIfPresent(Bool.self, forKey: .tapAutoStart)
         remoteExactZeroSoftAlarmSeconds = try c.decodeIfPresent(Int.self, forKey: .remoteExactZeroSoftAlarmSeconds)
