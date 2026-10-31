@@ -77,6 +77,20 @@ public struct LocalVQEMicEchoCanceller: MicEchoCancelling, MicEchoSampleCancelli
         /// The mic WAV decoded to no samples: nothing to cancel, and a 0-frame copy would read as a
         /// broken stream instead of an empty one.
         case emptyMicrophone
+        /// The mic read ended before the file's stated length (16 kHz samples).
+        case shortRead(read: Int, expected: Int)
+    }
+
+    /// Resampler rounding allowed between a file's stated length and what a complete read returns.
+    static let lengthToleranceFrames = 160
+
+    /// Throws when a read of a file with an exact length (PCM) ended short of it. AVAudioFile already
+    /// caps a WAV's length at the data it holds, so this catches a read that stopped early (a resampler
+    /// that drained short, a file shrinking under the reader), not a lying header.
+    static func checkComplete(read: Int, expected: Int, lengthIsEstimate: Bool) throws {
+        if !lengthIsEstimate, read < expected - lengthToleranceFrames {
+            throw Failure.shortRead(read: read, expected: expected)
+        }
     }
 
     public let assetsDirectory: URL
@@ -154,6 +168,10 @@ public struct LocalVQEMicEchoCanceller: MicEchoCancelling, MicEchoSampleCancelli
             tail.withUnsafeBufferPointer { cleanLevels.add($0) }
         }
         guard micCount > 0 else { throw Failure.emptyMicrophone }
+        // The whole mic, or nothing: a read that ended early (a truncated file, a header that claims
+        // more than the file holds) would hand ASR a shorter mic and lose the chunk's end without a
+        // word. The caller then falls back to the raw mic and records `echo_cancel_failed`.
+        try Self.checkComplete(read: micCount, expected: micReader.expectedFrames, lengthIsEstimate: micReader.lengthIsEstimate)
 
         let frames = (micCount + frame - 1) / frame
         let mask = NearEndGuard.revertMask(micDB: micLevels.levels(frames: frames), cleanDB: cleanLevels.levels(frames: frames),

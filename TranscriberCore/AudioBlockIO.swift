@@ -13,9 +13,20 @@ final class Mono16kReader {
     private let nativeBlock: AVAudioFrameCount
     private var fileDone = false
     private var finished = false
+    /// A compressed file (AAC) whose stated length is only an estimate: a read that throws after real
+    /// audio is its padded tail. Never true for PCM (WAV), whose length is exact: there a throw is a real
+    /// read error and is reported.
+    let lengthIsEstimate: Bool
+
+    /// The file's length as 16 kHz samples (its stated length, converted): what a complete read returns,
+    /// give or take the resampler's rounding.
+    var expectedFrames: Int {
+        Int((Double(file.length) * Self.sampleRate / file.processingFormat.sampleRate).rounded())
+    }
 
     init(url: URL) throws {
         file = try AVAudioFile(forReading: url)
+        lengthIsEstimate = file.fileFormat.streamDescription.pointee.mFormatID != kAudioFormatLinearPCM
         let rate = file.processingFormat.sampleRate
         guard let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false),
               let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Self.sampleRate, channels: 1,
@@ -76,9 +87,9 @@ final class Mono16kReader {
         else { fileDone = true; return nil }
         do {
             try file.read(into: raw)
-        } catch where file.framePosition > 0 {
-            // An AAC file's length is an estimate: reading its padded tail can throw after the real
-            // audio. Past the first read that is the end, as FluidAudio's own reader treats it.
+        } catch where lengthIsEstimate && file.framePosition > 0 {
+            // Only a compressed file's padded tail (its length is an estimate), past real audio, as
+            // FluidAudio's own reader treats it. A PCM read error propagates.
             fileDone = true
             return nil
         }
