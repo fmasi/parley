@@ -66,7 +66,8 @@ import Testing
         let diarizer = FluidAudioDiarizer(
             clusteringThreshold: config.diarizationClusteringThreshold,
             maxSpeakers: config.diarizationMaxSpeakers,
-            excludeOverlap: config.resolvedDiarizationExcludeOverlap
+            excludeOverlap: config.resolvedDiarizationExcludeOverlap,
+            computeUnits: config.diarizationComputeUnits
         )
 
         let resolved: [(String, String)] = [

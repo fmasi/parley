@@ -1,6 +1,31 @@
+import CoreML
 import Foundation
 import os
 import FluidAudio
+
+/// Where the diarizer's segmentation, embedding and PLDA models run (`diarization_compute_units`).
+/// `.all` lets Core ML choose, which on Apple silicon puts them on the GPU: the fastest, and the largest
+/// footprint. `.neuralEngine` measured the same speakers at about half the memory (30-min stream on an
+/// M5 Pro: 1.02 -> 0.53 GB, 3.4 -> 5.2 s); `.cpuOnly` the same memory as the Neural Engine at three
+/// times the time. An unknown value reads as `.all`.
+public enum DiarizationComputeUnits: String, Codable, Equatable, Sendable {
+    case all
+    case neuralEngine = "neural_engine"
+    case cpuOnly = "cpu_only"
+
+    public init(from decoder: Decoder) throws {
+        self = DiarizationComputeUnits(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .all
+    }
+
+    /// The model configuration to load with; nil keeps FluidAudio's own default (`.all`) exactly.
+    var modelConfiguration: MLModelConfiguration? {
+        switch self {
+        case .all: return nil
+        case .neuralEngine: return MLModelConfigurationUtils.defaultConfiguration(computeUnits: .cpuAndNeuralEngine)
+        case .cpuOnly: return MLModelConfigurationUtils.defaultConfiguration(computeUnits: .cpuOnly)
+        }
+    }
+}
 
 /// Speaker diarization using FluidAudio's OfflineDiarizerManager.
 /// Uses pyannote segmentation + WeSpeaker embeddings + VBx clustering.
@@ -64,10 +89,16 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         return config
     }
 
-    public init(clusteringThreshold: Double? = nil, maxSpeakers: Int? = nil, excludeOverlap: Bool = true) {
+    /// Where the models run (`DiarizationComputeUnits`).
+    private let computeUnits: DiarizationComputeUnits
+    public nonisolated var computeUnitsSetting: DiarizationComputeUnits { computeUnits }
+
+    public init(clusteringThreshold: Double? = nil, maxSpeakers: Int? = nil, excludeOverlap: Bool = true,
+                computeUnits: DiarizationComputeUnits = .all) {
         self.clusteringThreshold = clusteringThreshold
         self.maxSpeakers = maxSpeakers
         self.excludeOverlap = excludeOverlap
+        self.computeUnits = computeUnits
     }
 
     /// - Parameter numSpeakers: the user's stated speaker count for this recording, or `nil`.
@@ -207,10 +238,10 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         }
         let config = makeOfflineConfig(forcedSpeakerCount: forcedSpeakerCount)
         Logger.transcription.info(
-            "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(config.clustering.maxSpeakers.map(String.init) ?? "default", privacy: .public) forcedByUser=\(key > 0 ? String(key) : "no", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public)"
+            "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(config.clustering.maxSpeakers.map(String.init) ?? "default", privacy: .public) forcedByUser=\(key > 0 ? String(key) : "no", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public) computeUnits=\(self.computeUnits.rawValue, privacy: .public)"
         )
         let mgr = OfflineDiarizerManager(config: config)
-        try await mgr.prepareModels()
+        try await mgr.prepareModels(configuration: computeUnits.modelConfiguration)
 
         let elapsed = ContinuousClock.now - loadStart
         Logger.transcription.info("FluidAudio diarization models loaded in \(elapsed.components.seconds)s")

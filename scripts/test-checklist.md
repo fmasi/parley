@@ -1286,3 +1286,4 @@ speakers, not headphones) so the mic hears the far side.
   30-minute chunk is processed stays near 1 GB (it was about 1.6 GB before the VAD read change), and the
   transcript's words and timings match the previous build's on the same audio.
 - [ ] **P-02 MacBook Air M1.** The same on the Air: note the peak and the seconds per chunk in the PR.
+- [ ] **P-03 Diarizer on the Neural Engine.** Set `"diarization_compute_units": "neural_engine"` in config.json and repeat P-01 (and P-02 on the Air). PASS: the same speakers as with `"all"`; note the peak and the seconds per chunk for both, so the default can be chosen per Mac.
