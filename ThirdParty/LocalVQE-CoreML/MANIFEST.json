@@ -1,0 +1,93 @@
+{
+  "mask_source": {
+    "repo": "aufklarer/LocalVQE-v1.4-AEC-200K-CoreML",
+    "revision": "10e904d53a1303bb46eb17950b1c840543d0af75",
+    "files": {
+      "LocalVQEAECResidualMask.mlmodelc/model.mil": "7e252ad7629afe25940ea11ddcc60b1a1e4f402c07a588e806dbdcced9957749",
+      "LocalVQEAECResidualMask.mlmodelc/weights/weight.bin": "f49a23b35e91c871f39f1137d29c5614f52fc62179b95733c5f2dd88a6fe91ea",
+      "LocalVQEAECResidualMask.mlmodelc/coremldata.bin": "f53fbc56039439ab79501bbc010ca65ef3a9940c54cb67c6566ab3c321829624",
+      "LocalVQEAECFrontend.npz": "cf388c0027fd0f3672ae2464907f8d1ac0b9ece7ea968b96c5f06e403ac96b80"
+    }
+  },
+  "upstream_model": {
+    "repo": "LocalAI-io/LocalVQE",
+    "revision": "29ca38495cba9d6393a92a4dd890f28dd81f758d",
+    "file": "localvqe-v1.4-aec-200K-f32.gguf",
+    "sha256": "b6e43138588a83bfe903ab5e143b4020b91c1e1629f5a575ac5855ff0003c731"
+  },
+  "packed_state": {
+    "values": 112704,
+    "layout": [
+      [
+        "align_key_state",
+        [
+          1,
+          16,
+          15,
+          64
+        ]
+      ],
+      [
+        "align_reference_state",
+        [
+          1,
+          20,
+          15,
+          64
+        ]
+      ],
+      [
+        "align_smooth_state",
+        [
+          1,
+          16,
+          4,
+          16
+        ]
+      ],
+      [
+        "ccm_state",
+        [
+          1,
+          2,
+          2,
+          256
+        ]
+      ],
+      [
+        "conv_state",
+        [
+          1,
+          75936
+        ]
+      ],
+      [
+        "s4_imag_state",
+        [
+          1,
+          80
+        ]
+      ],
+      [
+        "s4_real_state",
+        [
+          1,
+          80
+        ]
+      ]
+    ]
+  },
+  "coremltools": "9.0",
+  "coremlcompiler": "3600.25.1",
+  "files": {
+    "LICENSE": "84afcb26750e77daeecc0150a6bd031d0d561abd75ef7f2a42508dcdade70d54",
+    "LocalVQEAECResidualMask.mlmodelc/analytics/coremldata.bin": "d55f24b68382cd25eff6177260127e4db2360499a7aa661cfb2b547f4c6a93f4",
+    "LocalVQEAECResidualMask.mlmodelc/coremldata.bin": "bd91c70d62cee02589a616e06721fc5e13da0fc3a2d3bf45add48376e39e9503",
+    "LocalVQEAECResidualMask.mlmodelc/metadata.json": "4534b16ebe8ae42184d4a13b04fb9d9a34b61629c6fd2000ec43b005dcd94b1f",
+    "LocalVQEAECResidualMask.mlmodelc/model.mil": "839ac38dc8997bb38693514888aa7f5829254b951ab20553a6ba8a03c56cc2fd",
+    "LocalVQEAECResidualMask.mlmodelc/weights/weight.bin": "f49a23b35e91c871f39f1137d29c5614f52fc62179b95733c5f2dd88a6fe91ea",
+    "NOTICE": "7e74620a807a86d232623d283838c4a2d47cf310f0e057fac0e8e468c029bc66",
+    "analysis_window.f32": "1ea831c49ea6ffbbefc91d14d3270988c3d9f07ed3fb733a9ded45dff4356f9d",
+    "daf_controller.f32": "7924ccd3dae98442e6011bb19ce367dab4287fb18aa9b61d0b1a967d73add22a"
+  }
+}

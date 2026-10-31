@@ -169,11 +169,25 @@ enum CLIHandler {
         }
         runConfig.outputFormat = opts.format
 
+        var echoCancel = MicEchoCancelSetup.off
+        if opts.echoCancel {
+            guard micAudio != nil else {
+                fputs("--echo-cancel needs two streams: use --split on an app recording, or give the system and mic files.\n", stderr)
+                exit(1)
+            }
+            guard let canceller = LocalVQEMicEchoCanceller.bundled() else {
+                fputs("--echo-cancel: this build does not carry the echo canceller's model.\n", stderr)
+                exit(1)
+            }
+            echoCancel = .on(canceller)
+        }
+
         let result = try await runner.run(
             systemAudio: systemAudio,
             micAudio: micAudio,
             outputDirectory: outputDir,
-            config: runConfig
+            config: runConfig,
+            micEchoCancel: echoCancel
         )
 
         print("Output saved to: \(result.jsonPath.path)")

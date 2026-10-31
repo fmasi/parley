@@ -23,6 +23,7 @@ let package = Package(
             name: "TranscriberCore",
             dependencies: [
                 .product(name: "FluidAudio", package: "FluidAudio"),
+                "CLocalVQE",
             ],
             path: "TranscriberCore"
         ),
@@ -38,6 +39,14 @@ let package = Package(
             name: "AudioCaptureHelperXPC",
             dependencies: ["AudioCaptureProtocol", "TranscriberCore"],
             path: "AudioCaptureHelper/XPC"
+        ),
+        // The adaptive-filter half of the mic echo canceller (#342): LocalVQE's daf_frontend, vendored
+        // by scripts/vendor-localvqe.sh, behind Parley's C interface (include/localvqe_daf.h).
+        .target(
+            name: "CLocalVQE",
+            path: "ThirdParty/CLocalVQE",
+            exclude: ["upstream/LICENSE-LocalVQE", "upstream/VERSION"],
+            cxxSettings: [.unsafeFlags(["-O3"])]
         ),
         .target(
             name: "VerifyEdSignatureCore",
@@ -62,5 +71,6 @@ let package = Package(
             // not through Bundle.module — excluded so SwiftPM doesn't warn about it.
             exclude: ["fixtures"]
         ),
-    ]
+    ],
+    cxxLanguageStandard: .gnucxx17
 )

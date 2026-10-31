@@ -1250,3 +1250,32 @@ branch. None of this is new behaviour; all of it could have broken.
       offer only arrives once recovery completes.
 - [ ] **First launch with the Setup window open** → sensing does not begin until Continue is pressed; the
       Setup hero shows the meeting-sensing disclosure line.
+
+---
+
+## Mic echo cancellation (#342)
+
+Off by default and without a Settings toggle: edit the config. Needs a speakerphone-style setup (desktop
+speakers, not headphones) so the mic hears the far side.
+
+- [ ] **I-01 Turn it on.** Quit Parley, set `"mic_echo_cancel": "on"` in
+  `~/Library/Application Support/Parley/config.json`, relaunch. Keep the log stream from Setup running.
+- [ ] **I-02 Speakerphone call.** Record a real call (or a long video call) with the far side on the desktop
+  speakers and you speaking normally; Stop. PASS: the transcript has `metadata.mic_echo_cancel` with
+  `chunks` ≥ 1, `chunks_failed: 0`, `engine` and `model_sha256` set; `processing_issues` has no
+  `echo_cancel_failed`; visibly fewer `echo` lines than the same setup with it off (compare
+  `metadata.echo_segments_flagged`); and nothing you said is missing (read your side against what you remember).
+- [ ] **I-03 Known-text test.** One person reads a page aloud while a video plays through the speakers; a
+  second person speaks a different known text from across the room. PASS: the reader's page is complete in
+  the transcript, the second person's text is complete, and the video's speech does not appear as the
+  reader's words.
+- [ ] **I-04 The log.** `log stream --predicate 'subsystem == "eu.fmasi.parley"'` shows
+  `mic echo cancelled (… s of audio in … s …)` once per chunk.
+- [ ] **I-05 Time per chunk on a MacBook Air M1.** Note the seconds from the I-04 line against the audio
+  seconds. PASS: well under real time (the chunk must finish long before the next one is due); record the
+  figure in the PR.
+- [ ] **I-06 Off means off.** Set `"mic_echo_cancel": "off"` (or remove the key), record 1 minute: no
+  `metadata.mic_echo_cancel` in the transcript and no `mic echo cancelled` line.
+- [ ] **I-07 CLI.** `Parley transcribe -i <app recording>.m4a --split --echo-cancel` writes a transcript
+  with `metadata.mic_echo_cancel`.
+

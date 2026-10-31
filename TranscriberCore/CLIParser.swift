@@ -17,6 +17,9 @@ public struct TranscribeOptions {
     public let engine: String?
     public let debug: Bool
     public let splitMode: SplitMode
+    /// `--echo-cancel`: cancel the speaker echo in the mic before transcribing it, as the app does
+    /// with `mic_echo_cancel` on (#342). Needs two streams (`--split`, or two inputs).
+    public var echoCancel: Bool = false
 }
 
 public struct SummarizeOptions {
@@ -95,6 +98,7 @@ public enum CLIParser {
         var debug = false
         var hasSplit = false
         var hasNoSplit = false
+        var echoCancel = false
 
         var i = 0
         while i < args.count {
@@ -123,6 +127,8 @@ public enum CLIParser {
                 hasSplit = true
             case "--no-split":
                 hasNoSplit = true
+            case "--echo-cancel":
+                echoCancel = true
             default:
                 break
             }
@@ -143,7 +149,7 @@ public enum CLIParser {
         return TranscribeOptions(
             inputs: inputs, outputDir: outputDir, format: format,
             noDiarize: noDiarize, engine: engine, debug: debug,
-            splitMode: splitMode
+            splitMode: splitMode, echoCancel: echoCancel
         )
     }
 

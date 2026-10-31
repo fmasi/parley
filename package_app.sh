@@ -108,6 +108,10 @@ cp packaging/AudioCaptureHelper-Info.plist "$XPC_BUNDLE/Contents/Info.plist"
 # App icon
 cp packaging/AppIcon.icns "$RESOURCES/AppIcon.icns"
 
+# Mic echo cancellation's model (#342): LocalVQE v1.4-AEC's Core ML mask and its filter's weights. Checked
+# file by file against its MANIFEST.json at load; LocalVQEMicEchoCanceller.bundledAssetsDirectory finds it here.
+cp -R ThirdParty/LocalVQE-CoreML "$RESOURCES/LocalVQE-CoreML"
+
 # Binaries
 cp "$BUILD_DIR/Parley"           "$MACOS/Parley"
 cp "$BUILD_DIR/audio-capture-helper-xpc"  "$XPC_MACOS/audio-capture-helper-xpc"

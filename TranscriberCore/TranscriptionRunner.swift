@@ -115,7 +115,8 @@ public final class TranscriptionRunner {
         micAudio: URL?,
         outputDirectory: URL,
         config: Config,
-        provenance: CaptureProvenance? = nil
+        provenance: CaptureProvenance? = nil,
+        micEchoCancel: MicEchoCancelSetup = .off
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
@@ -158,6 +159,11 @@ public final class TranscriptionRunner {
         // so `reconcileRecoverySegments` can reconcile them into one global namespace below.
         var perSegmentRemoteDb: [[String: [Float]]] = []
         var perSegmentLocalDb: [[String: [Float]]] = []
+        // Mic echo cancellation (#342), per segment: the CLI's `--echo-cancel`. The cleaned copies are scratch.
+        var echoRecords: [MicEchoCancelRecord] = []
+        var echoFailures = 0
+        var echoScratch: [URL] = []
+        defer { for url in echoScratch { try? FileManager.default.removeItem(at: url) } }
 
         for (index, segmentPair) in segments.enumerated() {
             if index > 0 {
@@ -191,8 +197,27 @@ public final class TranscriptionRunner {
                                                             key: micPath.path, seconds: folderReadSeconds, { FileManager.default.fileExists(atPath: micPath.path) })
                 else { throw FolderNotAnswering() }
                 if micThere {
+                    var micForASR = micPath
+                    if case .on(let canceller) = micEchoCancel {
+                        let cleaned = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("parley-mic-aec-\(UUID().uuidString).wav")
+                        do {
+                            let system = segmentPair.system
+                            echoRecords.append(try await ChunkProcessor.offThePool(qos: config.resolvedQos) {
+                                try canceller.cancelEcho(micURL: micPath, systemURL: system, outputURL: cleaned)
+                            })
+                            echoScratch.append(cleaned)
+                            micForASR = cleaned
+                        } catch {
+                            try? FileManager.default.removeItem(at: cleaned)
+                            echoFailures += 1
+                            Logger.transcription.error("Mic echo cancellation failed, the raw mic is used: \(ChunkProcessor.echoCancelFailureDetail(error), privacy: .private)")
+                        }
+                    } else if case .unavailable = micEchoCancel {
+                        echoFailures += 1
+                    }
                     let micResult = try await transcribeStream(
-                        audioPath: micPath,
+                        audioPath: micForASR,
                         fileSize: found.sizes[micPath.path] ?? 0,
                         source: "local",
                         transcriber: transcriber,
@@ -358,6 +383,7 @@ public final class TranscriptionRunner {
             dualStream: isDualStream,
             echoSegmentsFlagged: echoFlagged,
             echoClusters: echoClusters,
+            micEchoCancel: Self.micEchoCancelDictionary(records: echoRecords, failed: echoFailures),
             provenance: provenance,
             // No in-memory session start here (CLI / crash-recovery / single-file path), so
             // use the source audio's creation time as the recording-start stamp (#49).
@@ -689,6 +715,7 @@ public final class TranscriptionRunner {
             // Each chunk's own verdicts (no second dedup pass here), in the transcript's speaker
             // namespace: the same per-chunk mapping the merger applied to the segments.
             echoClusters: isDualStream ? Self.echoClusterDictionaries(chunks: sortedChunks, speakerMapping: speakerMapping) : nil,
+            micEchoCancel: Self.micEchoCancelDictionary(chunks: sortedChunks),
             provenance: sessionState.provenance,
             // The wall-clock time the meeting actually began (#49).
             recordedAt: sessionState.meetingStart,
@@ -857,6 +884,30 @@ public final class TranscriptionRunner {
             + sessionIssues.map { $0.issue.metadataDictionary(chunk: $0.chunk) }
     }
 
+    /// `metadata.mic_echo_cancel` (#342): what mic echo cancellation did across the session — chunks
+    /// cancelled and failed, seconds processed, frames the near-end guard gave back, the engine and
+    /// model. nil (the key left out) when it neither ran nor failed on any chunk: the setting was off.
+    nonisolated static func micEchoCancelDictionary(chunks: [ProcessedChunk]) -> [String: Any]? {
+        micEchoCancelDictionary(records: chunks.compactMap(\.micEchoCancel),
+                                failed: chunks.filter { $0.issues.contains { $0.code == .echoCancelFailed } }.count)
+    }
+
+    /// The same, from the records and the failure count directly (the single-file path).
+    nonisolated static func micEchoCancelDictionary(records: [MicEchoCancelRecord], failed: Int) -> [String: Any]? {
+        guard !records.isEmpty || failed > 0 else { return nil }
+        var d: [String: Any] = [
+            "chunks": records.count,
+            "chunks_failed": failed,
+            "seconds": records.reduce(0) { $0 + $1.seconds },
+            "frames_reverted": records.reduce(0) { $0 + $1.framesReverted },
+        ]
+        // One engine and model per session in practice; a resume across an update could mix two.
+        let engines = Set(records.map(\.engine)).sorted(), models = Set(records.map(\.modelSHA256)).sorted()
+        if !engines.isEmpty { d["engine"] = engines.count == 1 ? engines[0] as Any : engines as Any }
+        if !models.isEmpty { d["model_sha256"] = models.count == 1 ? models[0] as Any : models as Any }
+        return d
+    }
+
     /// `metadata.echo_clusters` for a chunked session: one entry per (chunk, local cluster), the
     /// labels remapped from the chunk's own speaker numbering to the transcript's global one with
     /// `speakerMapping` — what `TranscriptMerger.merge` applies to the segments. A label the mapping
@@ -984,7 +1035,8 @@ public final class TranscriptionRunner {
             diarizer: diarizer,
             // Its session.json writes on the folder's queue, within the write bound (L review 234).
             folderReads: folderReads,
-            writeSeconds: folderWriteSeconds
+            writeSeconds: folderWriteSeconds,
+            micEchoCancel: .resolve(config)
         )
         self.chunkProcessor = processor
         // The session has state on disk from its start, not from its first chunk (#294): no quota pass deletes the first

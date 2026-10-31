@@ -37,6 +37,7 @@ public enum TranscriptAssembler {
         dualStream: Bool,
         echoSegmentsFlagged: Int = 0,
         echoClusters: [[String: Any]]? = nil,
+        micEchoCancel: [String: Any]? = nil,
         provenance: CaptureProvenance? = nil,
         recordedAt: Date? = nil,
         captureGaps: [CaptureGap] = [],
@@ -71,6 +72,11 @@ public enum TranscriptAssembler {
         // stream), and the key is left out; an empty list = it ran and found no local speech.
         if let echoClusters {
             metadata["echo_clusters"] = echoClusters
+        }
+        // What mic echo cancellation did (#342): the local side's words were read from a cleaned copy
+        // of the mic. nil = it never ran (the setting was off), and the key is left out.
+        if let micEchoCancel {
+            metadata["mic_echo_cancel"] = micEchoCancel
         }
         // Capture provenance (#95): a compact, always-present stamp of how this recording was
         // captured — engine, formats, and how many route changes / retries / recoveries occurred.

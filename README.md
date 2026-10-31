@@ -7,7 +7,7 @@
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black?logo=apple)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1–M5-black?logo=apple)
 ![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
-![Tests](https://img.shields.io/badge/tests-2775%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-2824%20passing-brightgreen)
 ![Cloud](https://img.shields.io/badge/cloud-none-success)
 ![License](https://img.shields.io/badge/license-AGPL%203.0-blue)
 
@@ -205,7 +205,7 @@ TranscriberApp/        SwiftUI menu-bar app (MenuBarExtra + Settings), XPC clien
 TranscriberCore/       recording lifecycle, chunk processing, engines, diarization, echo detection, summaries, transcript I/O
 AudioCaptureHelper/    XPC audio-capture service (Core Audio tap or ScreenCaptureKit, dual-stream)
 AudioCaptureProtocol/  shared @objc XPC protocol
-SwiftTests/            2775 tests across 299 suites
+SwiftTests/            2824 tests across 308 suites
 tools/engine-benchmark/  WER + speed benchmark harness
 docs/                  architecture, pipeline, parameters, gotchas
 ```
@@ -242,10 +242,11 @@ parley runs on open models that download on first use — nothing is sent to the
 | Speech recognition | [NVIDIA Parakeet TDT 0.6B](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CoreML via [FluidInference](https://huggingface.co/FluidInference)) | CC-BY-4.0 |
 | Speaker diarization | [pyannote](https://huggingface.co/pyannote) segmentation + [WeSpeaker](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM) embeddings | CC-BY-4.0 |
 | Voice activity detection | [Silero VAD](https://github.com/snakers4/silero-vad) | MIT |
+| Mic echo cancellation (optional, off by default) | [LocalVQE](https://github.com/localai-org/LocalVQE) v1.4-AEC; Core ML mask exported by [soniqo](https://huggingface.co/aufklarer/LocalVQE-v1.4-AEC-200K-CoreML) ([speech-swift](https://github.com/soniqo/speech-swift)) | Apache-2.0 |
 | Engine SDK | [FluidAudio](https://github.com/FluidInference/FluidAudio) | Apache-2.0 |
 | Apple engine (optional) | SpeechAnalyzer — on-device, macOS 26+ | OS-provided |
 
-All model weights are CC-BY-4.0 or MIT — free for commercial and non-commercial use with attribution.
+All model weights are CC-BY-4.0, MIT or Apache-2.0 — free for commercial and non-commercial use with attribution.
 
 ## Built by Frédéric Masi
 

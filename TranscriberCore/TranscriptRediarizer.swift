@@ -207,16 +207,29 @@ public enum TranscriptRediarizer {
     /// the merge: its matched lines are flagged `echo`, the rest stay under its own label, and it is
     /// not counted as a person. It never refuses — the count is enforced on everything else — and
     /// re-detecting a transcript that was merged that way takes the echo voice back out.
+    ///
+    /// **A mic channel that was echo-cancelled is cancelled again (#342).** The pipeline diarized a
+    /// cleaned copy of the mic; diarizing the raw one here would find the echo voice again and move
+    /// the speakers. When `metadata.mic_echo_cancel` says chunks were cancelled, each archive's mic
+    /// side goes through `echoCanceller` with its system side as the reference. The archive is
+    /// AAC, not the WAVs the pipeline read, so the result is close to, not identical with, the first pass.
     public static func rediarize(
         transcript url: URL,
         source: String,
         speakerCount: Int,
         diarizer: any DiarizationProvider,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
+        echoCanceller: (any MicEchoSampleCancelling)? = LocalVQEMicEchoCanceller.bundled(),
         onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> Outcome {
         try await rediarize(transcript: url, source: source, speakerCount: speakerCount, diarizer: diarizer,
-                            scratchDirectory: scratchDirectory, onProgress: onProgress, rawLabeling: label)
+                            scratchDirectory: scratchDirectory, echoCanceller: echoCanceller,
+                            onProgress: onProgress, rawLabeling: label)
+    }
+
+    /// Whether the transcript's mic channel was read from an echo-cancelled copy (#342).
+    static func micWasEchoCancelled(_ metadata: [String: Any]) -> Bool {
+        ((metadata["mic_echo_cancel"] as? [String: Any])?["chunks"] as? Int ?? 0) > 0
     }
 
     /// `rediarize`, with the echo check's labelling step as a parameter — only so a test can make it
@@ -227,6 +240,7 @@ public enum TranscriptRediarizer {
         speakerCount: Int,
         diarizer: any DiarizationProvider,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
+        echoCanceller: (any MicEchoSampleCancelling)? = nil,
         onProgress: (@Sendable (Progress) -> Void)? = nil,
         rawLabeling: Labeling
     ) async throws -> Outcome {
@@ -273,10 +287,14 @@ public enum TranscriptRediarizer {
         // reimplementation (see its doc comment) out of the picture entirely for single-file
         // recordings, which is most of them.
         onProgress?(Progress(phase: .decodingAudio))
+        let wasCancelled = source == "local" && micWasEchoCancelled(metadata)
+        if wasCancelled && echoCanceller == nil {
+            Logger.transcription.error("Re-detect: this transcript's mic was echo-cancelled, but this build has no canceller — diarizing the raw mic")
+        }
         let decoded = try await decodeChannelAudio(
             layout: layout, source: source, chunkDurations: chunkDurations, chunkOffsets: chunkOffsets,
             hasCaptureGaps: hasCaptureGaps, gapSeconds: gapSeconds, scratchDirectory: scratchDirectory,
-            onProgress: onProgress)
+            echoCanceller: wasCancelled ? echoCanceller : nil, onProgress: onProgress)
 
         // The user's answer is authoritative: force the count AND skip minority absorption, which
         // exists to second-guess a count nobody supplied.
@@ -689,6 +707,7 @@ public enum TranscriptRediarizer {
         hasCaptureGaps: Bool,
         gapSeconds: [Double],
         scratchDirectory: URL,
+        echoCanceller: (any MicEchoSampleCancelling)? = nil,
         onProgress: (@Sendable (Progress) -> Void)?
     ) async throws -> DecodedChannelAudio {
         let wantsLocal = source == "local"
@@ -701,6 +720,10 @@ public enum TranscriptRediarizer {
             guard let url = wantsLocal ? local : remote,
                   FileManager.default.fileExists(atPath: url.path)
             else { throw RediarizeError.noAudioForChannel(source) }
+            if wantsLocal, echoCanceller != nil {
+                // Two WAVs (a CLI `--echo-cancel` transcript): not re-cancelled here.
+                Logger.transcription.error("Re-detect: a two-file transcript's mic was echo-cancelled; diarizing the raw mic")
+            }
             return .path(url)
 
         case .chunkedArchives(let chunks):
@@ -776,7 +799,25 @@ public enum TranscriptRediarizer {
                     let split = try await AudioSourceResolver.splitChannel(
                         stereoAac: chunk, outputDirectory: scratchDirectory, channel: channel)
                     defer { try? FileManager.default.removeItem(at: split) }
-                    decodedChunk = try AudioDecode.mono16kHzFloat(contentsOf: split)
+                    let samples = try AudioDecode.mono16kHzFloat(contentsOf: split)
+                    if wantsLocal, let echoCanceller {
+                        // The archive's other side is the far-end reference, as the WAV was in the pipeline.
+                        let reference = try await AudioSourceResolver.splitChannel(
+                            stereoAac: chunk, outputDirectory: scratchDirectory, channel: .remote)
+                        defer { try? FileManager.default.removeItem(at: reference) }
+                        let far = try AudioDecode.mono16kHzFloat(contentsOf: reference)
+                        do {
+                            decodedChunk = try await ChunkProcessor.offThePool(qos: .userInitiated) {
+                                try echoCanceller.cancelEcho(microphone: samples, reference: far).samples
+                            }
+                        } catch {
+                            // As in the pipeline: a canceller that cannot run leaves the raw mic, never a failed re-detect.
+                            Logger.transcription.error("Re-detect: mic echo cancellation failed for chunk \(position + 1, privacy: .public), diarizing its raw mic: \(ChunkProcessor.echoCancelFailureDetail(error), privacy: .private)")
+                            decodedChunk = samples
+                        }
+                    } else {
+                        decodedChunk = samples
+                    }
                 }
                 // `combined` accumulates every chunk in the recording — on a 90-minute call at
                 // 16kHz that's tens of millions of floats, and Swift's array growth doubles on
@@ -869,7 +910,7 @@ enum AudioDecode {
 
     /// Extract mono Float32 samples from a buffer, mixing channels down if the source isn't
     /// already mono (our chunk files always are, by construction — this is a defensive fallback).
-    private static func monoFloat32(from buffer: AVAudioPCMBuffer) throws -> [Float] {
+    static func monoFloat32(from buffer: AVAudioPCMBuffer) throws -> [Float] {
         let format = buffer.format
         let frameCount = Int(buffer.frameLength)
         guard frameCount > 0 else { return [] }
