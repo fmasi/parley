@@ -408,6 +408,18 @@ private extension Array {
         try LocalVQEMicEchoCanceller.checkComplete(read: 16_000, expected: 32_000, lengthIsEstimate: true)   // AAC estimate
     }
 
+    /// The rate the capture helper writes: a resampled mic is read, cancelled and written whole.
+    /// (`shortRead` itself needs a file shrinking under the reader; `checkComplete` is tested directly above.)
+    @Test func a48kHzMicIsCancelledToItsFullLength() throws {
+        let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
+        let mic = d.appendingPathComponent("mic.wav"), sys = d.appendingPathComponent("sys.wav"), out = d.appendingPathComponent("out.wav")
+        try LocalVQEMicEchoCanceller.writeWAV(voice(seconds: 3.3, seed: 111).flatMap { [$0, $0, $0] }, to: mic, sampleRate: 48_000)
+        try LocalVQEMicEchoCanceller.writeWAV(voice(seconds: 3.3, seed: 112).flatMap { [$0, $0, $0] }, to: sys, sampleRate: 48_000)
+        let record = try LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory).cancelEcho(micURL: mic, systemURL: sys, outputURL: out)
+        #expect(abs(record.seconds - 3.3) < 0.01)
+        #expect(abs(try AudioDecode.mono16kHzFloat(contentsOf: out).count - Int(3.3 * 16_000)) <= 1)
+    }
+
     @Test func aWAVWhoseHeaderOverReportsIsReadToItsRealEnd() throws {
         let d = try dir(); defer { try? FileManager.default.removeItem(at: d) }
         let mic = d.appendingPathComponent("mic.wav"), sys = d.appendingPathComponent("sys.wav")

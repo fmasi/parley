@@ -191,6 +191,8 @@ public struct LocalVQEMicEchoCanceller: MicEchoCancelling, MicEchoSampleCancelli
             try out.write(cleaned)
             position += cleaned.count
         }
+        // The output too: the whole mic, or the chunk falls back to the raw one.
+        guard position == micCount else { throw Failure.shortRead(read: position, expected: micCount) }
         return MicEchoCancelRecord(engine: Self.engine, modelSHA256: canceller.modelSHA256,
                                    framesReverted: blend.revertedFrames, seconds: Double(micCount) / Double(rate))
     }
