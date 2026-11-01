@@ -98,9 +98,11 @@ public actor ModelManifestService {
 
     // MARK: - Online update check (opt-in)
 
-    /// Query Hugging Face for the current commit SHA and compare to the manifest.
+    /// Query Hugging Face for the current commit SHA and, when it moved, compare the top-level
+    /// entries Parley loads (`loadedEntries`, e.g. `Encoder.mlmodelc`) at the recorded commit and at
+    /// the current one by their git object ids — a folder's id changes when any file inside it does.
     /// Network-only. The caller must gate this on user consent (Settings toggle).
-    public func checkForUpdate(repo: String) async -> ManifestUpdateStatus {
+    public func checkForUpdate(repo: String, loadedEntries: Set<String>) async -> ManifestUpdateStatus {
         guard let manifest = loadManifest(for: repo) else { return .noBaseline }
         guard !manifest.commitSha.isEmpty else { return .noBaseline }
         do {
@@ -108,14 +110,34 @@ public actor ModelManifestService {
             if head.sha == manifest.commitSha {
                 return .upToDate(commitSha: head.sha)
             }
+            let local = try await fetchTopLevelTree(repo: repo, revision: manifest.commitSha)
+            let remote = try await fetchTopLevelTree(repo: repo, revision: head.sha)
+            let diff = Self.compareTrees(local: local, remote: remote, loaded: loadedEntries)
+            if diff.changed.isEmpty {
+                return .loadedFilesUnchanged(
+                    localCommitSha: manifest.commitSha, remoteCommitSha: head.sha, addedEntries: diff.added
+                )
+            }
             return .updateAvailable(
                 localCommitSha: manifest.commitSha,
                 remoteCommitSha: head.sha,
-                remoteLastModifiedISO: head.lastModified
+                remoteLastModifiedISO: head.lastModified,
+                changedEntries: diff.changed
             )
         } catch {
             return .checkFailed(reason: error.localizedDescription)
         }
+    }
+
+    /// Pure: which loaded entries differ between two top-level trees (path → git object id), and
+    /// which entries are new at `remote`. A loaded entry absent from either side counts as changed
+    /// unless it is absent from both, so a removal or a listing without it never reads as "same".
+    static func compareTrees(
+        local: [String: String], remote: [String: String], loaded: Set<String>
+    ) -> (changed: [String], added: [String]) {
+        let changed = loaded.filter { local[$0] != remote[$0] }.sorted()
+        let added = Set(remote.keys).subtracting(local.keys).sorted()
+        return (changed, added)
     }
 
     // MARK: - Internals
@@ -146,6 +168,30 @@ public actor ModelManifestService {
         }
         let decoded = try JSONDecoder().decode(HFRepoResponse.self, from: data)
         return RepoHead(sha: decoded.sha, lastModified: decoded.lastModified)
+    }
+
+    /// One entry of HF's tree listing. `oid` is the git object id: a blob's for a file, a tree's
+    /// for a folder. Internal so the parsing path can be unit-tested directly.
+    struct HFTreeEntry: Decodable {
+        let path: String
+        let oid: String
+    }
+
+    /// The repo's top-level entries at `revision` (not recursive: a folder's tree id covers its contents).
+    private func fetchTopLevelTree(repo: String, revision: String) async throws -> [String: String] {
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repo)/tree/\(revision)") else {
+            throw ManifestError.invalidRepo(repo)
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 10
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: req)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            throw ManifestError.httpError(status: http.statusCode)
+        }
+        let entries = try JSONDecoder().decode([HFTreeEntry].self, from: data)
+        return Dictionary(entries.map { ($0.path, $0.oid) }, uniquingKeysWith: { first, _ in first })
     }
 
     private func manifestURL(for repo: String) -> URL {

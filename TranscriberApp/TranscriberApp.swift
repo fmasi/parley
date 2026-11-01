@@ -108,7 +108,7 @@ final class ManifestHealthStore {
         if !v.missing.isEmpty { parts.append("\(v.missing.count) missing") }
         if !v.corrupt.isEmpty { parts.append("\(v.corrupt.count) corrupt") }
         let summary = parts.isEmpty ? "integrity issue" : parts.joined(separator: ", ")
-        return "Model files failed verification (\(summary)). Re-download the model from Setup to restore it."
+        return "Model files failed verification (\(summary)). Re-download the model in Settings → Transcription to restore it."
     }
 }
 

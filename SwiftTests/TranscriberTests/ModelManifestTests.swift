@@ -271,39 +271,294 @@ private func iso8601(_ s: String) -> Date? {
     }
 }
 
+// MARK: - #349: the update check compares the entries Parley loads, not the commit
+
+/// The real Parakeet repo's top-level entries at aed0274 (what this Mac has) and 7dd20fe (the
+/// commit that added Encoder_v2.mlmodelc and rewrote config.json), trimmed.
+private let treeAtAAA = #"""
+[{"type":"directory","path":"Encoder.mlmodelc","oid":"ad3baf90"},
+ {"type":"directory","path":"Decoder.mlmodelc","oid":"5e99a83f"},
+ {"type":"directory","path":"JointDecisionv3.mlmodelc","oid":"f6d45f43"},
+ {"type":"directory","path":"Preprocessor.mlmodelc","oid":"baff9992"},
+ {"type":"file","path":"config.json","oid":"9e26dfee","size":2},
+ {"type":"file","path":"parakeet_vocab.json","oid":"c684822e","size":151122}]
+"""#
+private let treeAtBBBAddsEncoderV2 = #"""
+[{"type":"directory","path":"Encoder.mlmodelc","oid":"ad3baf90"},
+ {"type":"directory","path":"Encoder_v2.mlmodelc","oid":"3b2b4a96"},
+ {"type":"directory","path":"Decoder.mlmodelc","oid":"5e99a83f"},
+ {"type":"directory","path":"JointDecisionv3.mlmodelc","oid":"f6d45f43"},
+ {"type":"directory","path":"Preprocessor.mlmodelc","oid":"baff9992"},
+ {"type":"file","path":"config.json","oid":"b6a1d442","size":475},
+ {"type":"file","path":"parakeet_vocab.json","oid":"c684822e","size":151122}]
+"""#
+private let treeAtBBBChangesEncoder = treeAtAAA.replacingOccurrences(of: "ad3baf90", with: "0badf00d")
+
+private let parakeetLoaded: Set<String> = [
+    "Encoder.mlmodelc", "Decoder.mlmodelc", "JointDecisionv3.mlmodelc", "Preprocessor.mlmodelc", "parakeet_vocab.json",
+]
+
+@Suite struct ModelTreeComparisonTests {
+    private func tree(_ json: String) throws -> [String: String] {
+        let entries = try JSONDecoder().decode([ModelManifestService.HFTreeEntry].self, from: Data(json.utf8))
+        return Dictionary(uniqueKeysWithValues: entries.map { ($0.path, $0.oid) })
+    }
+
+    @Test func aNewFileAndAnUnloadedChangeAreNotAnUpdate() throws {
+        let diff = ModelManifestService.compareTrees(
+            local: try tree(treeAtAAA), remote: try tree(treeAtBBBAddsEncoderV2), loaded: parakeetLoaded
+        )
+        #expect(diff.changed.isEmpty)
+        #expect(diff.added == ["Encoder_v2.mlmodelc"])
+    }
+
+    @Test func aChangedLoadedEntryIsAnUpdate() throws {
+        let diff = ModelManifestService.compareTrees(
+            local: try tree(treeAtAAA), remote: try tree(treeAtBBBChangesEncoder), loaded: parakeetLoaded
+        )
+        #expect(diff.changed == ["Encoder.mlmodelc"])
+        #expect(diff.added.isEmpty)
+    }
+
+    @Test func aLoadedEntryRemovedUpstreamIsAnUpdate() {
+        let diff = ModelManifestService.compareTrees(
+            local: ["Encoder.mlmodelc": "a", "Decoder.mlmodelc": "b"],
+            remote: ["Decoder.mlmodelc": "b"],
+            loaded: ["Encoder.mlmodelc", "Decoder.mlmodelc"]
+        )
+        #expect(diff.changed == ["Encoder.mlmodelc"])
+    }
+
+    @Test func aLoadedEntryAbsentFromBothSidesIsUnchanged() {
+        let diff = ModelManifestService.compareTrees(
+            local: ["Decoder.mlmodelc": "b"], remote: ["Decoder.mlmodelc": "b", "README.md": "r"],
+            loaded: ["Encoder.mlmodelc", "Decoder.mlmodelc"]
+        )
+        #expect(diff.changed.isEmpty)
+        #expect(diff.added == ["README.md"])
+    }
+
+    @Test func parakeetLoadedEntriesAreTheInt8V3FilesAndTheVocabulary() {
+        #expect(FluidAudioEngine.loadedModelEntries == parakeetLoaded)
+    }
+}
+
 @Suite(.serialized) struct ModelManifestServiceNetworkTests {
-    @Test func checkForUpdateParsesRemoteLastModifiedViaMockSession() async throws {
-        defer { ManifestMockURLProtocol.responder = nil }
+    /// A service with a manifest recorded at commit AAA000, then `responder` answering by URL path.
+    private func serviceRecordedAtAAA(
+        then remoteHead: String, trees: [String: String], treeStatus: Int = 200
+    ) async throws -> (ModelManifestService, [URL]) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("manifest-net-\(UUID().uuidString)")
         let svc = ModelManifestService(manifestDir: dir, session: makeMockSession())
-        defer { try? FileManager.default.removeItem(at: dir) }
-
         let cacheRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("cache-net-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: cacheRoot) }
         try Data([0x01]).write(to: cacheRoot.appendingPathComponent("a.bin"))
 
-        // Baseline: record establishes a manifest with commit "AAA000".
         ManifestMockURLProtocol.responder = { req in
             ok200(req, #"{"sha":"AAA000","lastModified":"2026-01-01T00:00:00.000Z"}"#)
         }
         let recorded = try await svc.record(repo: "Test/repo", cacheRoot: cacheRoot, sdkLabel: "test")
         #expect(recorded.commitSha == "AAA000")
 
-        // Remote has since moved to "BBB111" with a new lastModified.
         ManifestMockURLProtocol.responder = { req in
-            ok200(req, #"{"sha":"BBB111","lastModified":"2026-05-01T12:00:00.000Z"}"#)
+            let path = req.url!.path
+            if let revision = path.components(separatedBy: "/tree/").dropFirst().first {
+                guard treeStatus == 200 else {
+                    let response = HTTPURLResponse(url: req.url!, statusCode: treeStatus, httpVersion: nil, headerFields: nil)!
+                    return (response, Data())
+                }
+                return ok200(req, trees[revision] ?? "[]")
+            }
+            return ok200(req, #"{"sha":"\#(remoteHead)","lastModified":"2026-08-19T20:10:29.000Z"}"#)
         }
-        let status = await svc.checkForUpdate(repo: "Test/repo")
-        guard case let .updateAvailable(local, remote, when) = status else {
-            Issue.record("Expected .updateAvailable, got \(status)")
+        return (svc, [dir, cacheRoot])
+    }
+
+    @Test func sameCommitIsUpToDate() async throws {
+        defer { ManifestMockURLProtocol.responder = nil }
+        let (svc, dirs) = try await serviceRecordedAtAAA(then: "AAA000", trees: [:])
+        defer { dirs.forEach { try? FileManager.default.removeItem(at: $0) } }
+        #expect(await svc.checkForUpdate(repo: "Test/repo", loadedEntries: parakeetLoaded) == .upToDate(commitSha: "AAA000"))
+    }
+
+    @Test func aCommitThatOnlyAddsEncoderV2IsNotAnUpdate() async throws {
+        defer { ManifestMockURLProtocol.responder = nil }
+        let (svc, dirs) = try await serviceRecordedAtAAA(
+            then: "BBB111", trees: ["AAA000": treeAtAAA, "BBB111": treeAtBBBAddsEncoderV2]
+        )
+        defer { dirs.forEach { try? FileManager.default.removeItem(at: $0) } }
+        let status = await svc.checkForUpdate(repo: "Test/repo", loadedEntries: parakeetLoaded)
+        #expect(status == .loadedFilesUnchanged(
+            localCommitSha: "AAA000", remoteCommitSha: "BBB111", addedEntries: ["Encoder_v2.mlmodelc"]
+        ))
+    }
+
+    @Test func aCommitThatChangesALoadedFileIsAnUpdate() async throws {
+        defer { ManifestMockURLProtocol.responder = nil }
+        let (svc, dirs) = try await serviceRecordedAtAAA(
+            then: "BBB111", trees: ["AAA000": treeAtAAA, "BBB111": treeAtBBBChangesEncoder]
+        )
+        defer { dirs.forEach { try? FileManager.default.removeItem(at: $0) } }
+        let status = await svc.checkForUpdate(repo: "Test/repo", loadedEntries: parakeetLoaded)
+        #expect(status == .updateAvailable(
+            localCommitSha: "AAA000", remoteCommitSha: "BBB111",
+            remoteLastModifiedISO: "2026-08-19T20:10:29.000Z", changedEntries: ["Encoder.mlmodelc"]
+        ))
+    }
+
+    @Test func aFailedTreeListingIsACheckFailureNotAVerdict() async throws {
+        defer { ManifestMockURLProtocol.responder = nil }
+        let (svc, dirs) = try await serviceRecordedAtAAA(then: "BBB111", trees: [:], treeStatus: 500)
+        defer { dirs.forEach { try? FileManager.default.removeItem(at: $0) } }
+        let status = await svc.checkForUpdate(repo: "Test/repo", loadedEntries: parakeetLoaded)
+        guard case .checkFailed = status else {
+            Issue.record("Expected .checkFailed, got \(status)")
             return
         }
-        #expect(local == "AAA000")
-        #expect(remote == "BBB111")
-        #expect(when == "2026-05-01T12:00:00.000Z")
-        #expect(iso8601(when!) != nil)
+    }
+
+    @Test func noManifestIsNoBaseline() async {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("manifest-net-\(UUID().uuidString)")
+        let svc = ModelManifestService(manifestDir: dir, session: makeMockSession())
+        #expect(await svc.checkForUpdate(repo: "Test/repo", loadedEntries: parakeetLoaded) == .noBaseline)
+    }
+}
+
+@Suite struct ModelUpdateNoticeTests {
+    private let everyStatus: [ManifestUpdateStatus] = [
+        .upToDate(commitSha: "aed02740059"),
+        .loadedFilesUnchanged(localCommitSha: "aed02740059", remoteCommitSha: "7dd20fe1234", addedEntries: ["Encoder_v2.mlmodelc"]),
+        .loadedFilesUnchanged(localCommitSha: "aed02740059", remoteCommitSha: "7dd20fe1234", addedEntries: []),
+        .updateAvailable(localCommitSha: "aed02740059", remoteCommitSha: "7dd20fe1234",
+                         remoteLastModifiedISO: "2026-08-19T20:10:29.000Z", changedEntries: ["Encoder.mlmodelc"]),
+        .noBaseline,
+        .checkFailed(reason: "offline"),
+    ]
+
+    @Test func noMessagePointsAtSetupOrAManualCacheClear() {
+        for status in everyStatus {
+            let message = ModelUpdateNotice.message(for: status)
+            #expect(!message.contains("Setup"), "\(status)")
+            #expect(!message.localizedCaseInsensitiveContains("clear the model cache"), "\(status)")
+        }
+    }
+
+    @Test func newFilesOnlyIsUpToDateAndNamesThem() {
+        let message = ModelUpdateNotice.message(for: everyStatus[1])
+        #expect(message.hasPrefix("Up to date (aed0274)."))
+        #expect(message.contains("Encoder_v2.mlmodelc"))
+        #expect(message.contains("Parley update"))
+        #expect(!ModelUpdateNotice.offersRedownload(for: everyStatus[1]))
+    }
+
+    @Test func aChangedLoadedFileNamesItAndOffersTheRedownload() {
+        let message = ModelUpdateNotice.message(for: everyStatus[3])
+        #expect(message == "Update available: Encoder.mlmodelc changed on Hugging Face (aed0274 → 7dd20fe, 2026-08-19). Re-download the model to apply it.")
+        #expect(ModelUpdateNotice.offersRedownload(for: everyStatus[3]))
+    }
+
+    @Test func onlyAChangeOrAMissingBaselineOffersTheRedownload() {
+        #expect(everyStatus.map(ModelUpdateNotice.offersRedownload(for:)) == [false, false, false, true, true, false])
+    }
+}
+
+@Suite struct ModelRedownloadTests {
+    private func makeCache() throws -> (parent: URL, cache: URL) {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("redownload-\(UUID().uuidString)")
+        let cache = parent.appendingPathComponent("parakeet-tdt-0.6b-v3")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: cache.appendingPathComponent("model.bin"))
+        return (parent, cache)
+    }
+
+    private func contents(_ url: URL) -> String? {
+        (try? Data(contentsOf: url)).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    private func entries(_ parent: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? []).sorted()
+    }
+
+    @Test func aCompleteDownloadReplacesTheCache() async throws {
+        let (parent, cache) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        try await ModelRedownload.run(
+            cacheDir: cache,
+            download: { staged in
+                #expect(staged.lastPathComponent == cache.lastPathComponent)
+                #expect(staged.deletingLastPathComponent().deletingLastPathComponent().path == parent.path)
+                try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
+                try Data("new".utf8).write(to: staged.appendingPathComponent("model.bin"))
+            },
+            isComplete: { _ in true }
+        )
+        #expect(contents(cache.appendingPathComponent("model.bin")) == "new")
+        #expect(entries(parent) == ["parakeet-tdt-0.6b-v3"])
+    }
+
+    @Test func aFailedDownloadLeavesTheCacheUntouched() async throws {
+        let (parent, cache) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        await #expect(throws: URLError.self) {
+            try await ModelRedownload.run(
+                cacheDir: cache,
+                download: { staged in
+                    try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
+                    try Data("partial".utf8).write(to: staged.appendingPathComponent("model.bin"))
+                    throw URLError(.networkConnectionLost)
+                },
+                isComplete: { _ in true }
+            )
+        }
+        #expect(contents(cache.appendingPathComponent("model.bin")) == "old")
+        #expect(entries(parent) == ["parakeet-tdt-0.6b-v3"])
+    }
+
+    @Test func anIncompleteDownloadLeavesTheCacheUntouched() async throws {
+        let (parent, cache) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        await #expect(throws: ModelRedownloadError.incomplete) {
+            try await ModelRedownload.run(
+                cacheDir: cache,
+                download: { staged in try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true) },
+                isComplete: { _ in false }
+            )
+        }
+        #expect(contents(cache.appendingPathComponent("model.bin")) == "old")
+        #expect(entries(parent) == ["parakeet-tdt-0.6b-v3"])
+    }
+
+    @Test func aMissingCacheIsCreated() async throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("redownload-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let cache = parent.appendingPathComponent("parakeet-tdt-0.6b-v3")
+        try await ModelRedownload.run(
+            cacheDir: cache,
+            download: { staged in
+                try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
+                try Data("new".utf8).write(to: staged.appendingPathComponent("model.bin"))
+            },
+            isComplete: { _ in true }
+        )
+        #expect(contents(cache.appendingPathComponent("model.bin")) == "new")
+    }
+
+    @Test func aStagingFolderLeftByAnEarlierRunIsRemoved() async throws {
+        let (parent, cache) = try makeCache()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let leftover = parent.appendingPathComponent(".parley-redownload-stale/parakeet-tdt-0.6b-v3")
+        try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
+        try await ModelRedownload.run(
+            cacheDir: cache,
+            download: { staged in
+                try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
+                try Data("new".utf8).write(to: staged.appendingPathComponent("model.bin"))
+            },
+            isComplete: { _ in true }
+        )
+        #expect(entries(parent) == ["parakeet-tdt-0.6b-v3"])
     }
 }

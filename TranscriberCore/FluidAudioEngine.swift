@@ -22,7 +22,7 @@ public actor FluidAudioEngine: TranscriptionEngine {
     /// Bump alongside FluidAudio if the SDK starts pulling a different default repo.
     public static let parakeetRepoSlug = "FluidInference/parakeet-tdt-0.6b-v3-coreml"
     /// Label written into manifest records for forensic identification of the SDK at download time.
-    public static let sdkLabel = "FluidAudio 0.15.x"
+    public static let sdkLabel = "FluidAudio 0.17.x"
 
     private var manager: AsrManager?
     private let unloadTimeout: TimeInterval
@@ -59,6 +59,46 @@ public actor FluidAudioEngine: TranscriptionEngine {
                 { @Sendable p in handler(p.fractionCompleted) }
             }
         )
+        await recordManifest()
+        Logger.transcription.info("FluidAudio model pre-download complete")
+    }
+
+    /// The top-level entries of the Parakeet repo this engine loads — what a model update check
+    /// compares (#349). Follows the encoder precision `AsrModels.download()` and `loadFromCache()`
+    /// use by default (`.int8`); change both together (#350).
+    public static let loadedModelEntries: Set<String> =
+        ModelNames.ASR.requiredModelsV3(precision: .int8).union([ModelNames.ASR.vocabularyFile])
+
+    /// Download the Parakeet model again, from Hugging Face's current files, even though it is cached
+    /// (#349): to apply an update, restore a model that failed verification, or record a missing
+    /// manifest. Staged: the cached model is replaced only by a complete download.
+    public static func redownloadModel(
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws {
+        try await ModelRedownload.run(
+            cacheDir: AsrModels.defaultCacheDirectory(),
+            download: { staged in
+                _ = try await AsrModels.download(
+                    to: staged,
+                    progressHandler: progress.map { handler in
+                        { @Sendable p in handler(p.fractionCompleted) }
+                    }
+                )
+            },
+            isComplete: { AsrModels.modelsExist(at: $0) }
+        )
+        await recordManifest()
+        Logger.transcription.info("FluidAudio model re-download complete")
+    }
+
+    /// Re-hash the cached Parakeet files against their manifest.
+    public static func verifyManifest() async -> ManifestVerification {
+        await ModelManifestService.shared.verify(
+            repo: Self.parakeetRepoSlug, cacheRoot: AsrModels.defaultCacheDirectory()
+        )
+    }
+
+    private static func recordManifest() async {
         let cacheRoot = AsrModels.defaultCacheDirectory()
         do {
             _ = try await ModelManifestService.shared.record(
@@ -69,7 +109,6 @@ public actor FluidAudioEngine: TranscriptionEngine {
         } catch {
             Logger.transcription.warning("Manifest record failed: \(error, privacy: .private)")
         }
-        Logger.transcription.info("FluidAudio model pre-download complete")
     }
 
     public func transcribe(audioPath: URL, language: String? = nil, audioSource: AudioSourceType = .system) async throws -> [TranscriptSegment] {

@@ -28,6 +28,10 @@ struct SettingsView: View {
     @State private var archiveUsageBytes: Int?
     @State private var updateCheckInFlight = false
     @State private var lastUpdateStatus: String?
+    /// The last check found something a re-download would fix (#349).
+    @State private var updateOffersRedownload = false
+    /// Re-download chosen; it runs on Save, like the first download (models download only on Save or in Setup).
+    @State private var redownloadRequested = false
     private let manifestHealth = ManifestHealthStore.shared
     @State private var summaryEnabled: Bool = false
     @State private var summaryProvider: SummaryProviderType = .openai
@@ -378,7 +382,7 @@ struct SettingsView: View {
                     .foregroundStyle(.orange)
             }
             Toggle("Check for Model Updates Online", isOn: $config.modelUpdateCheckEnabled)
-            Text("Periodically asks Hugging Face if a newer Parakeet model has been published. Updates are never downloaded automatically — you confirm before any change. Leave off for fully offline use.")
+            Text("Check Now asks Hugging Face whether the Parakeet files Parley uses have changed. Nothing is downloaded unless you choose Re-download Model and save. Leave off for fully offline use.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if config.modelUpdateCheckEnabled {
@@ -392,6 +396,25 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if config.engine == .fluidAudio && (manifestHealth.problemMessage != nil || updateOffersRedownload) {
+                redownloadRow
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var redownloadRow: some View {
+        if redownloadRequested {
+            HStack {
+                Text("The model will re-download (~\(config.engine.descriptor.approximateSizeMB) MB) when you save. The current one stays until the download is complete.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { redownloadRequested = false }
+            }
+        } else {
+            Button("Re-download Model") { redownloadRequested = true }
+                .disabled(isDownloading)
         }
     }
 
@@ -623,7 +646,7 @@ struct SettingsView: View {
             guard !Task.isCancelled else { return }
             saveStatus = nil
         }
-        triggerDownloadIfNeeded()
+        runDownloadStep()
         // The engine may be ready now (another one chosen, its model already there): recordings kept waiting for it are
         // transcribed (L review 178).
         Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
@@ -666,18 +689,47 @@ struct SettingsView: View {
         updateCheckInFlight = true
         defer { updateCheckInFlight = false }
         let result = await ModelManifestService.shared.checkForUpdate(
-            repo: FluidAudioEngine.parakeetRepoSlug
+            repo: FluidAudioEngine.parakeetRepoSlug,
+            loadedEntries: FluidAudioEngine.loadedModelEntries
         )
-        switch result {
-        case .upToDate(let sha):
-            lastUpdateStatus = "Up to date (\(String(sha.prefix(7))))"
-        case .updateAvailable(let local, let remote, let when):
-            let date = when.map { " · \($0)" } ?? ""
-            lastUpdateStatus = "Update available: \(String(local.prefix(7))) → \(String(remote.prefix(7)))\(date). Clear the model cache and re-download from Setup to apply."
-        case .noBaseline:
-            lastUpdateStatus = "No baseline manifest yet — re-download the model to record one."
-        case .checkFailed(let reason):
-            lastUpdateStatus = "Check failed: \(reason)"
+        lastUpdateStatus = ModelUpdateNotice.message(for: result)
+        updateOffersRedownload = ModelUpdateNotice.offersRedownload(for: result)
+    }
+
+    /// Save's download step: a re-download the user chose (#349), else the first download if the model is missing.
+    private func runDownloadStep() {
+        guard config.engine == .fluidAudio, redownloadRequested else {
+            triggerDownloadIfNeeded()
+            return
+        }
+        redownloadRequested = false
+        downloadState = .downloading(0)
+        downloadTask = Task {
+            do {
+                try await FluidAudioEngine.redownloadModel { fraction in
+                    Task { @MainActor in
+                        guard !Task.isCancelled else { return }
+                        downloadState = .downloading(fraction * 0.98)
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run { downloadState = .downloading(0.98) }
+                try await FluidAudioDiarizer.preDownloadModels()
+                let verification = await FluidAudioEngine.verifyManifest()
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    ManifestHealthStore.shared.update(verification)
+                    updateOffersRedownload = false
+                    lastUpdateStatus = nil
+                    downloadState = .done
+                }
+                Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    downloadState = .failed("Re-download failed — the current model is unchanged. Check your connection.")
+                }
+            }
         }
     }
 

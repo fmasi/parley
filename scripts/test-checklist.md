@@ -1287,3 +1287,11 @@ speakers, not headphones) so the mic hears the far side.
   transcript's words and timings match the previous build's on the same audio.
 - [ ] **P-02 MacBook Air M1.** The same on the Air: note the peak and the seconds per chunk in the PR.
 - [ ] **P-03 Diarizer on the Neural Engine.** Set `"diarization_compute_units": "neural_engine"` in config.json and repeat P-01 (and P-02 on the Air). PASS: the same speakers as with `"all"`; note the peak and the seconds per chunk for both, so the default can be chosen per Mac.
+
+## Model update check and re-download (#349)
+- [ ] Settings → Transcription, toggle "Check for Model Updates Online" on, **Check Now**. Expected on this Mac (manifest at aed0274): "Up to date (aed0274). Hugging Face has since added Encoder_v2.mlmodelc, which this version of Parley doesn't use — a Parley update would bring it in." No "Setup", no Re-download button.
+- [ ] Rename `~/Library/Application Support/Parley/model-manifests/FluidInference_parakeet-tdt-0.6b-v3-coreml.json` aside, reopen Settings, Check Now: "No record yet of which model version…" and a **Re-download Model** button.
+- [ ] Click it: the row says the model re-downloads (~N MB) on Save; Cancel puts the button back. Click again, Save: the Engine row shows progress, then "Model downloaded". A new manifest exists (commit 7dd20fe) and Check Now says "Up to date (7dd20fe)."
+- [ ] During the download, `ls ~/Library/Application\ Support/FluidAudio/Models/` shows a `.parley-redownload-…` folder beside `parakeet-tdt-0.6b-v3`; it is gone afterwards, and a recording transcribes normally.
+- [ ] Failure path: start a re-download, turn Wi-Fi off. Expected: "Re-download failed — the current model is unchanged…", the staging folder is removed (now or at the next re-download), and a recording still transcribes. (Don't put an old manifest back over a new one.)
+- [ ] Integrity path: append a newline to `parakeet-tdt-0.6b-v3/parakeet_vocab.json` (still valid JSON), relaunch. The notification and Settings say "Re-download the model in Settings → Transcription"; the Re-download Model button shows even with the update check off, and fixes it.
