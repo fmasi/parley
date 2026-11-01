@@ -601,9 +601,9 @@ struct SettingsView: View {
         // (isPreflighting) until this resolves. A model that is not downloaded yet has nothing to
         // preflight: the settings are committed, and commitSave() starts the download.
         // A re-download chosen (#349) is a model about to be replaced, possibly because it failed verification:
-        // never preflight it. Loading a corrupt model makes FluidAudio delete the cache and download again in
-        // place, unstaged. Save commits, and commitSave() runs the staged re-download.
-        let modelCached = FluidAudioEngine.isModelCached() && !redownloadWillRun
+        // never preflight it, idle or not. Loading a corrupt model makes FluidAudio delete the cache and download
+        // again in place, unstaged. Save commits, and commitSave() runs the staged re-download once Parley is idle.
+        let modelCached = FluidAudioEngine.isModelCached() && !(redownloadRequested && config.engine == .fluidAudio)
         guard EnginePreflight.saveStep(for: config.engine, modelCached: modelCached) == .preflightThenCommit else {
             commitSave(apiKeyToPersist: apiKeyToPersist)
             return
@@ -724,6 +724,7 @@ struct SettingsView: View {
         redownloadRequested = false
         downloadState = .downloading(0)
         downloadTask = Task {
+            var swapped = false
             do {
                 try await FluidAudioEngine.redownloadModel { fraction in
                     Task { @MainActor in
@@ -731,6 +732,7 @@ struct SettingsView: View {
                         downloadState = .downloading(fraction * 0.98)
                     }
                 }
+                swapped = true
                 guard !Task.isCancelled else { return }
                 await MainActor.run { downloadState = .downloading(0.98) }
                 try await FluidAudioDiarizer.preDownloadModels()
@@ -745,7 +747,8 @@ struct SettingsView: View {
                 Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
             } catch {
                 guard !Task.isCancelled else { return }
-                let kept = (error as? ModelRedownloadError)?.keptCurrentModel ?? true
+                // After the swap (a diarizer download failing), the Parakeet model has already been replaced.
+                let kept = !swapped && ((error as? ModelRedownloadError)?.keptCurrentModel ?? true)
                 await MainActor.run {
                     downloadState = .failed(
                         "Re-download failed: \(error.localizedDescription)"
