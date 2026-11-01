@@ -52,4 +52,16 @@ private struct PreflightThrowingEngine: TranscriptionEngine {
         #expect(EnginePreflight.saveStep(for: .speechAnalyzer, modelCached: false) == .preflightThenCommit)
         #expect(EnginePreflight.saveStep(for: .speechAnalyzer, modelCached: true) == .preflightThenCommit)
     }
+
+    /// A model chosen for re-download may be the corrupt one: preflighting loads it, and FluidAudio's answer to a failed
+    /// load is to delete the cache and download in place (#349, #351). The Save commits and runs the staged re-download.
+    @Test func aModelChosenForRedownloadIsNeverPreflighted() {
+        #expect(EnginePreflight.saveStep(for: .fluidAudio, modelCached: true, redownloadChosen: true) == .commitThenDownload)
+        #expect(EnginePreflight.saveStep(for: .fluidAudio, modelCached: false, redownloadChosen: true) == .commitThenDownload)
+    }
+
+    /// Apple Speech has nothing to re-download: a stale request never skips its preflight.
+    @Test func aRedownloadRequestNeverSkipsAppleSpeechsPreflight() {
+        #expect(EnginePreflight.saveStep(for: .speechAnalyzer, modelCached: true, redownloadChosen: true) == .preflightThenCommit)
+    }
 }

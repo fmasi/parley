@@ -31,6 +31,13 @@ public enum ModelUpdateNotice {
         }
     }
 
+    /// What Settings says when a re-download fails. `afterSwap`: the new model was already in place (a later
+    /// step, the diarizer download, failed). "Unchanged" is said only when it is known to be true.
+    public static func redownloadFailed(_ error: Error, afterSwap: Bool) -> String {
+        let kept = !afterSwap && ((error as? ModelRedownloadError)?.keptCurrentModel ?? true)
+        return "Re-download failed: \(error.localizedDescription)" + (kept ? " The current model is unchanged." : "")
+    }
+
     /// Whether a re-download would do something: apply changed files, or record the missing baseline.
     public static func offersRedownload(for status: ManifestUpdateStatus) -> Bool {
         switch status {

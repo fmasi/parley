@@ -15,8 +15,13 @@ public enum EnginePreflight {
     /// A model that is missing is not a broken engine: an engine without its model can only throw "not downloaded", and
     /// refusing the Save on that refuses the one action that downloads it. Everything else is preflighted — an engine with
     /// no download of Parley's (Apple Speech) always.
-    public static func saveStep(for engine: EngineID, modelCached: Bool) -> SaveStep {
-        engine.descriptor.requiresModelDownload && !modelCached ? .commitThenDownload : .preflightThenCommit
+    ///
+    /// A model the user chose to re-download (`redownloadChosen`, #349) is never preflighted either: it may be the one that
+    /// failed verification, and loading a corrupt model makes FluidAudio delete the cache and download again in place,
+    /// unstaged (#351). The Save commits and runs the staged re-download instead.
+    public static func saveStep(for engine: EngineID, modelCached: Bool, redownloadChosen: Bool = false) -> SaveStep {
+        engine.descriptor.requiresModelDownload && (!modelCached || redownloadChosen)
+            ? .commitThenDownload : .preflightThenCommit
     }
 
     public static func run(engine: any TranscriptionEngine, scratchDirectory: URL = FileManager.default.temporaryDirectory) async throws {

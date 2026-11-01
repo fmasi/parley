@@ -548,6 +548,21 @@ private let parakeetLoaded: Set<String> = [
         #expect(entries(parent) == ["parakeet-tdt-0.6b-v3"])
     }
 
+    @Test func aFailureBeforeTheSwapSaysTheModelIsUnchanged() {
+        let message = ModelUpdateNotice.redownloadFailed(URLError(.notConnectedToInternet), afterSwap: false)
+        #expect(message.hasPrefix("Re-download failed: "))
+        #expect(message.hasSuffix(" The current model is unchanged."))
+        #expect(ModelUpdateNotice.redownloadFailed(ModelRedownloadError.incomplete, afterSwap: false)
+            == "Re-download failed: The downloaded model is incomplete. The current model is unchanged.")
+    }
+
+    @Test func aFailedSwapOrAFailureAfterItNeverClaimsTheModelIsUnchanged() {
+        #expect(ModelUpdateNotice.redownloadFailed(ModelRedownloadError.swapFailed("EPERM"), afterSwap: false)
+            == "Re-download failed: Replacing the model failed (EPERM).")
+        let afterSwap = ModelUpdateNotice.redownloadFailed(URLError(.networkConnectionLost), afterSwap: true)
+        #expect(!afterSwap.contains("unchanged"))
+    }
+
     @Test func onlyAFailedSwapLeavesTheCurrentModelInDoubt() {
         #expect(ModelRedownloadError.incomplete.keptCurrentModel)
         #expect(!ModelRedownloadError.swapFailed("EPERM").keptCurrentModel)
