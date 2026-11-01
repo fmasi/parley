@@ -18,6 +18,8 @@ private enum DownloadState: Equatable {
 struct SettingsView: View {
     let configManager: ConfigManager
     @Bindable var permissionManager: PermissionManager
+    /// Read for `isIdle` only: a re-download never runs during a recording or its transcription (#349).
+    let appState: AppState
     @State private var config: Config
     @State private var saveStatus: String?
     @State private var isPreflighting = false
@@ -55,9 +57,10 @@ struct SettingsView: View {
     @State private var summaryMaxOutputTokens: String = ""
     @State private var settingsMicId: String?
 
-    init(configManager: ConfigManager, permissionManager: PermissionManager) {
+    init(configManager: ConfigManager, permissionManager: PermissionManager, appState: AppState) {
         self.configManager = configManager
         self.permissionManager = permissionManager
+        self.appState = appState
         self._config = State(initialValue: configManager.config)
         let s = configManager.config.summary
         self._summaryEnabled = State(initialValue: s?.enabled ?? false)
@@ -368,6 +371,7 @@ struct SettingsView: View {
                 downloadTask?.cancel()
                 downloadTask = nil
                 downloadState = .idle
+                redownloadRequested = false
             }
 
             if config.engine.descriptor.requiresModelDownload {
@@ -396,7 +400,8 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if config.engine == .fluidAudio && (manifestHealth.problemMessage != nil || updateOffersRedownload) {
+            if config.engine == .fluidAudio
+                && (redownloadRequested || manifestHealth.problemMessage != nil || updateOffersRedownload) {
                 redownloadRow
             }
         }
@@ -414,7 +419,12 @@ struct SettingsView: View {
             }
         } else {
             Button("Re-download Model") { redownloadRequested = true }
-                .disabled(isDownloading)
+                .disabled(isDownloading || !appState.isIdle)
+            if !appState.isIdle {
+                Text("Available once the recording is stopped and transcribed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -590,7 +600,11 @@ struct SettingsView: View {
         // config is committed, so a broken engine never gets saved silently — Save stays disabled
         // (isPreflighting) until this resolves. A model that is not downloaded yet has nothing to
         // preflight: the settings are committed, and commitSave() starts the download.
-        guard EnginePreflight.saveStep(for: config.engine, modelCached: FluidAudioEngine.isModelCached()) == .preflightThenCommit else {
+        // A re-download chosen (#349) is a model about to be replaced, possibly because it failed verification:
+        // never preflight it. Loading a corrupt model makes FluidAudio delete the cache and download again in
+        // place, unstaged. Save commits, and commitSave() runs the staged re-download.
+        let modelCached = FluidAudioEngine.isModelCached() && !redownloadWillRun
+        guard EnginePreflight.saveStep(for: config.engine, modelCached: modelCached) == .preflightThenCommit else {
             commitSave(apiKeyToPersist: apiKeyToPersist)
             return
         }
@@ -696,9 +710,14 @@ struct SettingsView: View {
         updateOffersRedownload = ModelUpdateNotice.offersRedownload(for: result)
     }
 
+    private var redownloadWillRun: Bool {
+        redownloadRequested && config.engine == .fluidAudio && appState.isIdle
+    }
+
     /// Save's download step: a re-download the user chose (#349), else the first download if the model is missing.
+    /// A re-download chosen before a recording started stays chosen, for a Save once Parley is idle again.
     private func runDownloadStep() {
-        guard config.engine == .fluidAudio, redownloadRequested else {
+        guard redownloadWillRun else {
             triggerDownloadIfNeeded()
             return
         }
@@ -726,8 +745,12 @@ struct SettingsView: View {
                 Task { await TranscriberApp.busyCoordinator?.transcriptionEngineMayBeReady() }
             } catch {
                 guard !Task.isCancelled else { return }
+                let kept = (error as? ModelRedownloadError)?.keptCurrentModel ?? true
                 await MainActor.run {
-                    downloadState = .failed("Re-download failed — the current model is unchanged. Check your connection.")
+                    downloadState = .failed(
+                        "Re-download failed: \(error.localizedDescription)"
+                            + (kept ? " The current model is unchanged." : "")
+                    )
                 }
             }
         }

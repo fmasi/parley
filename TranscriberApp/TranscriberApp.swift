@@ -586,7 +586,8 @@ struct TranscriberApp: App {
         Settings {
             SettingsView(
                 configManager: configManager,
-                permissionManager: launchGate.permissionManager
+                permissionManager: launchGate.permissionManager,
+                appState: appState
             )
         }
         // Cmd-Q from any Parley window (Settings, Setup) is the one Quit too — it asks while recording and stops

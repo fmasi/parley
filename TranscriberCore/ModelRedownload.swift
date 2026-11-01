@@ -29,10 +29,14 @@ public enum ModelRedownload {
         try Task.checkCancellation()
         guard isComplete(staged) else { throw ModelRedownloadError.incomplete }
 
-        if fm.fileExists(atPath: cacheDir.path) {
-            _ = try fm.replaceItemAt(cacheDir, withItemAt: staged)
-        } else {
-            try fm.moveItem(at: staged, to: cacheDir)
+        do {
+            if fm.fileExists(atPath: cacheDir.path) {
+                _ = try fm.replaceItemAt(cacheDir, withItemAt: staged)
+            } else {
+                try fm.moveItem(at: staged, to: cacheDir)
+            }
+        } catch {
+            throw ModelRedownloadError.swapFailed(error.localizedDescription)
         }
     }
 
@@ -48,10 +52,21 @@ public enum ModelRedownload {
 
 public enum ModelRedownloadError: LocalizedError, Equatable {
     case incomplete
+    /// The download was complete but putting it in place failed: the cache may hold either model, or neither.
+    case swapFailed(String)
 
     public var errorDescription: String? {
         switch self {
-        case .incomplete: return "The downloaded model is incomplete"
+        case .incomplete: return "The downloaded model is incomplete."
+        case .swapFailed(let reason): return "Replacing the model failed (\(reason))."
+        }
+    }
+
+    /// Whether the cache is known to still hold the model it had before the re-download started.
+    public var keptCurrentModel: Bool {
+        switch self {
+        case .incomplete: return true
+        case .swapFailed: return false
         }
     }
 }

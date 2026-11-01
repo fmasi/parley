@@ -87,7 +87,9 @@ public actor FluidAudioEngine: TranscriptionEngine {
             },
             isComplete: { AsrModels.modelsExist(at: $0) }
         )
-        await recordManifest()
+        // The swap is done: record what is now on disk even if the caller was cancelled meanwhile — a
+        // cancelled record would write an empty commit SHA, and the next check would say "no record".
+        await Task.detached { await recordManifest() }.value
         Logger.transcription.info("FluidAudio model re-download complete")
     }
 

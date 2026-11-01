@@ -460,6 +460,23 @@ private let parakeetLoaded: Set<String> = [
         #expect(ModelUpdateNotice.offersRedownload(for: everyStatus[3]))
     }
 
+    @Test func aNewReadmeIsNotCalledSomethingAParleyUpdateWouldBringIn() {
+        let message = ModelUpdateNotice.message(for: .loadedFilesUnchanged(
+            localCommitSha: "aed02740059", remoteCommitSha: "7dd20fe1234", addedEntries: ["README.md", ".gitattributes"]
+        ))
+        #expect(message == "Up to date (aed0274). Hugging Face has a newer commit (7dd20fe), but none of the files Parley uses changed.")
+    }
+
+    @Test func onlyModelFilesAreNamedAsNew() {
+        let message = ModelUpdateNotice.message(for: .loadedFilesUnchanged(
+            localCommitSha: "aed02740059", remoteCommitSha: "7dd20fe1234",
+            addedEntries: ["Encoder_v2.mlmodelc", "NOTES.md", "vocab_v4.json"]
+        ))
+        #expect(message.contains("Encoder_v2.mlmodelc and vocab_v4.json"))
+        #expect(message.contains("bring them in"))
+        #expect(!message.contains("NOTES.md"))
+    }
+
     @Test func onlyAChangeOrAMissingBaselineOffersTheRedownload() {
         #expect(everyStatus.map(ModelUpdateNotice.offersRedownload(for:)) == [false, false, false, true, true, false])
     }
@@ -529,6 +546,12 @@ private let parakeetLoaded: Set<String> = [
         }
         #expect(contents(cache.appendingPathComponent("model.bin")) == "old")
         #expect(entries(parent) == ["parakeet-tdt-0.6b-v3"])
+    }
+
+    @Test func onlyAFailedSwapLeavesTheCurrentModelInDoubt() {
+        #expect(ModelRedownloadError.incomplete.keptCurrentModel)
+        #expect(!ModelRedownloadError.swapFailed("EPERM").keptCurrentModel)
+        #expect(ModelRedownloadError.swapFailed("EPERM").errorDescription == "Replacing the model failed (EPERM).")
     }
 
     @Test func aMissingCacheIsCreated() async throws {

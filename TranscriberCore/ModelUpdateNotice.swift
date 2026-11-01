@@ -8,7 +8,11 @@ public enum ModelUpdateNotice {
         switch status {
         case .upToDate(let sha):
             return "Up to date (\(short(sha)))."
-        case .loadedFilesUnchanged(let local, let remote, let added):
+        case .loadedFilesUnchanged(let local, let remote, let allAdded):
+            // Only model files and their JSON make "a Parley update would bring it in" true; a README never would.
+            let added = allAdded.filter { name in
+                [".mlmodelc", ".mlpackage", ".json"].contains { name.hasSuffix($0) }
+            }
             guard !added.isEmpty else {
                 return "Up to date (\(short(local))). Hugging Face has a newer commit (\(short(remote))), "
                     + "but none of the files Parley uses changed."

@@ -1295,3 +1295,5 @@ speakers, not headphones) so the mic hears the far side.
 - [ ] During the download, `ls ~/Library/Application\ Support/FluidAudio/Models/` shows a `.parley-redownload-…` folder beside `parakeet-tdt-0.6b-v3`; it is gone afterwards, and a recording transcribes normally.
 - [ ] Failure path: start a re-download, turn Wi-Fi off. Expected: "Re-download failed — the current model is unchanged…", the staging folder is removed (now or at the next re-download), and a recording still transcribes. (Don't put an old manifest back over a new one.)
 - [ ] Integrity path: append a newline to `parakeet-tdt-0.6b-v3/parakeet_vocab.json` (still valid JSON), relaunch. The notification and Settings say "Re-download the model in Settings → Transcription"; the Re-download Model button shows even with the update check off, and fixes it.
+- [ ] While recording: the Re-download Model button is disabled with "Available once the recording is stopped and transcribed." A re-download chosen before the recording started does not run on a Save during it; it runs on a Save after.
+- [ ] Choose Re-download Model, switch the engine away and back: the request is gone (no download on Save).
