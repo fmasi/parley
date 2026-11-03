@@ -172,13 +172,18 @@ public actor FluidAudioDiarizer: DiarizationProvider {
 
     /// Returns true if all diarization model files are present in the local cache.
     /// Used by ensureLoaded() — does NOT require VAD so existing installs keep working.
-    public static func isDiarizationCached() -> Bool {
-        let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
+    public static func isDiarizationCached(
+        baseDir: URL = OfflineDiarizerModels.defaultModelsDirectory()
+    ) -> Bool {
         let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
         let fm = FileManager.default
         // Check directory existence first — primes the VFS metadata cache so
         // subsequent child-path checks reflect the current on-disk state.
         guard fm.fileExists(atPath: repoDir.path) else { return false }
+        // The diarizer's revision is pinned: files from another revision (or from before FluidAudio
+        // wrote markers) are not this model, and loading offline refuses them. Not cached, so Setup
+        // fetches it instead of a transcription failing (#351).
+        guard ModelRevisionMarker.matches(repoDir: repoDir, revision: Repo.diarizer.revision) else { return false }
         return ModelNames.OfflineDiarizer.requiredModels.allSatisfy {
             fm.fileExists(atPath: repoDir.appendingPathComponent($0).path)
         }
@@ -195,8 +200,10 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     public static func preDownloadModels(
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws {
-        let mgr = OfflineDiarizerManager()
-        try await mgr.prepareModels()
+        try await FluidAudioRuntime.allowingDownloads {
+            let mgr = OfflineDiarizerManager()
+            try await mgr.prepareModels()
+        }
         Logger.transcription.info("FluidAudio diarization model pre-download complete")
 
         try await VadSpeechMap.preDownloadModel()
@@ -229,6 +236,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
             throw FluidAudioEngineError.modelNotDownloaded
         }
 
+        FluidAudioRuntime.configure()  // offline: load only, never a re-download (#351)
         let loadStart = ContinuousClock.now
         Logger.transcription.info("Loading FluidAudio diarization models from cache...")
 

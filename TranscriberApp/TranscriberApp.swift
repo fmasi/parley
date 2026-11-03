@@ -194,6 +194,9 @@ struct TranscriberApp: App {
             launcher: recordingLauncher, calendarService: calendarService
         )
 
+        // FluidAudio offline and off stderr from the start, CLI included (#351, #343).
+        FluidAudioRuntime.configure()
+
         // CLI mode: only enter for known subcommands (not system-injected args)
         if let first = CommandLine.arguments.dropFirst().first,
            Self.cliSubcommands.contains(first) {
