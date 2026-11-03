@@ -149,18 +149,24 @@ private final class SwitchLog: Sendable {
         #expect(ModelHub.offlineMode)
     }
 
-    /// The pinned diarizer revision Parley checks is the one FluidAudio downloads; a bump of the pin in a
-    /// FluidAudio update makes the cached model "not cached", so Setup fetches the new one (#351).
-    @Test func theDiarizerIsCachedOnlyWithItsPinnedRevisionMarker() async throws {
-        guard try await TestModels.ensureDiarization() else { return }  // on CI a missing model fails, never skips
-        let repoDir = OfflineDiarizerModels.defaultModelsDirectory().appendingPathComponent(Repo.diarizer.folderName)
-        let fm = FileManager.default
-        let marker = repoDir.appendingPathComponent(ModelRevisionMarker.fileName)
-        let saved = try? Data(contentsOf: marker)
-        defer {
-            if let saved { try? saved.write(to: marker) } else { try? fm.removeItem(at: marker) }
+    /// A pinned diarizer folder counts as cached only with its revision's marker, so a FluidAudio update that moves
+    /// the pin (or a cache from before markers) sends the user to Setup instead of failing every transcription (#351).
+    @Test func theDiarizerIsCachedOnlyWithItsPinnedRevisionMarker() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("diarizer-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let repoDir = base.appendingPathComponent(Repo.diarizer.folderName)
+        for name in ModelNames.OfflineDiarizer.requiredModels {
+            try FileManager.default.createDirectory(
+                at: repoDir.appendingPathComponent(name), withIntermediateDirectories: true)
         }
+        let marker = repoDir.appendingPathComponent(ModelRevisionMarker.fileName)
+
+        #expect(!FluidAudioDiarizer.isDiarizationCached(baseDir: base), "no marker: from before markers")
+
         try Data("0000000000000000000000000000000000000000\n".utf8).write(to: marker)
-        #expect(!FluidAudioDiarizer.isDiarizationCached())
+        #expect(!FluidAudioDiarizer.isDiarizationCached(baseDir: base), "another revision's files")
+
+        try Data((Repo.diarizer.revision + "\n").utf8).write(to: marker)
+        #expect(FluidAudioDiarizer.isDiarizationCached(baseDir: base))
     }
 }

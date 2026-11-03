@@ -18,7 +18,8 @@ private enum DownloadState: Equatable {
 struct SettingsView: View {
     let configManager: ConfigManager
     @Bindable var permissionManager: PermissionManager
-    /// Read for `isIdle` only: a re-download never runs during a recording or its transcription (#349).
+    /// Read for `isIdle` only: no download (a re-download, #349, or a first one, #351) runs during a recording or its
+    /// transcription.
     let appState: AppState
     @State private var config: Config
     @State private var saveStatus: String?
@@ -675,6 +676,10 @@ struct SettingsView: View {
                 Label("Model ready", systemImage: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else if !appState.isIdle {
+                Text("Model will download ~\(config.engine.descriptor.approximateSizeMB) MB when you save, once the recording is stopped and transcribed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
                 Text("Model will download ~\(config.engine.descriptor.approximateSizeMB) MB when you save")
                     .font(.caption)
@@ -758,6 +763,9 @@ struct SettingsView: View {
         guard config.engine == .fluidAudio else { return }
         let allCached = FluidAudioEngine.isModelCached() && FluidAudioDiarizer.isFullyReady()
         guard !allCached else { return }
+        // A download turns FluidAudio online for the whole process; a model load in a transcription running meanwhile
+        // could then delete and re-download its model (#351). Recordings wait for the engine; a Save once idle downloads.
+        guard appState.isIdle else { return }
         downloadState = .downloading(0)
         downloadTask = Task {
             do {

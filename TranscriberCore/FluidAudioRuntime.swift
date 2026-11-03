@@ -26,8 +26,13 @@ public enum FluidAudioRuntime {
     }
 
     /// Runs `body` with FluidAudio allowed to download. Only Setup, Settings Save and the CLI's
-    /// `download-models` call this. A model load that runs at the same moment, on another task, is
-    /// online too; Settings starts a download only while no recording is being processed.
+    /// `download-models` call this (and the tests' model fetch). A model load that runs at the same
+    /// moment, on another task, is online too, so Settings starts a download only while no recording
+    /// is being recorded or transcribed (`AppState.isIdle`).
+    ///
+    /// FluidAudio documents `offlineMode` as "set once at startup" and reads it unsynchronised
+    /// (`HFClient.offlineMode` is `nonisolated(unsafe)`). Toggling it per scope is a Bool store, benign
+    /// on arm64, but outside that contract: re-check it on every FluidAudio update (gotcha 100).
     public static func allowingDownloads<T>(_ body: () async throws -> T) async rethrows -> T {
         configure()
         return try await downloads.allowing(body)
@@ -76,8 +81,10 @@ public final class ModelDownloadGate: Sendable {
 public enum ModelRevisionMarker {
     static let fileName = ".fluidaudio-revision"
 
-    /// Mirrors FluidAudio's `ModelCache.matchesRevision`: a `main` folder without a marker predates
-    /// markers and is current; a pinned revision needs an exact marker.
+    /// Mirrors FluidAudio's internal `ModelCache.matchesRevision` (0.17.7), the source of truth, and its
+    /// marker file name: a `main` folder without a marker predates markers and is current; a pinned
+    /// revision needs an exact marker. Callers pass the repo's unmapped revision: Parley never sets
+    /// `ModelRegistry.revisionOverrides`. Re-check both on every FluidAudio update.
     public static func matches(repoDir: URL, revision: String) -> Bool {
         let marker = repoDir.appendingPathComponent(fileName)
         guard let data = try? Data(contentsOf: marker) else { return revision == "main" }

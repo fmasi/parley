@@ -172,8 +172,9 @@ public actor FluidAudioDiarizer: DiarizationProvider {
 
     /// Returns true if all diarization model files are present in the local cache.
     /// Used by ensureLoaded() — does NOT require VAD so existing installs keep working.
-    public static func isDiarizationCached() -> Bool {
-        let baseDir = OfflineDiarizerModels.defaultModelsDirectory()
+    public static func isDiarizationCached(
+        baseDir: URL = OfflineDiarizerModels.defaultModelsDirectory()
+    ) -> Bool {
         let repoDir = baseDir.appendingPathComponent(Repo.diarizer.folderName)
         let fm = FileManager.default
         // Check directory existence first — primes the VFS metadata cache so
