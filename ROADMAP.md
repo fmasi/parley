@@ -11,39 +11,61 @@ memory to anyone.
 
 > This roadmap is directional, not a commitment. Shipped work lives in the
 > [releases](https://github.com/fmasi/parley/releases); this is where things are heading. Dates are
-> deliberately absent — the sequence is the point.
+> deliberately absent — the sequence is the point. Each stage is a
+> [milestone](https://github.com/fmasi/parley/milestones) holding its issues.
 
 ---
 
-## Now — `v0.9.0` · Clean base + provable trust
-Tighten and audit the core before widening it. A credible base is worth more than more surface area.
+## Shipped
+- **`v0.9.0` · Clean base + provable trust** — a recording never fails silently: a silent mic, a lost
+  permission, a gap or a failed write raises an alarm while it lasts; echo detection; a speaker count
+  you can correct; secrets in the Keychain
+- **`v0.10.0` · Meetings that run themselves** — Parley notices a meeting starting and offers to record
+  it (and to stop when it ends); the Core Audio tap captures Continuity, iPhone Mirroring and app calls
+- **`v0.11.0`** — a quarter less memory and time per recording; optional mic echo cancellation that
+  never touches the recording itself
 
-- **Security & privacy hardening** — secrets moved to the Keychain; identifying data scrubbed from logs
-- **Deep code-quality pass** — remove dead code and duplication (success metric: *net lines removed*)
-- **Automatic language routing** — pick the right engine per language with zero setup, so non-Latin
-  scripts work out of the box
-- **Self-checking transcripts** — the app flags its *own* low-confidence speaker separation rather
-  than hiding it (`separation: UNRELIABLE`)
-- **Finish the crash-recovery / chunked-pipeline bug sweep**
+## Now — `v0.11.1` · Airgap fixes
+- **Models change only when you ask** — a damaged model is reported, never silently deleted and
+  re-downloaded during a transcription
+- **Recognised words stay off the console** — the speech engine's own logging is held to Parley's
+  privacy rules
 
-## Next — `v0.10` · Meetings that run themselves
-Remove the manual steps around a recorded meeting.
+## Next — `v0.12` · Accuracy
+Better words and better speaker attribution. Each change ships only when a benchmark proves it
+([evaluation](docs/fluidaudio-evaluation-2026-10.md)).
 
-- **Automatic meeting detection** — recording starts when a call starts; no button to remember
-- **Acoustic echo cancellation** — clean speaker-mode calls (no headphones required) handled at
-  capture time via Apple's VoiceProcessing IO, with noise suppression along for the ride
-- **Turnkey on-device summaries** — zero-setup summarisation on Apple's on-device models; no external
-  endpoint to configure
-- **Cross-session speaker memory** — name someone once, and Parley recognises them in later meetings
-- **Model evaluation** — a more accurate default speech model, custom vocabulary for names and jargon, and FluidAudio-native CJK engines, each shipped only when a benchmark proves it ([evaluation](docs/fluidaudio-evaluation-2026-10.md))
+- **A more accurate default speech model** — Parakeet Ultra and the corrected v3 encoder, measured
+  against today's model on word error rate and memory
+- **Custom vocabulary** — names and jargon, seeded from the calendar event, so the people in the
+  meeting are spelled right
+- **Every language out of the box** — FluidAudio-native Chinese, Japanese and Korean engines with
+  automatic language routing, replacing the manual setup Apple's engine needs today
+- **Echo that's judged, not guessed** — tell which side is the copy, judge echo before small
+  clusters are merged away, and decide whether echo cancellation should be on by default
+- **Faster re-detect** — correct a speaker count without re-running the whole analysis
 
-## Later — `v0.11` · The private context layer
+## Then — `v0.13` · Speaker memory
+- **Name someone once** — Parley recognises them in later meetings, on this Mac only (voice prints
+  are biometric data: stored locally, deletable, never shared)
+- **A rename dialog built for it** — pick across sessions, with better voice samples
+- **Speaker identity the compiler checks** — one speaker type instead of matching strings
+
+## Later — `v0.14` · The private context layer
 Parley as a context source your agents can query — the part no cloud note-taker can safely offer.
 
-- **Agent-queryable transcripts** — an MCP interface over your own meeting history, fully on-device
-- **Wider capture** — iPhone Mirroring and app-call (e.g. WhatsApp) audio, extending the Core Audio tap that already captures Continuity calls
+- **A typed transcript** — one schema that every reader and writer shares, the foundation for the rest
+- **Agent-queryable meeting history (RAG + MCP)** — search and retrieve across your own meetings
+  through an MCP interface, fully on-device
+- **Meeting threads** — follow a topic across a recurring meeting series
+- **Grounded summaries** — decisions and action items that cite the lines they came from
 - **Provable provenance** — tamper-evident transcripts; an auditable guarantee that a recording never
   left the machine
+
+## Not yet scheduled
+- **Turnkey on-device summaries** — Apple's on-device models, no endpoint to configure
+- **Long meetings in any model** — summarise transcripts larger than the model's context
+- **Summary templates** per meeting type, and summaries that retry instead of failing
 
 ---
 
@@ -53,4 +75,4 @@ Parley as a context source your agents can query — the part no cloud note-take
 - **Easy to trust and install** — signed, with Homebrew distribution planned
 
 *Curious where a specific feature sits? The [issues](https://github.com/fmasi/parley/issues) are
-grouped under the epics above.*
+grouped under the milestones above.*
