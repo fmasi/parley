@@ -139,7 +139,7 @@ public actor VadSpeechMap {
     /// Download the Silero VAD model to the local cache.
     /// Safe to call if already cached.
     public static func preDownloadModel() async throws {
-        let _ = try await VadManager()
+        let _ = try await FluidAudioRuntime.allowingDownloads { try await VadManager() }
         Logger.transcription.info("VAD model pre-download complete")
     }
 
@@ -148,6 +148,7 @@ public actor VadSpeechMap {
             return mgr
         }
 
+        FluidAudioRuntime.configure()  // offline: load only, never a re-download (#351)
         let loadStart = ContinuousClock.now
         Logger.transcription.info("Loading Silero VAD model from cache...")
 

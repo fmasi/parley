@@ -81,7 +81,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/KeychainStore.swift` -- `KeychainStoring` protocol + `KeychainStore` (SecItem-backed) for string secrets, keyed by (service, account); `SummaryAPIKeyStore` facade holds the one secret this app stores (`Config.summary` has at most one active provider at a time, so a single fixed account is enough) — the summary API key never round-trips through config.json (#48)
 - `TranscriberCore/EngineID.swift` -- engine enum (speechAnalyzer/fluidAudio) + EngineDescriptor metadata
 - `TranscriberCore/TranscriptionEngine.swift` -- protocol for swappable transcription engines + AudioSourceType enum
-- `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages) with ITN text normalization; isModelCached()/preDownloadModel() for eager download, redownloadModel() (staged, from Settings Save, #349); ensureLoaded() is load-only (never downloads)
+- `TranscriberCore/FluidAudioEngine.swift` -- FluidAudio/Parakeet engine (fastest, 25 EU languages) with ITN text normalization; isModelCached()/preDownloadModel() for eager download, redownloadModel() (staged, from Settings Save, #349); ensureLoaded() is load-only and FluidAudio is offline there (`FluidAudioRuntime`, #351)
 - `TranscriberCore/FluidAudioDiarizer.swift` -- FluidAudio offline diarization (pyannote + WeSpeaker + VBx) with quality scores; `DiarizationComputeUnits` (`diarization_compute_units`: GPU by default, the Neural Engine at about half the memory); isDiarizationCached()/preDownloadModels() for eager download; ensureLoaded() is load-only (never downloads)
 - `TranscriberCore/SpeechAnalyzerEngine.swift` -- Apple SpeechAnalyzer engine (macOS 26+, no download), `@available(macOS 26.0, *)`
 - `TranscriberCore/DiarizationCleanup.swift` -- post-processes a raw `DiarizationResult` before labeling: absorbs clusters holding under `diarization_min_speaker_share` of a stream's speech into the dominant speaker, only when one cluster holds >=50% (#65)
@@ -205,6 +205,7 @@ macOS menu bar app for meeting transcription (mic + system audio from Zoom/Teams
 - `TranscriberCore/ModelManifest.swift` -- snapshot of a downloaded model: Hugging Face commit, download time, SHA-256 per file; stored under `model-manifests/` in the data directory
 - `TranscriberCore/ModelManifestService.swift` -- records and verifies a model's manifest (local only); `checkForUpdate` is the one network call and is opt-in (`model_update_check_enabled`): when the repo moved, it compares the entries Parley loads (`FluidAudioEngine.loadedModelEntries`) by Hugging Face tree ids at both commits, so a new file is not an update (#349)
 - `TranscriberCore/ModelUpdateNotice.swift` -- what Settings says after an update check and whether it offers a re-download (#349); every message names an action the app has
+- `TranscriberCore/FluidAudioRuntime.swift` -- FluidAudio's process-wide switches (#351, #343): offline (`ModelHub.offlineMode`) except inside `allowingDownloads` (Setup, Settings Save, CLI `download-models`), so a model that fails to load throws instead of being deleted and re-downloaded; `ModelDownloadGate` counts open download scopes; `ModelRevisionMarker` makes a pinned model with a stale `.fluidaudio-revision` count as not cached; FluidAudio's own logs stay off stderr, debug lines dropped
 - `TranscriberCore/ModelRedownload.swift` -- re-downloads a model into a staging folder beside its cache and swaps it in only when complete, so a failed download never removes the working model (#349)
 
 ## Audio Capture Architecture (critical knowledge)
@@ -233,7 +234,7 @@ bash scripts/swift-test.sh            # one suite: bash scripts/swift-test.sh <S
 # CommandLineTools -X flags. `just test` adds a canary. Never `CFFIXED_USER_HOME="$(…)" swift test` on one line: a
 # failed command leaves it empty, which means the REAL home, where a test with Config.default records into, and runs
 # the storage limit over, ~/Documents/Recordings (#313). The test bundle refuses to start there (SwiftTests/TestHomeGuard).
-# 2863 tests across 314 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
+# 2877 tests across 317 suites (Config, ConfigManager, EngineID, WavFileWriter, AppState, FilenameUtils, CalendarEventPicker, PermissionManager, AudioDeviceEnumerator, InputLevelMonitor, RecordingSentinel, LaunchAgentManager, DiscoverSegments, SegmentNaming, SpeakerAssignment, SpeakerBoundarySplitTests, DiarizationCleanup, DiarizerSpeakerCount, TranscriptRediarizer, SpeakerCountEnforcer, SpeakerReconciler, TranscriptMerger, ChunkSession, ChunkRecovery, AudioConverter, VadSpeechMap, ChunkRotator, ChunkProcessor, CLIParser, RecordingTimer, PathDisplay, OpenAISummaryProvider, LMStudioSummaryProvider, MeetingSummarizer, TokenRatioCache, EchoDeduplicator, EchoNotice, KeychainStore, etc.)
 # Uses Swift Testing, not XCTest. Development uses Xcode 27; CI's toolchain is in AGENTS.md ("CI toolchain").
 # Test path: SwiftTests/TranscriberTests/ (the name dates from a Python tests/ directory, since removed)
 ```
@@ -274,14 +275,14 @@ record of its build, and the live log does not carry it either.
 - [docs/development-process.md](docs/development-process.md) -- How work gets from idea to release; when to bump MINOR vs PATCH
 - [docs/pipeline.md](docs/pipeline.md) -- End-to-end pipeline: recording → transcription → echo dedup → summary
 - [docs/parameters.md](docs/parameters.md) -- All tunable parameters with config keys and defaults
-- [docs/gotchas.md](docs/gotchas.md) -- 99 platform-specific gotchas
+- [docs/gotchas.md](docs/gotchas.md) -- 100 platform-specific gotchas
 - [docs/mic-capture-design.md](docs/mic-capture-design.md) -- Mic capture API choice (AVCaptureSession + Core Audio HAL) + auto-follow-default direction + when to revisit AVAudioEngine
 - [docs/benchmarks/](docs/benchmarks/) -- Dated benchmark reports
 - [docs/fluidaudio-evaluation-2026-10.md](docs/fluidaudio-evaluation-2026-10.md) -- FluidAudio 0.15.5→0.17.7 capability review against Parley's needs, ranked opportunities, filed issues
 - [docs/app-store-blockers.md](docs/app-store-blockers.md) -- choices that would not survive App Store review (private SPI, global tap, LaunchAgent) — add an entry with any new one
 
 ## Key Gotchas
-See [docs/gotchas.md](docs/gotchas.md) -- 99 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
+See [docs/gotchas.md](docs/gotchas.md) -- 100 platform-specific gotchas (macOS APIs, ScreenCaptureKit, XPC, audio formats, TCC, Liquid Glass, engine quirks). New items are appended there.
 
 ## Debugging
 See [docs/pipeline.md](docs/pipeline.md#debugging) for full unified logging reference.

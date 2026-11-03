@@ -54,11 +54,13 @@ public actor FluidAudioEngine: TranscriptionEngine {
     public static func preDownloadModel(
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws {
-        _ = try await AsrModels.download(
-            progressHandler: progress.map { handler in
-                { @Sendable p in handler(p.fractionCompleted) }
-            }
-        )
+        try await FluidAudioRuntime.allowingDownloads {
+            _ = try await AsrModels.download(
+                progressHandler: progress.map { handler in
+                    { @Sendable p in handler(p.fractionCompleted) }
+                }
+            )
+        }
         await recordManifest()
         Logger.transcription.info("FluidAudio model pre-download complete")
     }
@@ -78,12 +80,14 @@ public actor FluidAudioEngine: TranscriptionEngine {
         try await ModelRedownload.run(
             cacheDir: AsrModels.defaultCacheDirectory(),
             download: { staged in
-                _ = try await AsrModels.download(
-                    to: staged,
-                    progressHandler: progress.map { handler in
-                        { @Sendable p in handler(p.fractionCompleted) }
-                    }
-                )
+                try await FluidAudioRuntime.allowingDownloads {
+                    _ = try await AsrModels.download(
+                        to: staged,
+                        progressHandler: progress.map { handler in
+                            { @Sendable p in handler(p.fractionCompleted) }
+                        }
+                    )
+                }
             },
             isComplete: { AsrModels.modelsExist(at: $0) }
         )
@@ -178,6 +182,8 @@ public actor FluidAudioEngine: TranscriptionEngine {
             throw FluidAudioEngineError.modelNotDownloaded
         }
 
+        // Offline: a model that fails to load throws here; FluidAudio never deletes and re-downloads it (#351).
+        FluidAudioRuntime.configure()
         let loadStart = ContinuousClock.now
         Logger.transcription.info("Loading FluidAudio model (Parakeet) from cache...")
 
