@@ -90,13 +90,23 @@ public struct ManifestVerification: Equatable, Sendable {
 }
 
 /// Result of checking Hugging Face for a newer commit than the one in the manifest.
+///
+/// A newer commit is not an update in itself (#349): FluidAudio never changes a published file in
+/// place, a fix ships under a new name (`Encoder_v2.mlmodelc`) that only an SDK opt-in loads. So the
+/// check compares the entries Parley loads, by Hugging Face's content hashes, at both commits.
 public enum ManifestUpdateStatus: Equatable, Sendable {
     /// HF reports the same commit SHA we recorded at download.
     case upToDate(commitSha: String)
-    /// HF reports a different commit SHA. The user can choose to clear the cache and re-download.
-    case updateAvailable(localCommitSha: String, remoteCommitSha: String, remoteLastModifiedISO: String?)
+    /// HF has a newer commit, but every entry Parley loads is identical there: re-downloading would
+    /// fetch the same bytes. `addedEntries` are the top-level files and folders new since the
+    /// recorded commit, which only a Parley update would load.
+    case loadedFilesUnchanged(localCommitSha: String, remoteCommitSha: String, addedEntries: [String])
+    /// One or more entries Parley loads differ (or are gone) at HF's current commit. Re-downloading applies it.
+    case updateAvailable(
+        localCommitSha: String, remoteCommitSha: String, remoteLastModifiedISO: String?, changedEntries: [String]
+    )
     /// We have no manifest to compare against — usually means the model was never downloaded
-    /// through a build that wrote manifests. Treat as "unknown" and prompt re-download to establish baseline.
+    /// through a build that wrote manifests. Treat as "unknown" and offer a re-download to establish one.
     case noBaseline
     /// The check could not complete (offline, HF unreachable, parse error, etc.).
     case checkFailed(reason: String)

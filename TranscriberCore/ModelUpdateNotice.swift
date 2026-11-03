@@ -1,0 +1,59 @@
+import Foundation
+
+/// What Settings says after a model update check, and whether it offers a re-download (#349).
+/// Every message names an action the app actually has: a re-download where one would change the
+/// files Parley loads, a Parley update where only new files were published.
+public enum ModelUpdateNotice {
+    public static func message(for status: ManifestUpdateStatus) -> String {
+        switch status {
+        case .upToDate(let sha):
+            return "Up to date (\(short(sha)))."
+        case .loadedFilesUnchanged(let local, let remote, let allAdded):
+            // Only model files and their JSON make "a Parley update would bring it in" true; a README never would.
+            let added = allAdded.filter { name in
+                [".mlmodelc", ".mlpackage", ".json"].contains { name.hasSuffix($0) }
+            }
+            guard !added.isEmpty else {
+                return "Up to date (\(short(local))). Hugging Face has a newer commit (\(short(remote))), "
+                    + "but none of the files Parley uses changed."
+            }
+            let verb = added.count == 1 ? "it" : "them"
+            return "Up to date (\(short(local))). Hugging Face has since added \(list(added)), which this "
+                + "version of Parley doesn't use — a Parley update would bring \(verb) in."
+        case .updateAvailable(let local, let remote, let when, let changed):
+            let date = when.map { ", \($0.prefix(10))" } ?? ""
+            return "Update available: \(list(changed)) changed on Hugging Face (\(short(local)) → \(short(remote))\(date)). "
+                + "Re-download the model to apply it."
+        case .noBaseline:
+            return "No record yet of which model version is on this Mac. Re-download the model to record one."
+        case .checkFailed(let reason):
+            return "Check failed: \(reason)"
+        }
+    }
+
+    /// What Settings says when a re-download fails. `afterSwap`: the new model was already in place (a later
+    /// step, the diarizer download, failed). "Unchanged" is said only when it is known to be true.
+    public static func redownloadFailed(_ error: Error, afterSwap: Bool) -> String {
+        let kept = !afterSwap && ((error as? ModelRedownloadError)?.keptCurrentModel ?? true)
+        return "Re-download failed: \(error.localizedDescription)" + (kept ? " The current model is unchanged." : "")
+    }
+
+    /// Whether a re-download would do something: apply changed files, or record the missing baseline.
+    public static func offersRedownload(for status: ManifestUpdateStatus) -> Bool {
+        switch status {
+        case .updateAvailable, .noBaseline: return true
+        case .upToDate, .loadedFilesUnchanged, .checkFailed: return false
+        }
+    }
+
+    private static func short(_ sha: String) -> String { String(sha.prefix(7)) }
+
+    private static func list(_ names: [String]) -> String {
+        switch names.count {
+        case 0: return "files"
+        case 1: return names[0]
+        case 2: return "\(names[0]) and \(names[1])"
+        default: return names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+        }
+    }
+}
