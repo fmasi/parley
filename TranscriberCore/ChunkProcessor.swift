@@ -681,9 +681,9 @@ public final class ChunkProcessor {
                 )
                 var issues = record.framesReverted > 0
                     ? [ChunkIssue(code: .echoCancelReverted, track: "local", count: record.framesReverted)] : []
-                if let detail = Self.echoCancelIneffectiveDetail(record) {
-                    Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): mic echo cancellation removed next to nothing (\(detail, privacy: .public))")
-                    issues.append(ChunkIssue(code: .echoCancelIneffective, track: "local", count: nil, detail: detail))
+                if let figures = Self.echoCancelIneffectiveDetail(record) {  // numbers only
+                    Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): mic echo cancellation removed next to nothing (\(figures, privacy: .public))")
+                    issues.append(ChunkIssue(code: .echoCancelIneffective, track: "local", count: nil, detail: figures))
                 }
                 return (output, record, issues)
             } catch {
