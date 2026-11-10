@@ -265,19 +265,25 @@ private let assetsDirectory = URL(fileURLWithPath: #filePath)
         let far = voice(seconds: 5, seed: 71, level: 0.2)
         let mic = zip(echo(of: far, delaySeconds: 0.06, gain: 0.5), voice(seconds: 5, seed: 72)).map { $0 + $1 }
         let whole = try canceller.process(microphone: mic, reference: far)
-        let stream = try LocalVQEEchoCanceller.Stream(canceller)
-        var streamed = [Float](), offset = 0
-        for size in [1, 255, 257, 1000, 37, 16_000, 3, 9999].cycled(toCover: mic.count) {
-            let n = min(size, mic.count - offset)
-            if n == 0 { break }
-            streamed += try mic.withUnsafeBufferPointer { m in
-                try far.withUnsafeBufferPointer { r in
-                    try stream.push(microphone: UnsafeBufferPointer(rebasing: m[offset..<(offset + n)]),
-                                    reference: UnsafeBufferPointer(rebasing: r[offset..<(offset + n)]))
+        // The delay estimate and the filter, each fed in odd blocks.
+        func inOddBlocks(_ body: (UnsafeBufferPointer<Float>, UnsafeBufferPointer<Float>) throws -> Void) throws {
+            var offset = 0
+            for size in [1, 255, 257, 1000, 37, 16_000, 3, 9999].cycled(toCover: mic.count) {
+                let n = min(size, mic.count - offset)
+                if n == 0 { break }
+                try mic.withUnsafeBufferPointer { m in
+                    try far.withUnsafeBufferPointer { r in
+                        try body(UnsafeBufferPointer(rebasing: m[offset..<(offset + n)]), UnsafeBufferPointer(rebasing: r[offset..<(offset + n)]))
+                    }
                 }
+                offset += n
             }
-            offset += n
         }
+        let estimate = LocalVQEEchoCanceller.DelayEstimate(canceller)
+        try inOddBlocks { try estimate.push(microphone: $0, reference: $1) }
+        let stream = try LocalVQEEchoCanceller.Stream(canceller, delay: estimate)
+        var streamed = [Float]()
+        try inOddBlocks { streamed += try stream.push(microphone: $0, reference: $1) }
         streamed += try stream.finish()
         #expect(streamed.count == mic.count)
         #expect(streamed == whole)
@@ -327,6 +333,184 @@ private let assetsDirectory = URL(fileURLWithPath: #filePath)
         let n = min(blocks.count, whole.count)
         let worst = (0..<n).map { abs(blocks[$0] - whole[$0]) }.max() ?? 0
         #expect(worst < 1e-3, "block reader differs by \(worst)")
+    }
+}
+
+/// The echo delay is estimated over the whole clip before it is filtered (#361). Upstream's online estimate
+/// locks for good at its first confident one 3.5 s in; on 2026-11-10 a call's opening locked it at 1 s instead
+/// of 25 ms and a whole chunk came out with its echo untouched, recorded as a success.
+@Suite(.serialized) struct EchoDelayEstimateTests {
+    /// The far end talking. For the first 4 s the mic hears it 0.75 s late (a decoy: what the online estimate
+    /// has to go on when it locks), then, as for the rest of a call, 60 ms late through the speakers.
+    private func deceptiveOpening(seconds: Double = 30) -> (mic: [Float], far: [Float]) {
+        let far = voice(seconds: seconds, seed: 101, level: 0.2)
+        let decoy = echo(of: far, delaySeconds: 0.75, gain: 0.5), real = echo(of: far, delaySeconds: 0.06, gain: 0.5)
+        let mic = far.indices.map { $0 < 4 * rate ? decoy[$0] : real[$0] }
+        return (mic, far)
+    }
+
+    /// Echo removed in dB over 10-30 s, long after either estimate settled.
+    private func removed(_ mic: [Float], _ out: [Float]) -> Double { rmsDB(mic[seconds(10, 30)]) - rmsDB(out[seconds(10, 30)]) }
+
+    @Test func aDeceptiveOpeningNoLongerLeavesTheChunkUncancelled() throws {
+        let (mic, far) = deceptiveOpening()
+        let out = try LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory).cancelEcho(microphone: mic, reference: far)
+        #expect(removed(mic, out.samples) > 20, "only \(removed(mic, out.samples)) dB of echo removed")
+    }
+
+    /// What the bug was: the same clip through upstream's online estimate locks on the decoy and removes nothing.
+    @Test func theOnlineEstimateLocksOnTheOpening() throws {
+        let (mic, far) = deceptiveOpening()
+        let canceller = try LocalVQEEchoCanceller(assetsDirectory: assetsDirectory)
+        let stream = try LocalVQEEchoCanceller.Stream(canceller)
+        var out = try mic.withUnsafeBufferPointer { m in try far.withUnsafeBufferPointer { try stream.push(microphone: m, reference: $0) } }
+        out += try stream.finish()
+        #expect(canceller.delaySamples > LocalVQEEchoCanceller.maxDelaySamples)
+        #expect(removed(mic, out) < 10)
+        #expect(stream.estimatedDelay == nil)
+    }
+
+    @Test func theWholeClipEstimateFindsTheSpeakerDelay() throws {
+        let (mic, far) = deceptiveOpening()
+        let canceller = try LocalVQEEchoCanceller(assetsDirectory: assetsDirectory)
+        let estimate = LocalVQEEchoCanceller.DelayEstimate(canceller)
+        try mic.withUnsafeBufferPointer { m in try far.withUnsafeBufferPointer { try estimate.push(microphone: m, reference: $0) } }
+        let stream = try LocalVQEEchoCanceller.Stream(canceller, delay: estimate)
+        // 960 samples (60 ms), less upstream's one-block safety margin, to a whole block.
+        let delay = try #require(stream.estimatedDelay)
+        #expect((640...960).contains(delay), "estimated \(delay) samples")
+        #expect(canceller.delaySamples == delay)
+    }
+
+    /// A shift past the real delay leaves the echo before the filter's window; past `maxDelaySamples` none
+    /// is taken, and the filter runs at 0, whose window still reaches 1.024 s.
+    @Test func aDelayPastTheBoundIsNotFrozen() throws {
+        let far = voice(seconds: 12, seed: 111, level: 0.2)
+        let mic = echo(of: far, delaySeconds: 0.7, gain: 0.5)
+        let canceller = try LocalVQEEchoCanceller(assetsDirectory: assetsDirectory)
+        let estimate = LocalVQEEchoCanceller.DelayEstimate(canceller)
+        try mic.withUnsafeBufferPointer { m in try far.withUnsafeBufferPointer { try estimate.push(microphone: m, reference: $0) } }
+        let stream = try LocalVQEEchoCanceller.Stream(canceller, delay: estimate)
+        #expect(stream.estimatedDelay == nil)
+        #expect(canceller.delaySamples == 0)
+    }
+
+    /// The streaming estimate on Accelerate's FFT finds what upstream's own `daf_prime_delay` finds.
+    @Test(arguments: [0.02, 0.06, 0.3])
+    func theEstimateIsUpstreams(delaySeconds: Double) throws {
+        let far = voice(seconds: 20, seed: 131, level: 0.2)
+        let mic = zip(echo(of: far, delaySeconds: delaySeconds, gain: 0.4), voice(seconds: 20, seed: 132, level: 0.05)).map { $0 + $1 }
+        let canceller = try LocalVQEEchoCanceller(assetsDirectory: assetsDirectory)
+        let upstream = try #require(canceller.upstreamDelayEstimate(microphone: mic, reference: far))
+        let estimate = LocalVQEEchoCanceller.DelayEstimate(canceller)
+        try mic.withUnsafeBufferPointer { m in try far.withUnsafeBufferPointer { try estimate.push(microphone: m, reference: $0) } }
+        #expect(try LocalVQEEchoCanceller.Stream(canceller, delay: estimate).estimatedDelay == upstream)
+    }
+
+    /// Headphones: the mic never hears the far end, so nothing removed is right, never "ineffective" — even
+    /// where the delay estimate finds something to lock onto.
+    @Test func aMicThatNeverHearsTheFarEndIsNotIneffective() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lvqe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let far = voice(seconds: 90, seed: 141, level: 0.2)
+        var rng: UInt64 = 142
+        var mic = (0..<(90 * rate)).map { _ -> Float in  // steady room tone, about -65 dBFS
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return Float(Int64(bitPattern: rng >> 11) % 2001) / 1000 * 0.001
+        }
+        for (k, v) in voice(seconds: 5, seed: 143, level: 0.1).enumerated() { mic[30 * rate + k] += v }  // a few words
+        let micURL = dir.appendingPathComponent("mic.wav"), sysURL = dir.appendingPathComponent("sys.wav")
+        try LocalVQEMicEchoCanceller.writeWAV(mic, to: micURL, sampleRate: rate)
+        try LocalVQEMicEchoCanceller.writeWAV(far, to: sysURL, sampleRate: rate)
+        let record = try LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory)
+            .cancelEcho(micURL: micURL, systemURL: sysURL, outputURL: dir.appendingPathComponent("out.wav"))
+        #expect(try #require(record.farEndLiftDB) < EchoReduction.audibleEchoLiftDB)
+        #expect(!record.isIneffective)
+    }
+
+    @Test func theEstimateRefusesWhatTheFilterRefuses() throws {
+        let estimate = LocalVQEEchoCanceller.DelayEstimate(try LocalVQEEchoCanceller(assetsDirectory: assetsDirectory))
+        let two: [Float] = [0, 0], one: [Float] = [0], bad: [Float] = [0, .nan]
+        #expect(throws: LocalVQEEchoCanceller.Failure.lengthMismatch(microphone: 2, reference: 1)) {
+            try two.withUnsafeBufferPointer { m in try one.withUnsafeBufferPointer { try estimate.push(microphone: m, reference: $0) } }
+        }
+        #expect(throws: LocalVQEEchoCanceller.Failure.nonFiniteInput) {
+            try bad.withUnsafeBufferPointer { m in try two.withUnsafeBufferPointer { try estimate.push(microphone: m, reference: $0) } }
+        }
+    }
+
+    /// The file path records the delay it used and how much echo it removed; the samples path (re-detect) gives
+    /// the same audio.
+    @Test func theRecordCarriesTheDelayAndTheReduction() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lvqe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let (mic, far) = deceptiveOpening(seconds: 90)  // enough of the far end talking to measure
+        let micURL = dir.appendingPathComponent("mic.wav"), sysURL = dir.appendingPathComponent("sys.wav")
+        let outURL = dir.appendingPathComponent("out.wav")
+        try LocalVQEMicEchoCanceller.writeWAV(mic, to: micURL, sampleRate: rate)
+        try LocalVQEMicEchoCanceller.writeWAV(far, to: sysURL, sampleRate: rate)
+        let canceller = LocalVQEMicEchoCanceller(assetsDirectory: assetsDirectory)
+        let record = try canceller.cancelEcho(micURL: micURL, systemURL: sysURL, outputURL: outURL)
+        #expect((640...960).contains(record.delaySamples ?? -1))
+        let erle = try #require(record.erleDB)
+        #expect(erle > 20, "measured \(erle) dB")
+        #expect(try #require(record.farEndLiftDB) >= EchoReduction.audibleEchoLiftDB)
+        #expect(!record.isIneffective)
+        #expect(try AudioDecode.mono16kHzFloat(contentsOf: outURL) == canceller.cancelEcho(microphone: mic, reference: far).samples)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["mic.wav", "out.wav", "sys.wav"])
+    }
+}
+
+/// `EchoReduction` (#361): the median reduction over the frames where the far end talks and the mic hears it.
+@Suite struct EchoReductionTests {
+    @Test func takesTheMedianOverFramesWhereTheFarEndTalksAndTheMicHearsIt() {
+        // 400 frames counted: 300 cut by 40 dB, 100 not cut at all (the user over the far end). 100 more
+        // are left out: the far end silent, or the mic too quiet.
+        let mic = [Double](repeating: -30, count: 450) + [Double](repeating: -60, count: 50)
+        let clean = [Double](repeating: -70, count: 300) + [Double](repeating: -30, count: 100) + [Double](repeating: -90, count: 100)
+        let ref = [Double](repeating: -20, count: 400) + [Double](repeating: -60, count: 50) + [Double](repeating: -20, count: 50)
+        #expect(EchoReduction.measure(micDB: mic, cleanDB: clean, refDB: ref) == 40)
+    }
+
+    @Test func aCancellerThatRemovedNothingMeasuresZero() {
+        let levels = [Double](repeating: -26, count: 600)
+        #expect(EchoReduction.measure(micDB: levels, cleanDB: levels, refDB: levels) == 0)
+    }
+
+    @Test func tooLittleFarEndIsNotJudged() {
+        let mic = [Double](repeating: -30, count: 299), clean = [Double](repeating: -30, count: 299)
+        #expect(EchoReduction.measure(micDB: mic, cleanDB: clean, refDB: mic) == nil)
+        #expect(EchoReduction.measure(micDB: [], cleanDB: [], refDB: []) == nil)
+    }
+
+    @Test func isIneffectiveOnlyWhenTheMicHeardTheFarEndAndLittleWasRemoved() {
+        func record(lift: Double?, erle: Double?, delay: Int? = 384) -> MicEchoCancelRecord {
+            MicEchoCancelRecord(engine: "e", modelSHA256: "", framesReverted: 0, seconds: 1800, delaySamples: delay,
+                                erleDB: erle, farEndLiftDB: lift)
+        }
+        #expect(record(lift: 31, erle: 0.1).isIneffective)
+        #expect(record(lift: 15, erle: 9.9).isIneffective)
+        #expect(record(lift: 31, erle: 0, delay: nil).isIneffective)  // an echo heard and no delay found: still a failure
+        #expect(!record(lift: 31, erle: 10).isIneffective)
+        #expect(!record(lift: 31, erle: nil).isIneffective)
+        // The mic did not hear the far end (headphones): nothing to remove, so nothing removed is right.
+        #expect(!record(lift: 2.3, erle: 0).isIneffective)
+        #expect(!record(lift: nil, erle: 0).isIneffective)
+    }
+
+    @Test func theLiftIsTheMicAboveItsFloorWhileTheFarEndTalks() {
+        // 400 frames of the far end talking with the mic at -26 dBFS (echo), 600 with the far end silent and the
+        // mic at its -57 floor.
+        let mic = [Double](repeating: -26, count: 400) + [Double](repeating: -57, count: 600)
+        let ref = [Double](repeating: -20, count: 400) + [Double](repeating: -80, count: 600)
+        #expect(EchoReduction.farEndLift(micDB: mic, refDB: ref) == 31)
+        // Steady room noise is the floor: it lifts nothing.
+        #expect(EchoReduction.farEndLift(micDB: [Double](repeating: -45, count: 1000), refDB: ref) == 0)
+        // Frames past the clip's end are not the floor.
+        #expect(EchoReduction.farEndLift(micDB: mic + [Double](repeating: -200, count: 500), refDB: ref + [Double](repeating: -200, count: 500)) == 31)
+        #expect(EchoReduction.farEndLift(micDB: Array(mic.prefix(299)), refDB: ref) == nil)
     }
 }
 

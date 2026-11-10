@@ -47,9 +47,13 @@ public enum CaptureQualityNotice {
     /// `echoLines`: `EchoNotice.Findings.completionLines` — above 0 when the recording has an echo voice
     /// (#244). Last in the precedence: the lines are marked and nothing is missing, so it is information,
     /// never said in place of a problem. The body carries it either way.
+    ///
+    /// `echoNotRemovedChunks`: `echoNotRemovedChunkCount(inTranscriptAt:)` — chunks where mic echo cancellation was on
+    /// but failed or removed next to nothing (#361). Just above the echo marked: the user asked for the echo to be
+    /// removed and it was not, but nothing is missing.
     public static func completionTitle(anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
                                        remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0,
-                                       remoteUncertainSeconds: Double? = nil) -> String {
+                                       remoteUncertainSeconds: Double? = nil, echoNotRemovedChunks: Int = 0) -> String {
         if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "Transcription finished — \(couldNotCheck)" }
         if segmentCount == 0 { return "Transcription Complete — no speech was transcribed" }
         let remote = side(remoteStatus), local = side(localStatus)
@@ -65,20 +69,23 @@ public enum CaptureQualityNotice {
         }
         if anomalyCount > 0 { return "Transcription Complete — capture anomalies" }
         if problemChunkCount > 0 { return "Transcription Complete — \(problemPhrase(problemChunkCount))" }
+        if echoNotRemovedChunks > 0 { return "Transcription Complete — echo not removed" }
         if echoLines > 0 { return "Transcription Complete — \(EchoNotice.completionTitle)" }
         return "Transcription Complete"
     }
 
     /// Notification body: the file name, then each side not (or partly) captured, then every non-zero count,
-    /// then the echo voice (`echoLines`, as for the title).
+    /// then the echo cancellation that did not work and the echo voice (`echoNotRemovedChunks`, `echoLines`, as for
+    /// the title).
     /// `removedRecordings` (#224): how many older recordings lost their audio to the storage limit — a line of its own.
     public static func completionBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
                                       remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0,
                                       removedRecordings: Int = 0, remoteUncertainSeconds: Double? = nil,
-                                      remoteUncertainIsLowerBound: Bool = false) -> String {
+                                      remoteUncertainIsLowerBound: Bool = false, echoNotRemovedChunks: Int = 0) -> String {
         let body = recordBody(fileName: fileName, anomalyCount: anomalyCount, problemChunkCount: problemChunkCount, segmentCount: segmentCount,
                               remoteStatus: remoteStatus, localStatus: localStatus, echoLines: echoLines,
-                              remoteUncertainSeconds: remoteUncertainSeconds, remoteUncertainIsLowerBound: remoteUncertainIsLowerBound)
+                              remoteUncertainSeconds: remoteUncertainSeconds, remoteUncertainIsLowerBound: remoteUncertainIsLowerBound,
+                              echoNotRemovedChunks: echoNotRemovedChunks)
         guard let line = storageLimitLine(removedRecordings: removedRecordings) else { return body }
         return body + "\n" + line
     }
@@ -92,7 +99,7 @@ public enum CaptureQualityNotice {
 
     private static func recordBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
                                    remoteStatus: String?, localStatus: String?, echoLines: Int, remoteUncertainSeconds: Double?,
-                                   remoteUncertainIsLowerBound: Bool) -> String {
+                                   remoteUncertainIsLowerBound: Bool, echoNotRemovedChunks: Int) -> String {
         if [anomalyCount, problemChunkCount, segmentCount].contains(unreadable) { return "\(fileName) — \(couldNotCheck)" }
         var parts: [String] = []
         if segmentCount == 0 { parts.append("no speech was transcribed") }
@@ -115,6 +122,10 @@ public enum CaptureQualityNotice {
             parts.append("\(anomalyCount) capture \(noun) recorded; audio may be affected")
         }
         if problemChunkCount > 0 { parts.append(problemPhrase(problemChunkCount)) }
+        if echoNotRemovedChunks > 0 {
+            let chunks = echoNotRemovedChunks == 1 ? "1 part" : "\(echoNotRemovedChunks) parts"
+            parts.append("echo cancellation did not work on \(chunks) of the recording; echo may show")
+        }
         if let echo = EchoNotice.completionNotice(lines: echoLines) { parts.append(echo) }
         guard !parts.isEmpty else { return fileName }
         return "\(fileName) — " + parts.joined(separator: "; ")
@@ -183,6 +194,20 @@ public enum CaptureQualityNotice {
               let issues = metadata["processing_issues"] as? [[String: Any]]
         else { return 0 }
         return ChunkIssue.problemCounts(in: issues).chunks
+    }
+
+    /// Distinct chunks where mic echo cancellation was on but did not remove the echo (#361): `echo_cancel_failed`
+    /// or `echo_cancel_ineffective` in `metadata.processing_issues`. 0 when absent, `unreadable` when the transcript
+    /// can't be read back. Synchronous file I/O — call off the main actor, like `anomalyCount(inTranscriptAt:)`.
+    public static func echoNotRemovedChunkCount(inTranscriptAt url: URL) -> Int {
+        guard let root = readRoot(url) else { return unreadable }
+        guard let metadata = root["metadata"] as? [String: Any],
+              let issues = metadata["processing_issues"] as? [[String: Any]]
+        else { return 0 }
+        let codes: Set<String> = [ChunkIssue.Code.echoCancelFailed.rawValue, ChunkIssue.Code.echoCancelIneffective.rawValue]
+        let matching = issues.filter { ($0["code"] as? String).map(codes.contains) ?? false }
+        // A single-file transcript's issues carry no chunk: it counts as one.
+        return Set(matching.map { $0["chunk"] as? Int ?? -1 }).count
     }
 
     /// How many readable segments the transcript holds — flagged ones (`filtered` / `echo`) are

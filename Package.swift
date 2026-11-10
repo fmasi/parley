@@ -45,7 +45,8 @@ let package = Package(
         .target(
             name: "CLocalVQE",
             path: "ThirdParty/CLocalVQE",
-            exclude: ["upstream/LICENSE-LocalVQE", "upstream/VERSION"],
+            // upstream/daf_frontend.cpp is compiled inside localvqe_daf.cpp (#361), not on its own.
+            exclude: ["upstream/LICENSE-LocalVQE", "upstream/VERSION", "upstream/daf_frontend.cpp"],
             cxxSettings: [.unsafeFlags(["-O3"])]
         ),
         .target(

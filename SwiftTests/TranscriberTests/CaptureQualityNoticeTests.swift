@@ -170,6 +170,41 @@ import Foundation
         #expect(CaptureQualityNotice.problemChunkCount(inTranscriptAt: url) == 1)
     }
 
+    // MARK: - Echo cancellation that did not remove the echo (#361)
+
+    @Test func echoNotRemovedIsSaidAboveTheEchoMarkedAndBelowProblems() {
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 40, echoLines: 80,
+                                                     echoNotRemovedChunks: 1) == "Transcription Complete — echo not removed")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 1, segmentCount: 40,
+                                                     echoNotRemovedChunks: 1) == "Transcription Complete — 1 chunk had processing problems")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 0, segmentCount: 40) == "Transcription Complete")
+        let one = CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 0, segmentCount: 40,
+                                                      echoNotRemovedChunks: 1)
+        #expect(one == "m.json — echo cancellation did not work on 1 part of the recording; echo may show")
+        let two = CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 0, segmentCount: 40,
+                                                      echoNotRemovedChunks: 2)
+        #expect(two.contains("did not work on 2 parts of the recording"))
+    }
+
+    @Test func echoNotRemovedCountsDistinctChunksThatFailedOrRemovedNothing() throws {
+        let url = try writeTranscript(["metadata": ["processing_issues": [
+            ["chunk": 0, "code": "echo_cancel_ineffective", "track": "local", "detail": "0.1 dB removed, delay 16128 samples"],
+            ["chunk": 0, "code": "echo_cancel_reverted", "track": "local", "count": 3],
+            ["chunk": 2, "code": "echo_cancel_failed", "track": "local", "detail": "nonFiniteOutput"],
+            ["chunk": 3, "code": "echo_cancel_reverted", "track": "local", "count": 1],
+        ]], "segments": [["start": 0, "end": 1, "text": "x", "speaker": "S"]]])
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(CaptureQualityNotice.echoNotRemovedChunkCount(inTranscriptAt: url) == 2)
+        // Informational: neither is a processing problem.
+        #expect(CaptureQualityNotice.problemChunkCount(inTranscriptAt: url) == 0)
+
+        let none = try writeTranscript(["metadata": [:] as [String: Any], "segments": [] as [Any]])
+        defer { try? FileManager.default.removeItem(at: none) }
+        #expect(CaptureQualityNotice.echoNotRemovedChunkCount(inTranscriptAt: none) == 0)
+        #expect(CaptureQualityNotice.echoNotRemovedChunkCount(inTranscriptAt: none.appendingPathExtension("missing"))
+                == CaptureQualityNotice.unreadable)
+    }
+
     // MARK: - The per-side verdict (final review R-I2)
 
     /// A side that delivered nothing — a crashed helper's undrained ring, a sub-5 s recording — carries no ring anomaly,

@@ -6,7 +6,11 @@
 # Upstream compiles the filter inside its ggml engine; the filter itself is plain C++ (its weights are
 # loaded through ggml types only). The script drops the two ggml-typed loaders and keeps the
 # tensor-map loader, then checks no ggml reference is left. Parley's own C API is
-# ThirdParty/CLocalVQE/localvqe_daf.cpp, which this script never touches.
+# ThirdParty/CLocalVQE/localvqe_daf.cpp, which this script never touches. That file compiles
+# upstream/daf_frontend.cpp inside itself (Package.swift excludes it from the target) so its streaming
+# whole-clip delay estimate (#361) can call upstream's file-local gcc_update: when moving to another
+# upstream commit, check gcc_update and daf_prime_delay still have the shape its loop copies (the test
+# comparing it with upstream's daf_prime_delay catches a drift).
 #
 # Re-run it to move to another upstream commit, then review the diff like any other code change.
 #

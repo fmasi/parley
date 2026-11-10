@@ -91,6 +91,11 @@ public struct ChunkIssue: Codable, Equatable, Sendable {
         /// The near-end guard gave the raw mic back in `count` 100 ms frames that cancellation had cut
         /// while the far end was silent (#342). Informational: those frames are the raw mic.
         public static let echoCancelReverted = Code(rawValue: "echo_cancel_reverted")
+        /// Mic echo cancellation ran and found an echo path, but removed next to nothing
+        /// (`MicEchoCancelRecord.isIneffective`, #361): the far end's voice is still in the local stream.
+        /// `detail` gives the measured reduction and the delay used. Informational: nothing is missing,
+        /// echo may show (and is still flagged).
+        public static let echoCancelIneffective = Code(rawValue: "echo_cancel_ineffective")
 
         /// Codes meaning content may be missing or wrong. `streamEmpty` is NOT one: an idle side
         /// (nobody spoke, nothing played) is not a processing problem (§7.1/§9, scan C13). An
