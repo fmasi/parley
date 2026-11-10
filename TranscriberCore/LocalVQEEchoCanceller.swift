@@ -125,6 +125,8 @@ public final class LocalVQEEchoCanceller {
     /// estimate resets the canceller; hand it to `Stream(_:delay:)` before anything else uses the canceller.
     public final class DelayEstimate {
         fileprivate let canceller: LocalVQEEchoCanceller
+        /// Set once a `Stream` took the estimate: from then on the canceller's state is the filter's.
+        fileprivate var ended = false
 
         public init(_ canceller: LocalVQEEchoCanceller) {
             self.canceller = canceller
@@ -137,6 +139,7 @@ public final class LocalVQEEchoCanceller {
                 throw Failure.lengthMismatch(microphone: microphone.count, reference: reference.count)
             }
             guard microphone.allSatisfy(\.isFinite), reference.allSatisfy(\.isFinite) else { throw Failure.nonFiniteInput }
+            precondition(!ended, "a delay estimate fed after a Stream took it would corrupt the filter")
             guard let m = microphone.baseAddress, let r = reference.baseAddress else { return }
             localvqe_daf_prime_push(canceller.daf, m, r, microphone.count)
         }
@@ -176,6 +179,8 @@ public final class LocalVQEEchoCanceller {
         /// A stream filtering at the delay `delay` estimated over the whole clip (#361).
         public convenience init(_ canceller: LocalVQEEchoCanceller, delay: DelayEstimate) throws {
             precondition(delay.canceller === canceller, "a delay estimate belongs to the canceller it ran on")
+            precondition(!delay.ended, "a delay estimate is taken by one Stream")
+            delay.ended = true
             var confidence: Float = 0
             let samples = Int(localvqe_daf_prime_end(canceller.daf, &confidence))
             try self.init(canceller: canceller, estimatedDelay: samples >= 0 ? samples : nil, delayConfidence: Double(confidence))

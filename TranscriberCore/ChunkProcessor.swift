@@ -677,7 +677,7 @@ public final class ChunkProcessor {
                     try canceller.cancelEcho(micURL: micURL, systemURL: systemURL, outputURL: output)
                 }
                 Logger.transcription.info(
-                    "Chunk \(chunkIndex, privacy: .public): mic echo cancelled (\(record.seconds, format: .fixed(precision: 0), privacy: .public) s of audio in \(Date().timeIntervalSince(started), format: .fixed(precision: 1), privacy: .public) s, delay \(record.delaySamples ?? -1, privacy: .public) samples, \(record.erleDB ?? .nan, format: .fixed(precision: 1), privacy: .public) dB removed of an echo \(record.farEndLiftDB ?? .nan, format: .fixed(precision: 1), privacy: .public) dB above the mic's floor, \(record.framesReverted, privacy: .public) frames given back to the raw mic)"
+                    "Chunk \(chunkIndex, privacy: .public): mic echo cancelled (\(record.seconds, format: .fixed(precision: 0), privacy: .public) s of audio in \(Date().timeIntervalSince(started), format: .fixed(precision: 1), privacy: .public) s, delay \(Self.decibels(record.delaySamples.map(Double.init), unit: "samples"), privacy: .public), \(Self.decibels(record.erleDB, unit: "dB"), privacy: .public) removed of an echo \(Self.decibels(record.farEndLiftDB, unit: "dB"), privacy: .public) above the mic's floor, \(record.framesReverted, privacy: .public) frames given back to the raw mic)"
                 )
                 var issues = record.framesReverted > 0
                     ? [ChunkIssue(code: .echoCancelReverted, track: "local", count: record.framesReverted)] : []
@@ -693,6 +693,11 @@ public final class ChunkProcessor {
                 return (nil, nil, [ChunkIssue(code: .echoCancelFailed, track: "local", count: nil, detail: detail)])
             }
         }
+    }
+
+    /// A measured figure for the log, "unmeasured" for nil (a headphone chunk has no echo to measure).
+    nonisolated static func decibels(_ value: Double?, unit: String) -> String {
+        value.map { String(format: unit == "samples" ? "%.0f %@" : "%.1f %@", $0, unit) } ?? "unmeasured"
     }
 
     /// `echo_cancel_ineffective`'s detail (#361): the reduction measured, the echo heard, and the delay used

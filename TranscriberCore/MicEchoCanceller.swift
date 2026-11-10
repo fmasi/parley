@@ -12,8 +12,8 @@ public struct MicEchoCancelRecord: Codable, Equatable, Sendable {
     /// Seconds of mic audio processed.
     public let seconds: Double
     /// The loudspeaker-to-mic delay (16 kHz samples) estimated over the whole chunk and used by the filter
-    /// (#361); nil when no confident estimate was found (no echo path, e.g. headphones) or the record
-    /// predates it.
+    /// (#361); nil when no confident estimate within 500 ms was found (the filter then ran at 0) or the record
+    /// predates it. Not a sign of an echo: the estimate also locks onto leakage too faint to hear.
     public let delaySamples: Int?
     /// How much quieter the cleaned mic is than the raw one while the far end talks (`EchoReduction`, #361);
     /// nil when there was too little of that to measure or the record predates it.
@@ -62,11 +62,18 @@ public struct MicEchoCancelRecord: Codable, Equatable, Sendable {
 ///   far end counts toward 0 dB, so the median, not the mean, and a threshold far below a working run.
 /// - the lift: whether there was an echo to remove at all. With headphones the mic hears nothing of the far
 ///   end and the reduction is 0 dB too, rightly. Where the far end talks, the median raw mic level above the
-///   mic's own floor (its 10th percentile over the chunk): 26-31 dB on loudspeakers, 2 dB on a headphone call.
-///   Steady room noise lifts nothing, since it is the floor. (The delay estimate cannot tell: GCC-PHAT
-///   locks onto leakage far too faint to hear, and found a confident delay on that headphone call.)
+///   mic's own floor (its 10th percentile while the far end is silent, below -55 dBFS): 27-32 dB on
+///   loudspeakers, about 0 dB on a headphone call. Steady room noise lifts nothing, since it is the floor.
+///   (The delay estimate cannot tell: GCC-PHAT locks onto leakage far too faint to hear, and found a
+///   confident delay on that headphone call.)
+///
+/// Both are medians, so a user who talks over the far end for more than half of its speech would read as
+/// an echo heard and not removed. Rare in a call; read a field report of `echo_cancel_ineffective` with it
+/// in mind.
 public enum EchoReduction {
     static let referenceFloorDB = -40.0
+    /// The far end counts as silent below this, as for `NearEndGuard`: the frames the mic's floor is taken over.
+    static let referenceSilentDB = -55.0
     static let micFloorDB = -50.0
     /// Fewer frames than this (30 s of the far end talking) is too little to judge.
     static let minimumFrames = 300
@@ -75,18 +82,20 @@ public enum EchoReduction {
     /// At or above this lift, the mic heard the far end: there was an echo to remove.
     public static let audibleEchoLiftDB = 15.0
 
-    /// The lift in dB, rounded to 0.1 dB; nil with fewer than `minimumFrames` frames of the far end talking.
-    /// Frames padded past the clip's end (-200, `NearEndGuard.Frames.levels`) are not part of the floor.
+    /// The lift in dB, rounded to 0.1 dB; nil with fewer than `minimumFrames` frames of the far end talking, or
+    /// of it silent (a chunk where it never stops has no floor to measure against). Mic frames of exact zeros
+    /// (-200, `NearEndGuard.Frames.levels`: a muted mic, or past the clip's end) are left out; a far end of exact
+    /// zeros is silence, which the tap writes when nothing plays.
     static func farEndLift(micDB: [Double], refDB: [Double]) -> Double? {
         let n = min(micDB.count, refDB.count)
-        var heard = [Double](), all = [Double]()
+        var heard = [Double](), quiet = [Double]()
         for f in 0..<n where micDB[f] > -200 {
-            all.append(micDB[f])
             if refDB[f] >= referenceFloorDB { heard.append(micDB[f]) }
+            if refDB[f] < referenceSilentDB { quiet.append(micDB[f]) }
         }
-        guard heard.count >= minimumFrames else { return nil }
-        all.sort()
-        let floor = all[all.count / 10]
+        guard heard.count >= minimumFrames, quiet.count >= minimumFrames else { return nil }
+        quiet.sort()
+        let floor = quiet[quiet.count / 10]
         return ((median(&heard) - floor) * 10).rounded() / 10
     }
 

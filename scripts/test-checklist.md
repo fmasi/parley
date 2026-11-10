@@ -1285,8 +1285,8 @@ speakers, not headphones) so the mic hears the far side.
   `mic_echo_cancel` has `delay_samples` and `erle_db`.
 - [ ] **I-09 Headphones are not a failure.** Record a call with headphones on and the setting on. PASS: no
   `echo_cancel_ineffective` in `processing_issues`, the completion notice does not say "echo not removed".
-- [ ] **I-10 Repair an affected recording.** Open the rename dialog on 2026-11-06 18:45 "yumi" and Re-detect
-  "This side" at its people count. PASS: the remote lines leave the local side (the echo voice is gone or
+- [ ] **I-10 Repair an affected recording.** Open the rename dialog on a recording made before #361 whose
+  first chunk kept its echo (an echo voice on your side), and Re-detect "This side" at its people count. PASS: the remote lines leave the local side (the echo voice is gone or
   much smaller), and your own lines are all still there.
 
 ## Pipeline memory (gotcha 98)

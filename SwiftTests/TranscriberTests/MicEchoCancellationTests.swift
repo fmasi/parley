@@ -41,6 +41,15 @@ private func echo(of x: [Float], delaySeconds: Double, gain: Float) -> [Float] {
     return y
 }
 
+/// Steady room tone, about -65 dBFS: a real mic's floor.
+private func roomTone(seconds: Double, seed: UInt64) -> [Float] {
+    var rng = seed
+    return (0..<Int(seconds * Double(rate))).map { _ in
+        rng = rng &* 6364136223846793005 &+ 1442695040888963407
+        return Float(Int64(bitPattern: rng >> 11) % 2001) / 1000 * 0.001
+    }
+}
+
 private func rmsDB(_ x: ArraySlice<Float>) -> Double {
     let s = x.reduce(0.0) { $0 + Double($1) * Double($1) }
     return 10 * log10(max(s / Double(max(1, x.count)), 1e-20))
@@ -342,8 +351,10 @@ private let assetsDirectory = URL(fileURLWithPath: #filePath)
 @Suite(.serialized) struct EchoDelayEstimateTests {
     /// The far end talking. For the first 4 s the mic hears it 0.75 s late (a decoy: what the online estimate
     /// has to go on when it locks), then, as for the rest of a call, 60 ms late through the speakers.
-    private func deceptiveOpening(seconds: Double = 30) -> (mic: [Float], far: [Float]) {
-        let far = voice(seconds: seconds, seed: 101, level: 0.2)
+    /// `silentAfter`: the far end stops talking there, so the mic's floor can be measured (`EchoReduction`).
+    private func deceptiveOpening(seconds: Double = 30, silentAfter: Double? = nil) -> (mic: [Float], far: [Float]) {
+        var far = voice(seconds: seconds, seed: 101, level: 0.2)
+        if let silentAfter { for i in Int(silentAfter * Double(rate))..<far.count { far[i] = 0 } }
         let decoy = echo(of: far, delaySeconds: 0.75, gain: 0.5), real = echo(of: far, delaySeconds: 0.06, gain: 0.5)
         let mic = far.indices.map { $0 < 4 * rate ? decoy[$0] : real[$0] }
         return (mic, far)
@@ -413,12 +424,9 @@ private let assetsDirectory = URL(fileURLWithPath: #filePath)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lvqe-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let far = voice(seconds: 90, seed: 141, level: 0.2)
-        var rng: UInt64 = 142
-        var mic = (0..<(90 * rate)).map { _ -> Float in  // steady room tone, about -65 dBFS
-            rng = rng &* 6364136223846793005 &+ 1442695040888963407
-            return Float(Int64(bitPattern: rng >> 11) % 2001) / 1000 * 0.001
-        }
+        var far = voice(seconds: 150, seed: 141, level: 0.2)
+        for i in (100 * rate)..<far.count { far[i] = 0 }  // and then silent: the mic's floor
+        var mic = roomTone(seconds: 150, seed: 142)
         for (k, v) in voice(seconds: 5, seed: 143, level: 0.1).enumerated() { mic[30 * rate + k] += v }  // a few words
         let micURL = dir.appendingPathComponent("mic.wav"), sysURL = dir.appendingPathComponent("sys.wav")
         try LocalVQEMicEchoCanceller.writeWAV(mic, to: micURL, sampleRate: rate)
@@ -446,7 +454,8 @@ private let assetsDirectory = URL(fileURLWithPath: #filePath)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lvqe-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let (mic, far) = deceptiveOpening(seconds: 90)  // enough of the far end talking to measure
+        let (echoed, far) = deceptiveOpening(seconds: 150, silentAfter: 100)  // 30 s+ of the far end talking, and silent
+        let mic = zip(echoed, roomTone(seconds: 150, seed: 151)).map { $0 + $1 }
         let micURL = dir.appendingPathComponent("mic.wav"), sysURL = dir.appendingPathComponent("sys.wav")
         let outURL = dir.appendingPathComponent("out.wav")
         try LocalVQEMicEchoCanceller.writeWAV(mic, to: micURL, sampleRate: rate)
@@ -508,9 +517,20 @@ private let assetsDirectory = URL(fileURLWithPath: #filePath)
         #expect(EchoReduction.farEndLift(micDB: mic, refDB: ref) == 31)
         // Steady room noise is the floor: it lifts nothing.
         #expect(EchoReduction.farEndLift(micDB: [Double](repeating: -45, count: 1000), refDB: ref) == 0)
-        // Frames past the clip's end are not the floor.
+        // A far end of exact zeros (-200) is silence: the floor is measured there.
+        #expect(EchoReduction.farEndLift(micDB: mic, refDB: [Double](repeating: -20, count: 400) + [Double](repeating: -200, count: 600)) == 31)
+        // Mic frames of exact zeros (past the clip's end, a muted mic) are not the floor.
         #expect(EchoReduction.farEndLift(micDB: mic + [Double](repeating: -200, count: 500), refDB: ref + [Double](repeating: -200, count: 500)) == 31)
         #expect(EchoReduction.farEndLift(micDB: Array(mic.prefix(299)), refDB: ref) == nil)
+    }
+
+    /// The floor is the mic while the far end is silent: a far end that talks the whole chunk (a webinar on
+    /// speakers) has no floor, and its echo must not become one and read as no echo.
+    @Test func aFarEndThatNeverStopsIsNotJudgedAgainstItsOwnEcho() {
+        let echo = [Double](repeating: -26, count: 1000), talking = [Double](repeating: -20, count: 1000)
+        #expect(EchoReduction.farEndLift(micDB: echo, refDB: talking) == nil)
+        let briefPauses = [Double](repeating: -20, count: 800) + [Double](repeating: -80, count: 200)
+        #expect(EchoReduction.farEndLift(micDB: echo, refDB: briefPauses) == nil)
     }
 }
 

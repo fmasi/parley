@@ -7,6 +7,7 @@
 #include "upstream/daf_frontend.cpp"
 
 #include <algorithm>
+#include <cstring>
 #include <new>
 #include <utility>
 
