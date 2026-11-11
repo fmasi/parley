@@ -17,8 +17,10 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 home=$(bash "$here/test-home.sh")
 # The home goes once the run ends (rm -rf removes CI's link to the model cache, never the cache).
-# Only a path test-home.sh makes, set before the check so a refused home goes too.
-trap 'case "$home" in */parley-test-home.*) rm -rf "$home" ;; esac' EXIT
+# Set before the check so a refused home goes too. The run's own status is kept: a cleanup that
+# fails (a read-only image Xcode mounted inside the home) only warns (#355).
+remove_home() { local status=$?; bash "$here/test-home.sh" --remove "$home"; exit "$status"; }
+trap remove_home EXIT
 bash "$here/test-home.sh" --check "$home"
 export CFFIXED_USER_HOME="$home"
 

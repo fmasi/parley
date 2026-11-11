@@ -256,12 +256,14 @@ jobs:
       # The release tooling (appcast, release notes, publish.sh, the Sparkle feed verifier). A break
       # here ships a broken auto-update feed, which every installed client fails silently. Stdlib
       # Python + bash only, a few seconds; it runs after the suite so verify-ed-signature reuses the
-      # debug build. `just release-tools` runs the same four commands.
+      # debug build. `just release-tools` runs the same five commands.
       #
       # The fourth tests the red-first gate itself (scripts/verify-regression-tests.sh) against a
       # fake `swift`: a parent that cannot be resolved, built, linked or run must fail the gate as
       # "could not build the parent", never pass it as RED (#260). It is a step here, not in the
-      # `red-first` job, so it also runs on pushes to main and costs no second macOS job.
+      # `red-first` job, so it also runs on pushes to main and costs no second macOS job. The fifth
+      # tests the throwaway home's cleanup: a read-only image mounted inside it, as Xcode mounts its
+      # Metal toolchain on this runner, is detached, and a failed cleanup never fails the suite (#355).
       - name: Test the release tooling
         run: |
           set -euo pipefail
@@ -269,6 +271,7 @@ jobs:
           bash scripts/test-publish.sh
           bash scripts/test-verify-release-feed.sh
           bash scripts/test-verify-regression-tests.sh
+          bash scripts/test-test-home.sh
 
   # Red-first gate: the PR's changed tests must FAIL at the merge base and PASS at HEAD.
   #

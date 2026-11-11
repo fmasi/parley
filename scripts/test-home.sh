@@ -6,6 +6,9 @@
 #                           nothing, removes what it created and exits non-zero.
 #   test-home.sh --check D  exit 0 only if D is a usable throwaway home: non-empty, an existing
 #                           folder, and not the user's real home.
+#   test-home.sh --remove D remove the throwaway home D (only a path this script makes), detaching
+#                           first any disk image mounted inside it. Always exits 0: a cleanup that
+#                           fails warns, and never turns a test run's result into its own (#355).
 #
 # With CFFIXED_USER_HOME set to it, every home lookup in Foundation — NSHomeDirectory(),
 # homeDirectoryForCurrentUser, the Application Support URL, `~` — resolves under it. A test that
@@ -43,6 +46,26 @@ if [ "${1:-}" = "--check" ]; then
   if [ "$resolved" = "$real_home" ] || [ "$resolved" = "$pw_home" ]; then
     echo "test-home.sh: '$dir' is the user's real home, not a throwaway one (#313)" >&2
     exit 1
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "--remove" ]; then
+  dir="${2:-}"
+  case "$dir" in */parley-test-home.*) ;; *) exit 0 ;; esac
+  [ -e "$dir" ] || exit 0
+  # Xcode downloads its Metal toolchain into the home and mounts it there, read-only (#355): rm -rf
+  # cannot remove a mounted image's files. Detach every mount under the home, deepest first.
+  resolved=$(cd "$dir" 2>/dev/null && pwd -P || echo "$dir")
+  /sbin/mount | sed -n 's/^.* on \(.*\) ([^)]*)$/\1/p' | sort -r | while IFS= read -r point; do
+    case "$point" in
+      "$resolved"/*) /usr/bin/hdiutil detach -force "$point" >/dev/null 2>&1 \
+                       || /usr/sbin/diskutil unmount force "$point" >/dev/null 2>&1 || true ;;
+    esac
+  done || true
+  rm -rf "$dir" 2>/dev/null || true
+  if [ -e "$dir" ]; then
+    echo "test-home.sh: warning: could not remove the throwaway home '$dir'; it goes with the next run's sweep" >&2
   fi
   exit 0
 fi
