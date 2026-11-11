@@ -898,6 +898,8 @@ public final class TranscriptionRunner {
         var d: [String: Any] = [
             "chunks": records.count,
             "chunks_failed": failed,
+            // Ran, but removed next to nothing (#361): counted in `chunks` too.
+            "chunks_ineffective": records.filter(\.isIneffective).count,
             "seconds": records.reduce(0) { $0 + $1.seconds },
             "frames_reverted": records.reduce(0) { $0 + $1.framesReverted },
         ]

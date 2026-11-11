@@ -3847,10 +3847,13 @@ public final class RecordingCoordinator {
              CaptureQualityNotice.problemChunkCount(inTranscriptAt: jsonPath),
              CaptureQualityNotice.segmentCount(inTranscriptAt: jsonPath),
              CaptureQualityNotice.sideStatuses(inTranscriptAt: jsonPath),
-             EchoNotice.Findings.read(transcriptAt: jsonPath).completionLines)
+             EchoNotice.Findings.read(transcriptAt: jsonPath).completionLines,
+             CaptureQualityNotice.echoNotRemovedChunkCount(inTranscriptAt: jsonPath))
         }
         let sides = read?.3 ?? nil
         let echoLines = read?.4 ?? 0
+        // Echo cancellation on but not removing the echo (#361); unreadable reads as none, as for `echoLines`.
+        let echoNotRemoved = max(0, read?.5 ?? 0)
         var (anomalies, problemChunks, segments) = (unreadable, unreadable, unreadable)
         if let read, sides != nil { (anomalies, problemChunks, segments) = (read.0, read.1, read.2) }
         if anomalies > 0 {
@@ -3868,13 +3871,13 @@ public final class RecordingCoordinator {
         notify(
             CaptureQualityNotice.completionTitle(anomalyCount: anomalies, problemChunkCount: problemChunks, segmentCount: segments,
                                                  remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines,
-                                                 remoteUncertainSeconds: sides?.remoteUncertainSeconds),
+                                                 remoteUncertainSeconds: sides?.remoteUncertainSeconds, echoNotRemovedChunks: echoNotRemoved),
             CaptureQualityNotice.completionBody(
                 fileName: result.jsonPath.lastPathComponent, anomalyCount: anomalies,
                 problemChunkCount: problemChunks, segmentCount: segments,
                 remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines,
                 removedRecordings: removedRecordings, remoteUncertainSeconds: sides?.remoteUncertainSeconds,
-                remoteUncertainIsLowerBound: sides?.remoteUncertainIsLowerBound ?? false)
+                remoteUncertainIsLowerBound: sides?.remoteUncertainIsLowerBound ?? false, echoNotRemovedChunks: echoNotRemoved)
         )
         // Whether the session is still ours to finish — looked at here, after the last await, never before it (#321). The
         // phase is never set `.idle` in here: the caller does that once its recovery file is gone too, so no Start gets in

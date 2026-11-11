@@ -82,23 +82,67 @@ public final class LocalVQEEchoCanceller {
         vDSP_DFT_DestroySetup(inverse)
     }
 
-    /// The reference delay (samples) the filter's online estimate settled on in the last `process`.
+    /// The reference delay (samples) the filter applies: the online estimate, or the one a `DelayEstimate` froze.
     public var delaySamples: Int { Int(localvqe_daf_delay_samples(daf)) }
+
+    /// The longest loudspeaker-to-mic delay a whole-clip estimate may freeze (#361): 500 ms. No speaker path is
+    /// that long (Bluetooth output is about 200-300 ms); a shift past the real delay puts the echo before the
+    /// filter's window, where nothing removes it, and a shift short of it leaves the echo inside the window.
+    public static let maxDelaySamples = 8_000
 
     /// Cancels the echo of `reference` in `microphone` (same length, 16 kHz mono) and returns the
     /// cleaned microphone, sample-aligned with the input: the STFT's one hop of latency is removed.
-    /// A whole clip in memory; `Stream` is the same processing a block at a time.
+    /// A whole clip in memory, the delay estimated over all of it first; `Stream` is the same processing
+    /// a block at a time.
     public func process(microphone: [Float], reference: [Float]) throws -> [Float] {
         guard microphone.count == reference.count else {
             throw Failure.lengthMismatch(microphone: microphone.count, reference: reference.count)
         }
         if microphone.isEmpty { return [] }
-        let stream = try Stream(self)
+        let estimate = DelayEstimate(self)
+        try microphone.withUnsafeBufferPointer { m in
+            try reference.withUnsafeBufferPointer { r in try estimate.push(microphone: m, reference: r) }
+        }
+        let stream = try Stream(self, delay: estimate)
         var output = try microphone.withUnsafeBufferPointer { m in
             try reference.withUnsafeBufferPointer { r in try stream.push(microphone: m, reference: r) }
         }
         output.append(contentsOf: try stream.finish())
         return output
+    }
+
+    /// Upstream's own whole-clip estimate (`daf_prime_delay`, no bound) over `microphone` and `reference`, for
+    /// tests to hold `DelayEstimate` to; resets the canceller. nil when no estimate was confident.
+    func upstreamDelayEstimate(microphone: [Float], reference: [Float]) -> Int? {
+        let shift = localvqe_daf_upstream_prime_delay(daf, microphone, reference, min(microphone.count, reference.count))
+        return shift >= 0 ? Int(shift) : nil
+    }
+
+    /// The echo delay estimated over a whole clip before it is filtered (#361), fed a block at a time.
+    /// Upstream's online estimate locks for good at its first confident estimate 3.5 s in; on the opening
+    /// seconds of a call it locked at 1 s instead of 25 ms, and a whole 30-minute chunk came out with its
+    /// echo untouched. Parley cancels finished chunks, so it can look at all of one first. Starting an
+    /// estimate resets the canceller; hand it to `Stream(_:delay:)` before anything else uses the canceller.
+    public final class DelayEstimate {
+        fileprivate let canceller: LocalVQEEchoCanceller
+        /// Set once a `Stream` took the estimate: from then on the canceller's state is the filter's.
+        fileprivate var ended = false
+
+        public init(_ canceller: LocalVQEEchoCanceller) {
+            self.canceller = canceller
+            localvqe_daf_prime_begin(canceller.daf, Int32(LocalVQEEchoCanceller.maxDelaySamples))
+        }
+
+        /// Feeds `microphone` and `reference` (same length) to the estimate.
+        public func push(microphone: UnsafeBufferPointer<Float>, reference: UnsafeBufferPointer<Float>) throws {
+            guard microphone.count == reference.count else {
+                throw Failure.lengthMismatch(microphone: microphone.count, reference: reference.count)
+            }
+            guard microphone.allSatisfy(\.isFinite), reference.allSatisfy(\.isFinite) else { throw Failure.nonFiniteInput }
+            precondition(!ended, "a delay estimate fed after a Stream took it would corrupt the filter")
+            guard let m = microphone.baseAddress, let r = reference.baseAddress else { return }
+            localvqe_daf_prime_push(canceller.daf, m, r, microphone.count)
+        }
     }
 
     /// One clip's cancellation, fed in blocks of any length (#342): what lets a 30-minute chunk be
@@ -119,10 +163,33 @@ public final class LocalVQEEchoCanceller {
         /// The first hop out of the overlap-add belongs to before the clip: it is dropped.
         private var dropped = false
         private var samplesIn = 0, samplesOut = 0
+        /// The delay (samples) `delay` froze for this stream; nil when it found no confident one within
+        /// `maxDelaySamples` (the filter then runs at 0) or the stream estimates online.
+        public let estimatedDelay: Int?
+        /// The whole-clip estimate's GCC-PHAT confidence (peak over mean; upstream counts above 8 as confident);
+        /// nil for an online stream.
+        public let delayConfidence: Double?
 
-        public init(_ canceller: LocalVQEEchoCanceller) throws {
-            self.canceller = canceller
+        /// A stream with upstream's online delay estimate.
+        public convenience init(_ canceller: LocalVQEEchoCanceller) throws {
             localvqe_daf_reset(canceller.daf)
+            try self.init(canceller: canceller, estimatedDelay: nil, delayConfidence: nil)
+        }
+
+        /// A stream filtering at the delay `delay` estimated over the whole clip (#361).
+        public convenience init(_ canceller: LocalVQEEchoCanceller, delay: DelayEstimate) throws {
+            precondition(delay.canceller === canceller, "a delay estimate belongs to the canceller it ran on")
+            precondition(!delay.ended, "a delay estimate is taken by one Stream")
+            delay.ended = true
+            var confidence: Float = 0
+            let samples = Int(localvqe_daf_prime_end(canceller.daf, &confidence))
+            try self.init(canceller: canceller, estimatedDelay: samples >= 0 ? samples : nil, delayConfidence: Double(confidence))
+        }
+
+        private init(canceller: LocalVQEEchoCanceller, estimatedDelay: Int?, delayConfidence: Double?) throws {
+            self.canceller = canceller
+            self.estimatedDelay = estimatedDelay
+            self.delayConfidence = delayConfidence
             state = canceller.model.makeState()
             micInput = try MLMultiArray(shape: [1, 2, 1, NSNumber(value: LocalVQEEchoCanceller.bins)], dataType: .float16)
             refInput = try MLMultiArray(shape: [1, 2, 1, NSNumber(value: LocalVQEEchoCanceller.bins)], dataType: .float16)

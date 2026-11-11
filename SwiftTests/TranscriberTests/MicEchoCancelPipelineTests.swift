@@ -25,9 +25,15 @@ private final class PathRecordingEngine: TranscriptionEngine, @unchecked Sendabl
 /// its output still existed when the mic pass read it.
 private final class CopyingCanceller: MicEchoCancelling, @unchecked Sendable {
     let framesReverted: Int
+    let delaySamples: Int?, erleDB: Double?, farEndLiftDB: Double?
     private let lock = NSLock()
     private var outputs: [URL] = []
-    init(framesReverted: Int = 0) { self.framesReverted = framesReverted }
+    init(framesReverted: Int = 0, delaySamples: Int? = nil, erleDB: Double? = nil, farEndLiftDB: Double? = nil) {
+        self.framesReverted = framesReverted
+        self.delaySamples = delaySamples
+        self.erleDB = erleDB
+        self.farEndLiftDB = farEndLiftDB
+    }
     var calls: Int { lock.withLock { outputs.count } }
     var lastOutput: URL? { lock.withLock { outputs.last } }
 
@@ -35,7 +41,8 @@ private final class CopyingCanceller: MicEchoCancelling, @unchecked Sendable {
         try FileManager.default.copyItem(at: micURL, to: outputURL)
         lock.withLock { outputs.append(outputURL) }
         return MicEchoCancelRecord(engine: "fake", modelSHA256: String(repeating: "a", count: 64),
-                                   framesReverted: framesReverted, seconds: 1)
+                                   framesReverted: framesReverted, seconds: 1, delaySamples: delaySamples, erleDB: erleDB,
+                                   farEndLiftDB: farEndLiftDB)
     }
 }
 
@@ -118,6 +125,29 @@ private struct ThrowingCanceller: MicEchoCancelling {
         let chunk = try #require(try await process(.on(CopyingCanceller(framesReverted: 0)), engine: PathRecordingEngine(), in: dir))
         #expect(chunk.micEchoCancel?.framesReverted == 0)
         #expect(!chunk.issues.contains { $0.code == .echoCancelReverted })
+    }
+
+    /// A canceller that found the echo path and removed next to nothing (#361) is recorded, never a silent success.
+    @Test func aCancellationThatRemovedNothingIsRecorded() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let chunk = try #require(try await process(.on(CopyingCanceller(delaySamples: 16_128, erleDB: 0.1, farEndLiftDB: 31.2)),
+                                                   engine: PathRecordingEngine(), in: dir))
+        #expect(chunk.micEchoCancel?.delaySamples == 16_128)
+        #expect(chunk.micEchoCancel?.erleDB == 0.1)
+        let issue = try #require(chunk.issues.first { $0.code == .echoCancelIneffective })
+        #expect(issue.track == "local")
+        #expect(issue.detail == "0.1 dB removed of an echo 31.2 dB above the mic's floor, delay 16128 samples")
+        #expect(!issue.affectsContent)
+        #expect(!chunk.issues.contains { $0.code == .echoCancelFailed })
+    }
+
+    @Test func noEchoHeardOrAWorkingCancellationIsNotIneffective() async throws {
+        for (lift, erle) in [(2.3, 0.0), (31.0, 45.0), (31.0, nil), (nil, 0.0)] as [(Double?, Double?)] {
+            let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+            let chunk = try #require(try await process(.on(CopyingCanceller(delaySamples: 2_944, erleDB: erle, farEndLiftDB: lift)),
+                                                       engine: PathRecordingEngine(), in: dir))
+            #expect(!chunk.issues.contains { $0.code == .echoCancelIneffective }, "lift \(String(describing: lift)), erle \(String(describing: erle))")
+        }
     }
 
     @Test func aFailureFallsBackToTheRawMicAndIsRecorded() async throws {
@@ -244,7 +274,8 @@ private struct ThrowingCanceller: MicEchoCancelling {
     }
 
     @Test func theRecordSurvivesSessionJSON() throws {
-        let record = MicEchoCancelRecord(engine: "localvqe-v1.4-aec-coreml", modelSHA256: "ab", framesReverted: 2, seconds: 1800)
+        let record = MicEchoCancelRecord(engine: "localvqe-v1.4-aec-coreml", modelSHA256: "ab", framesReverted: 2, seconds: 1800,
+                                         delaySamples: 384, erleDB: 45.2, farEndLiftDB: 31.2)
         let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "a.m4a", segments: [],
                                    speakerDatabase: [:], micEchoCancel: record)
         let data = try JSONEncoder().encode(chunk)
@@ -252,7 +283,21 @@ private struct ThrowingCanceller: MicEchoCancelling {
         let stored = try #require(json["mic_echo_cancel"] as? [String: Any])
         #expect(stored["model_sha256"] as? String == "ab")
         #expect(stored["frames_reverted"] as? Int == 2)
+        #expect(stored["delay_samples"] as? Int == 384)
+        #expect(stored["erle_db"] as? Double == 45.2)
+        #expect(stored["far_end_lift_db"] as? Double == 31.2)
         #expect(try JSONDecoder().decode(ProcessedChunk.self, from: data).micEchoCancel == record)
+
+        // A record written before #361 has neither: both read as unknown, never as a failure.
+        var older = json
+        var olderRecord = stored
+        olderRecord["delay_samples"] = nil
+        olderRecord["erle_db"] = nil
+        olderRecord["far_end_lift_db"] = nil
+        older["mic_echo_cancel"] = olderRecord
+        let decoded = try #require(try JSONDecoder().decode(ProcessedChunk.self, from: JSONSerialization.data(withJSONObject: older)).micEchoCancel)
+        #expect(decoded.delaySamples == nil && decoded.erleDB == nil && decoded.farEndLiftDB == nil && !decoded.isIneffective)
+        #expect(decoded.framesReverted == 2)
 
         // A chunk written before #342 has none; one this build cannot read keeps the chunk.
         var legacy = json
@@ -282,10 +327,21 @@ private struct ThrowingCanceller: MicEchoCancelling {
         ]))
         #expect(d["chunks"] as? Int == 2)
         #expect(d["chunks_failed"] as? Int == 1)
+        #expect(d["chunks_ineffective"] as? Int == 0)
         #expect(d["seconds"] as? Double == 3600)
         #expect(d["frames_reverted"] as? Int == 4)
         #expect(d["engine"] as? String == "localvqe-v1.4-aec-coreml")
         #expect(d["model_sha256"] as? String == "ab")
+    }
+
+    @Test func countsTheChunksThatRemovedNothing() throws {
+        let working = MicEchoCancelRecord(engine: "e", modelSHA256: "a", framesReverted: 0, seconds: 1, delaySamples: 384,
+                                          erleDB: 45, farEndLiftDB: 31)
+        let idle = MicEchoCancelRecord(engine: "e", modelSHA256: "a", framesReverted: 0, seconds: 1, delaySamples: 16_128,
+                                       erleDB: 0, farEndLiftDB: 31)
+        let d = try #require(TranscriptionRunner.micEchoCancelDictionary(chunks: [chunk(0, record: idle), chunk(1, record: working)]))
+        #expect(d["chunks"] as? Int == 2)
+        #expect(d["chunks_ineffective"] as? Int == 1)
     }
 
     @Test func listsBothModelsWhenASessionMixedTwo() throws {

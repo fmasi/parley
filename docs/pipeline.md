@@ -147,17 +147,21 @@ Notes:
 
 **What it does:** With `mic_echo_cancel` = `"on"` (config.json only; default `"off"`), `ChunkProcessor.cancelMicEcho` runs alongside the system-audio ASR pass, after the system WAV is known and before the mic pass. It cancels the speaker echo in the chunk's mic WAV with the system WAV as the far-end reference: LocalVQE v1.4-AEC, upstream's adaptive filter in C++ plus a Core ML residual mask, then `NearEndGuard`, which gives the raw mic back in any 100 ms frame where the far end is silent and the cleaned mic is 20 dB or more quieter than the raw one (a word the canceller removed is silent loss; echo left behind is only visible). Only ASR and diarization of the local stream read the cleaned copy, a scratch WAV deleted afterwards. The raw mic stays the archive and the speaker-sample source, and `EchoDeduplicator` (Stage 7) still runs and flags what is left.
 
+**The echo delay is estimated over the whole chunk first (#361).** Upstream's filter estimates the loudspeaker-to-mic delay online and locks it for good 3.5 s in; on a call's opening it can lock on the wrong value and the whole chunk keeps its echo (gotcha 101). `cancelEcho` therefore runs in three passes over the files: decode both to 16 kHz scratch WAVs while `LocalVQEEchoCanceller.DelayEstimate` runs upstream's whole-signal estimate (`daf_prime_delay`, about 2.7 s for a 30-minute chunk) a block at a time; filter at that frozen delay; apply the guard. A shift over 500 ms (8000 samples) is never taken: the filter then runs at 0, whose 1.024 s window still holds any real speaker delay. Re-detect's in-memory path estimates the same way.
+
+**A cancellation that removed nothing is recorded, not passed off as a success (#361).** `EchoReduction` measures two things per chunk over 100 ms frames: the *lift*, how far the raw mic rises above its own floor (its 10th percentile while the far end is silent, below -55 dBFS) while the far end talks (reference at or above -40 dBFS) — 27-32 dB on loudspeakers, about 0 dB with headphones — and the *reduction*, the median of raw minus cleaned over the far-end frames where the mic is at or above -50 dBFS — about 45 dB when it works, 0 dB when it fails. With a lift of 15 dB or more and a reduction under 10 dB the chunk gets `echo_cancel_ineffective` (`detail`: both figures and the delay), and the completion notice says "echo not removed". Each needs 30 s of the far end talking (and the lift 30 s of it silent); less is not judged. Both are medians: a user talking over the far end for more than half of its speech would read as an echo not removed.
+
 **Failure is never a missing local transcript.** If the cancel throws, or the build has no model, the raw mic is used and the chunk gets `echo_cancel_failed` (informational, not content-affecting). Frames the guard restored are counted in `echo_cancel_reverted` (`count` = frames, `track` = `local`).
 
-**Record:** per chunk, a `mic_echo_cancel` entry in `session.json`; in the transcript, `metadata.mic_echo_cancel` = `{chunks, chunks_failed, seconds, frames_reverted, engine, model_sha256}`, absent when it never ran.
+**Record:** per chunk, a `mic_echo_cancel` entry in `session.json` (`engine`, `model_sha256`, `frames_reverted`, `seconds`, and since #361 `delay_samples`, `erle_db`, `far_end_lift_db`, each absent when unknown); in the transcript, `metadata.mic_echo_cancel` = `{chunks, chunks_failed, chunks_ineffective, seconds, frames_reverted, engine, model_sha256}`, absent when it never ran.
 
-**Re-detect:** `TranscriptRediarizer` on the mic channel of a transcript that has `metadata.mic_echo_cancel` cancels each archive's mic side again, with its system side as reference, before diarizing.
+**Re-detect:** `TranscriptRediarizer` on the mic channel of a transcript that has `metadata.mic_echo_cancel` cancels each archive's mic side again, with its system side as reference, before diarizing. With the whole-chunk delay estimate this re-cancels a chunk recorded before #361 whose echo was left in; the re-detect records no new `mic_echo_cancel` figures.
 
 **Key code path:**
 - `TranscriberCore/MicEchoCanceller.swift`, `LocalVQEEchoCanceller.swift`, `NearEndGuard.swift`
 - `TranscriberCore/ChunkProcessor.swift` — `cancelMicEcho(chunkIndex:micURL:systemURL:)`; `TranscriptionRunner.micEchoCancelDictionary` for the CLI/finalize metadata
 - Model: `ThirdParty/LocalVQE-CoreML` (0.7 MB, Apache-2.0), bundled by `package_app.sh`, every file checked against `MANIFEST.json` (SHA-256) at load. No download.
-- Log: `mic echo cancelled (… s of audio in … s …)`
+- Log: `mic echo cancelled (… s of audio in … s, delay N samples, X dB removed of an echo Y dB above the mic's floor, … frames given back to the raw mic)`; `mic echo cancellation removed next to nothing (…)` on an ineffective chunk
 
 ### Stage 4 — Diarization
 
@@ -276,8 +280,8 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `processing_issues` codes `echo_flagged` (`count` = segments) and `echo_cluster` (`count` = local clusters judged echo in that chunk), both informational.
 
 **Mic echo cancellation** (#342, Stage 3a):
-- `metadata.mic_echo_cancel` — `{chunks, chunks_failed, seconds, frames_reverted, engine, model_sha256}`: chunks cancelled, chunks that fell back to the raw mic, seconds of mic audio cleaned, frames `NearEndGuard` restored. Absent when `mic_echo_cancel` was off or never ran.
-- `processing_issues` codes `echo_cancel_failed` (`track` = `local`, `detail` = why) and `echo_cancel_reverted` (`count` = frames), both informational: neither counts in `processing_issue_count`.
+- `metadata.mic_echo_cancel` — `{chunks, chunks_failed, chunks_ineffective, seconds, frames_reverted, engine, model_sha256}`: chunks cancelled, chunks that fell back to the raw mic, chunks cancelled that removed next to nothing (#361, also counted in `chunks`), seconds of mic audio cleaned, frames `NearEndGuard` restored. Absent when `mic_echo_cancel` was off or never ran.
+- `processing_issues` codes `echo_cancel_failed` (`track` = `local`, `detail` = why), `echo_cancel_ineffective` (`detail` = reduction, lift and delay, #361) and `echo_cancel_reverted` (`count` = frames), all informational: none counts in `processing_issue_count`. The first two make the completion notice say "echo not removed".
 
 **Re-detect** (the rename dialog's per-channel speaker count; Section 4, "Re-detect at a stated speaker count"):
 - `metadata.speaker_count_local` / `metadata.speaker_count_remote` — how many PEOPLE the channel ended up with: its labels that are neither `Unknown` nor an echo cluster, counted over unflagged lines. Can be 0 (a mic channel that holds only the other side's voice). Absent on a transcript that was never re-detected.

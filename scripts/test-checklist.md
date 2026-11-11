@@ -1278,6 +1278,16 @@ speakers, not headphones) so the mic hears the far side.
   `metadata.mic_echo_cancel` in the transcript and no `mic echo cancelled` line.
 - [ ] **I-07 CLI.** `Parley transcribe -i <app recording>.m4a --split --echo-cancel` writes a transcript
   with `metadata.mic_echo_cancel`.
+- [ ] **I-08 The delay is estimated over the whole chunk (#361).** On the I-02 call, start the far side
+  talking within the first seconds (a greeting, as a real call opens). PASS: each chunk's I-04 line reads
+  `delay N samples` with N under 8000 (typically 200-700 on speakers) and `… dB removed` above 10 (a working
+  chunk measures 25-45); the session's `chunks_ineffective` is 0; `session.json`'s per-chunk
+  `mic_echo_cancel` has `delay_samples` and `erle_db`.
+- [ ] **I-09 Headphones are not a failure.** Record a call with headphones on and the setting on. PASS: no
+  `echo_cancel_ineffective` in `processing_issues`, the completion notice does not say "echo not removed".
+- [ ] **I-10 Repair an affected recording.** Open the rename dialog on a recording made before #361 whose
+  first chunk kept its echo (an echo voice on your side), and Re-detect "This side" at its people count. PASS: the remote lines leave the local side (the echo voice is gone or
+  much smaller), and your own lines are all still there.
 
 ## Pipeline memory (gotcha 98)
 

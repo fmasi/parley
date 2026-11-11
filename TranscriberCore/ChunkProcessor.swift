@@ -677,11 +677,15 @@ public final class ChunkProcessor {
                     try canceller.cancelEcho(micURL: micURL, systemURL: systemURL, outputURL: output)
                 }
                 Logger.transcription.info(
-                    "Chunk \(chunkIndex, privacy: .public): mic echo cancelled (\(record.seconds, format: .fixed(precision: 0), privacy: .public) s of audio in \(Date().timeIntervalSince(started), format: .fixed(precision: 1), privacy: .public) s, \(record.framesReverted, privacy: .public) frames given back to the raw mic)"
+                    "Chunk \(chunkIndex, privacy: .public): mic echo cancelled (\(record.seconds, format: .fixed(precision: 0), privacy: .public) s of audio in \(Date().timeIntervalSince(started), format: .fixed(precision: 1), privacy: .public) s, delay \(Self.decibels(record.delaySamples.map(Double.init), unit: "samples"), privacy: .public), \(Self.decibels(record.erleDB, unit: "dB"), privacy: .public) removed of an echo \(Self.decibels(record.farEndLiftDB, unit: "dB"), privacy: .public) above the mic's floor, \(record.framesReverted, privacy: .public) frames given back to the raw mic)"
                 )
-                let reverted = record.framesReverted > 0
+                var issues = record.framesReverted > 0
                     ? [ChunkIssue(code: .echoCancelReverted, track: "local", count: record.framesReverted)] : []
-                return (output, record, reverted)
+                if let figures = Self.echoCancelIneffectiveDetail(record) {  // numbers only
+                    Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): mic echo cancellation removed next to nothing (\(figures, privacy: .public))")
+                    issues.append(ChunkIssue(code: .echoCancelIneffective, track: "local", count: nil, detail: figures))
+                }
+                return (output, record, issues)
             } catch {
                 try? fm.removeItem(at: output)
                 let detail = Self.echoCancelFailureDetail(error)
@@ -689,6 +693,19 @@ public final class ChunkProcessor {
                 return (nil, nil, [ChunkIssue(code: .echoCancelFailed, track: "local", count: nil, detail: detail)])
             }
         }
+    }
+
+    /// A measured figure for the log, "unmeasured" for nil (a headphone chunk has no echo to measure).
+    nonisolated static func decibels(_ value: Double?, unit: String) -> String {
+        value.map { String(format: unit == "samples" ? "%.0f %@" : "%.1f %@", $0, unit) } ?? "unmeasured"
+    }
+
+    /// `echo_cancel_ineffective`'s detail (#361): the reduction measured, the echo heard, and the delay used
+    /// ("none" when no confident one was found); nil when the record does not count as ineffective.
+    nonisolated static func echoCancelIneffectiveDetail(_ record: MicEchoCancelRecord) -> String? {
+        guard record.isIneffective, let erle = record.erleDB, let lift = record.farEndLiftDB else { return nil }
+        let delay = record.delaySamples.map { "\($0) samples" } ?? "none"
+        return String(format: "%.1f dB removed of an echo %.1f dB above the mic's floor, delay ", erle, lift) + delay
     }
 
     /// Why cancellation failed, without paths or audio: the engine's own failure, or the error's domain and code.

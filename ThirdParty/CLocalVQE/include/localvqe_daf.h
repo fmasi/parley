@@ -37,7 +37,29 @@ void localvqe_daf_reset(localvqe_daf *daf);
 bool localvqe_daf_process(localvqe_daf *daf, const float *mic, const float *reference, size_t count,
                           float *residual, float *echo_estimate);
 
-/// The reference delay (samples) the online GCC-PHAT estimate currently applies.
+/// Offline callers (#361): the bulk echo delay estimated over the whole clip before it is filtered, instead of
+/// upstream's online estimate, which locks for good at the first confident one 3.5 s in and can lock wrong on a
+/// call's opening seconds. The same estimate as upstream's daf_prime_delay (the highest-confidence GCC-PHAT shift
+/// over the clip, upstream's own gcc_update), fed a block at a time so the clip is never held: about 2.7 s
+/// for a 30-minute chunk.
+///
+/// `begin` clears all state; `push` feeds any number of samples (the delay estimate only, no filtering);
+/// `end` clears the filter and freezes the delay for the `localvqe_daf_process` calls that follow. Only shifts
+/// of at most `max_delay` samples count: a shift past the real delay leaves the echo before the filter's
+/// window, where it cannot be removed at all, while one short of it is still inside the filter's 1.024 s.
+/// `end` returns the frozen delay in samples, or -1 when no estimate within the bound was confident; the delay
+/// is then frozen at 0, where the filter's window covers echo delays of 0 to 1.024 s. `confidence`, when not
+/// NULL, receives the estimate's GCC-PHAT confidence (its peak over the mean; upstream's threshold is 8).
+void localvqe_daf_prime_begin(localvqe_daf *daf, int32_t max_delay);
+void localvqe_daf_prime_push(localvqe_daf *daf, const float *mic, const float *reference, size_t count);
+int32_t localvqe_daf_prime_end(localvqe_daf *daf, float *confidence);
+
+/// Upstream's own whole-array estimate (daf_prime_delay, no bound) over `count` samples, for tests to hold the
+/// streaming estimate's block handling to. Leaves all state reset. Returns the delay, or -1 when none was confident.
+int32_t localvqe_daf_upstream_prime_delay(localvqe_daf *daf, const float *mic, const float *reference, size_t count);
+
+/// The reference delay (samples) the filter currently applies: the online GCC-PHAT estimate, or the
+/// frozen one after `localvqe_daf_prime_end`.
 int32_t localvqe_daf_delay_samples(const localvqe_daf *daf);
 
 #ifdef __cplusplus
