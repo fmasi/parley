@@ -187,7 +187,8 @@ enum CLIHandler {
             micAudio: micAudio,
             outputDirectory: outputDir,
             config: runConfig,
-            micEchoCancel: echoCancel
+            micEchoCancel: echoCancel,
+            keepInputs: true
         )
 
         print("Output saved to: \(result.jsonPath.path)")

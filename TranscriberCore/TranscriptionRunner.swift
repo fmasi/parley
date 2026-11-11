@@ -110,13 +110,17 @@ public final class TranscriptionRunner {
 
     public init() {}
 
+    /// Transcribes one recording's files: the CLI, and the legacy single-file recovery. Dual-stream input is archived to
+    /// AAC in `outputDirectory`; the source WAVs are then deleted unless `keepInputs` (the CLI: files it was handed are the
+    /// user's, #362) or `preserve_source_wav`.
     public func run(
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
         config: Config,
         provenance: CaptureProvenance? = nil,
-        micEchoCancel: MicEchoCancelSetup = .off
+        micEchoCancel: MicEchoCancelSetup = .off,
+        keepInputs: Bool = false
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
@@ -415,12 +419,30 @@ public final class TranscriptionRunner {
         // pre-#93 code silently dropped all but the first. archiveAll is per-segment isolated:
         // a failed segment keeps its WAV rather than aborting the whole archive.
         var quotaPass: QuotaOutcome?
-        if isDualStream && !contributingPairs.isEmpty {
+        // The CLI's files (#362): an archive already there under the same name is the user's too — never overwritten (the
+        // archiver replaces its output); that pair stays WAV, and the transcript lists the WAVs.
+        var pairsToArchive = contributingPairs
+        if keepInputs && !pairsToArchive.isEmpty {
+            let candidates = pairsToArchive, out = outputDirectory
+            guard let free = await folderReads.read("transcript: archive names", folder: outputDirectory.path, key: runKey + "#names",
+                                                    seconds: folderReadSeconds, {
+                candidates.filter { pair in
+                    let name = pair.system.deletingPathExtension().lastPathComponent + ".m4a"
+                    return !FileManager.default.fileExists(atPath: out.appendingPathComponent(name).path)
+                }
+            }) else { throw FolderNotAnswering() }
+            if free.count < pairsToArchive.count {
+                Logger.files.info("Not archived: \(pairsToArchive.count - free.count, privacy: .public) segment(s) whose archive name is taken")
+            }
+            pairsToArchive = free
+        }
+        if isDualStream && !pairsToArchive.isEmpty {
             let archived = await AudioArchiver.archiveAll(
-                pairs: contributingPairs,
+                pairs: pairsToArchive,
                 outputDirectory: outputDirectory,
                 bitrateKbps: config.archiveBitrateKbps,
-                preserveSourceWAV: config.preserveSourceWAV ?? false
+                // Files the CLI was handed are the user's, never Parley's to delete (#362).
+                preserveSourceWAV: keepInputs || (config.preserveSourceWAV ?? false)
             )
             Logger.files.info("Archived \(archived.count, privacy: .public) segment(s)")
             // The transcript's audio paths: on the folder's queue, bounded (L review 217). Unanswered, the transcript is
@@ -435,23 +457,26 @@ public final class TranscriptionRunner {
                 Logger.files.error("The transcript's archive paths did not answer — the recording folder is not answering")
             }
             // The quota, fire-and-forget and bounded, as finalize's (L review 251): a slow share's walk never holds a read.
-            // Over the whole recordings tree when this is a day folder of it (#224).
-            let scope = StorageManager.quotaScope(for: outputDirectory, recordingRoot: config.recordingDirectory)
-            let pass = QuotaOutcome()
-            quotaPass = pass
-            folderReads.enqueue("transcript: quota", folder: outputDirectory.path) {
-                do {
-                    let report = try StorageManager.enforceQuotaReport(
-                        scope: scope,
-                        limitHours: limitHours,
-                        bitrateKbps: bitrateKbps,
-                        protectedFiles: archived,   // every file the transcript lists (round 7 item 1)
-                        deadline: SuspendingClock.now + .milliseconds(Int64(writeSeconds * 1000))
-                    )
-                    pass.deliver(removedRecordings: report.removedRecordings)
-                } catch {
-                    Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
-                    pass.deliver(removedRecordings: [])
+            // Over the whole recordings tree when this is a day folder of it (#224). Never for the CLI's files (#362): its
+            // output folder may hold the user's own .m4a files, which are not Parley's archives to age out.
+            if !keepInputs {
+                let scope = StorageManager.quotaScope(for: outputDirectory, recordingRoot: config.recordingDirectory)
+                let pass = QuotaOutcome()
+                quotaPass = pass
+                folderReads.enqueue("transcript: quota", folder: outputDirectory.path) {
+                    do {
+                        let report = try StorageManager.enforceQuotaReport(
+                            scope: scope,
+                            limitHours: limitHours,
+                            bitrateKbps: bitrateKbps,
+                            protectedFiles: archived,   // every file the transcript lists (round 7 item 1)
+                            deadline: SuspendingClock.now + .milliseconds(Int64(writeSeconds * 1000))
+                        )
+                        pass.deliver(removedRecordings: report.removedRecordings)
+                    } catch {
+                        Logger.files.error("Quota enforcement failed: \(error, privacy: .private)")
+                        pass.deliver(removedRecordings: [])
+                    }
                 }
             }
         }
