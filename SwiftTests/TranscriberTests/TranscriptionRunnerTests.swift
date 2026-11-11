@@ -471,11 +471,31 @@ import enum FluidAudio.OfflineDiarizationError
             runner.engineFactoryForTesting = { _ in (ScriptedEngine(speaks: [.system, .microphone]), NoSpeechDiarizer(silent: [])) }
             var config = Config.default
             config.preserveSourceWAV = false
-            _ = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: config, keepInputs: keep)
+            let result = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: config, keepInputs: keep)
             let exists = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
             #expect(exists(system) == keep && exists(mic) == keep, "keepInputs: \(keep)")
             #expect(exists(dir.appendingPathComponent("m.m4a")), "the archive is written either way (keepInputs: \(keep))")
+            // The storage quota ages out .m4a files in the output folder: never for the CLI's, whose folder is the user's.
+            #expect((result.quotaPass == nil) == keep, "the quota runs only for Parley's own recording (keepInputs: \(keep))")
         }
+    }
+
+    /// #362: an archive already in the output folder under the input's name is the user's file: the CLI never overwrites it.
+    /// That pair is left as WAV, and the transcript lists the WAVs.
+    @Test func keepInputsNeverOverwritesAnExistingArchive() async throws {
+        let (dir, system, mic) = try recording(); defer { try? FileManager.default.removeItem(at: dir) }
+        let existing = dir.appendingPathComponent("m.m4a"), mine = Data("the user's own file".utf8)
+        try mine.write(to: existing)
+        let runner = TranscriptionRunner()
+        runner.engineFactoryForTesting = { _ in (ScriptedEngine(speaks: [.system, .microphone]), NoSpeechDiarizer(silent: [])) }
+        var config = Config.default
+        config.preserveSourceWAV = false
+        let result = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: config, keepInputs: true)
+        #expect(try Data(contentsOf: existing) == mine, "the existing .m4a is untouched")
+        #expect(FileManager.default.fileExists(atPath: system.path) && FileManager.default.fileExists(atPath: mic.path))
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        let paths = try #require((json["metadata"] as? [String: Any])?["audio_paths"] as? [String])
+        #expect(!paths.contains { $0.hasSuffix(".m4a") }, "the transcript lists the WAVs, not someone else's archive: \(paths)")
     }
 
     /// ...while a diarizer that throws on a stream that DOES have words still fails the run: no transcript is written.
