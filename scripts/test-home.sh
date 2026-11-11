@@ -52,12 +52,14 @@ fi
 
 if [ "${1:-}" = "--remove" ]; then
   dir="${2:-}"
-  case "$dir" in */parley-test-home.*) ;; *) exit 0 ;; esac
+  # Only a home this script made: its own folder name, no `..` to climb out of it.
+  case "$(basename "$dir")" in parley-test-home.*) ;; *) exit 0 ;; esac
+  case "$dir" in *..*) exit 0 ;; esac
   [ -e "$dir" ] || exit 0
   # Xcode downloads its Metal toolchain into the home and mounts it there, read-only (#355): rm -rf
   # cannot remove a mounted image's files. Detach every mount under the home, deepest first.
   resolved=$(cd "$dir" 2>/dev/null && pwd -P || echo "$dir")
-  /sbin/mount | sed -n 's/^.* on \(.*\) ([^)]*)$/\1/p' | sort -r | while IFS= read -r point; do
+  /sbin/mount | sed -n 's/^.* on \(.*\) ([^)]*)$/\1/p' | LC_ALL=C sort -r | while IFS= read -r point; do
     case "$point" in
       "$resolved"/*) /usr/bin/hdiutil detach -force "$point" >/dev/null 2>&1 \
                        || /usr/sbin/diskutil unmount force "$point" >/dev/null 2>&1 || true ;;

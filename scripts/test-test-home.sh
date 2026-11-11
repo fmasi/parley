@@ -43,6 +43,11 @@ chmod 700 "$home/locked"
 other="$work/not-a-test-home"; mkdir -p "$other"
 bash scripts/test-home.sh --remove "$other"
 if [ -d "$other" ]; then ok "a path outside the pattern is left alone"; else bad "a path outside the pattern is left alone"; fi
+mkdir -p "$work/parley-test-home.climb"
+bash scripts/test-home.sh --remove "$work/parley-test-home.climb/../not-a-test-home"
+if [ -d "$other" ]; then ok "a path that climbs out with .. is left alone"; else bad "a path that climbs out with .. is left alone"; fi
+bash scripts/test-home.sh --remove "$work/parley-test-home.climb/sub"
+if [ -d "$work/parley-test-home.climb" ]; then ok "a path inside a home is not a home"; else bad "a path inside a home is not a home"; fi
 
 # 4. swift-test.sh's cleanup keeps the run's exit status (its own function and trap, run as is).
 cleanup_src=$(sed -n '/^remove_home()/,/^trap remove_home EXIT$/p' scripts/swift-test.sh)
@@ -56,5 +61,18 @@ exit $want" || status=$?
   if [ "$status" = "$want" ]; then ok "the cleanup keeps exit status $want"; else bad "the cleanup keeps exit status $want (got $status)"; fi
   if [ ! -e "$home" ]; then ok "the cleanup removed the home (status $want)"; else bad "the cleanup removed the home (status $want)"; fi
 done
+# ...and a cleanup that cannot remove the home (as the mounted toolchain made it) still keeps it.
+if [ "$(id -u)" != 0 ]; then
+  for want in 0 3; do
+    home="$work/parley-test-home.trapstuck$want"
+    mkdir -p "$home/locked"; echo x > "$home/locked/file"; chmod 500 "$home/locked"
+    status=0
+    bash -c "set -euo pipefail; here=scripts; home='$home'
+$cleanup_src
+exit $want" 2>/dev/null || status=$?
+    if [ "$status" = "$want" ]; then ok "a failed cleanup keeps exit status $want"; else bad "a failed cleanup keeps exit status $want (got $status)"; fi
+    chmod 700 "$home/locked"
+  done
+fi
 
 exit "$fail"
