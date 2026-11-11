@@ -510,7 +510,10 @@ struct MenuView: View {
     /// fire from a rename-dialog completion without capturing the view.
     static func autoSummarize(jsonPath: URL, config: Config) {
         PostRecordingWork.begin()
+        // A session rename waits for it (#357): renamed under it, the summary would land under the old name.
+        TranscriptsInUse.shared.begin(jsonPath)
         Task.detached(priority: .utility) {
+            defer { TranscriptsInUse.shared.end(jsonPath) }
             if case .failed(let message) = await MeetingSummarizer.summarizeIfConfigured(
                 transcriptPath: jsonPath, config: config) {
                 postNotification(title: "Summary Failed", body: message)

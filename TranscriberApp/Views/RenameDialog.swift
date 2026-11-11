@@ -7,6 +7,13 @@ import os
 // SpeakerSample (the sample text + resolved audio location) lives in TranscriberCore
 // (TranscriptRenamer.swift), shared with the CLI rename path.
 
+/// What a Save did: the panel closes, or it stays open on the transcript's path — a new one when the session was
+/// renamed but the speaker names could not be written (#357).
+enum RenameSaveOutcome {
+    case saved
+    case notSaved(jsonPath: URL)
+}
+
 struct SpeakerEntry: Identifiable {
     let id: String  // "Local Speaker 1", "Remote Speaker 1", etc.
     var displayName: String
@@ -60,8 +67,16 @@ struct RenameDialog: View {
     /// rewrites it. The copy and the people count are `EchoNotice`'s; nothing is worked out here.
     @State private var echo: EchoNotice.Findings
 
-    let jsonPath: URL
-    let onSave: ([String: String]) -> Void
+    /// The transcript this dialog edits. State, not a constant: a Save that renamed the session but could not write
+    /// the speaker names leaves the dialog open on the transcript's new path (#357).
+    @State private var jsonPath: URL
+    /// The session's name as typed (#357): the part after the `HHMMSS-` timestamp, empty for an unnamed recording.
+    @State private var sessionName: String
+    /// A Save in progress — the session's files can take a moment to rename on a slow folder.
+    @State private var saving = false
+    /// The speaker names, and the session name when it is a recording's (nil otherwise), for the transcript at the
+    /// given path. The controller renames the session's files (`SessionRenamer`) before writing the names.
+    let onSave: @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome
     let onCancel: () -> Void
 
     init(
@@ -69,10 +84,11 @@ struct RenameDialog: View {
         speakers: [SpeakerEntry],
         initialChannelNames: [String: [String: String]] = [:],
         initialEcho: EchoNotice.Findings = .none,
-        onSave: @escaping ([String: String]) -> Void,
+        onSave: @escaping @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome,
         onCancel: @escaping () -> Void = {}
     ) {
-        self.jsonPath = jsonPath
+        self._jsonPath = State(initialValue: jsonPath)
+        self._sessionName = State(initialValue: SessionRenamer.sessionName(ofTranscript: jsonPath) ?? "")
         self._speakers = State(initialValue: speakers)
         self._cachedChannelNames = State(initialValue: initialChannelNames)
         self._echo = State(initialValue: initialEcho)
@@ -407,6 +423,8 @@ struct RenameDialog: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            sessionNameSection
+
             ForEach($speakers) { $speaker in
                 speakerCard($speaker)
             }
@@ -417,6 +435,8 @@ struct RenameDialog: View {
                 Spacer()
                 Button("Cancel") { rediarizeTask?.cancel(); onCancel() }
                     .keyboardShortcut(.cancelAction)
+                    // Not while a Save renames the session's files (#357): the panel closes when it is done.
+                    .disabled(saving)
                 Button("Save") {
                     var mapping: [String: String] = [:]
                     for speaker in speakers {
@@ -427,13 +447,22 @@ struct RenameDialog: View {
                             mapping[speaker.id] = name
                         }
                     }
-                    onSave(mapping)
+                    stopPlayback()
+                    saving = true
+                    let name = SessionRenamer.sessionName(ofTranscript: jsonPath) == nil ? nil : sessionName
+                    let path = jsonPath
+                    Task {
+                        if case .notSaved(let now) = await onSave(mapping, name, path) {
+                            jsonPath = now
+                            saving = false
+                        }
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
                 // Saving mid-re-detect is a lost-work race: onSave writes the speaker names, the
                 // dialog closes, and a re-diarization already past its last cancellation check then
                 // rewrites the whole transcript — wiping the names that were just applied.
-                .disabled(rediarizing != nil)
+                .disabled(rediarizing != nil || saving)
             }
         }
         .padding(20)
@@ -453,6 +482,34 @@ struct RenameDialog: View {
             stopPlayback()
             previousPreview.map { try? FileManager.default.removeItem(at: $0) }
             previousPreview = nil
+        }
+    }
+
+    /// The recording's name (#357), above the speakers: editable, with the `HHMMSS-` timestamp shown and kept. Saving a
+    /// new one renames every file of the recording. Hidden for a transcript that is not a recording's.
+    @ViewBuilder
+    private var sessionNameSection: some View {
+        if let current = SessionRenamer.sessionName(ofTranscript: jsonPath),
+           let stamp = SessionRenamer.sessionId(ofTranscript: jsonPath)?.prefix(6) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Recording name")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("\(stamp)-")
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    TextField("Name", text: $sessionName)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(rediarizing != nil || saving)
+                }
+                if sessionName.trimmingCharacters(in: .whitespacesAndNewlines) != current {
+                    Text("Saving renames the recording’s audio, transcript and summary files.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 

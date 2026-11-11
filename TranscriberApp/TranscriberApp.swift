@@ -164,9 +164,10 @@ struct TranscriberApp: App {
             },
             presentTranscript: { jsonPath, config in
                 // Queued: several salvaged transcripts open one rename panel at a time (L review 90).
-                RenameWindowController.shared.enqueue(jsonPath: jsonPath) {
-                    // Auto-summarize after rename completes (so summary has real speaker names)
-                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                RenameWindowController.shared.enqueue(jsonPath: jsonPath) { finalPath in
+                    // Auto-summarize after rename completes (so summary has real speaker names), on the
+                    // transcript's path as the panel left it: a renamed session's new one (#357).
+                    MenuView.autoSummarize(jsonPath: finalPath, config: config)
                 }
             },
             onSystemAudioPermissionDenied: {
@@ -179,6 +180,11 @@ struct TranscriberApp: App {
         )
         _launchGate = State(initialValue: LaunchGate(captureClient: client))
         Self.busyCoordinator = coordinator
+        // Renaming a session from the rename panel (#357): never one still in flight, and the menu's last transcript
+        // follows the new name.
+        let renamingCoordinator = coordinator
+        RenameWindowController.shared.isSessionInFlight = { renamingCoordinator.isSessionInFlight(transcript: $0) }
+        RenameWindowController.shared.onSessionRenamed = { renamingCoordinator.transcriptRenamed(from: $0, to: $1) }
         // A recording under a process that has not handed over runs without crash relaunch: re-checked on the
         // transition INTO a recording, so the row says so (final review A-I2).
         coordinator.onRecordingStarted = {

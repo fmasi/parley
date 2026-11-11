@@ -230,7 +230,7 @@ enum CLIHandler {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             RenameWindowController.shared.show(
                 jsonPath: jsonPath,
-                onDismiss: { continuation.resume() }
+                onDismiss: { _ in continuation.resume() }
             )
         }
     }
