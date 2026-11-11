@@ -74,6 +74,9 @@ struct RenameDialog: View {
     @State private var sessionName: String
     /// A Save in progress — the session's files can take a moment to rename on a slow folder.
     @State private var saving = false
+    /// Whether the recording's name is offered at all: not in the CLI's `rename-gui`, which cannot know whether the app
+    /// is still finishing or summarizing the session (#357).
+    let allowsSessionRename: Bool
     /// The speaker names, and the session name when it is a recording's (nil otherwise), for the transcript at the
     /// given path. The controller renames the session's files (`SessionRenamer`) before writing the names.
     let onSave: @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome
@@ -81,6 +84,7 @@ struct RenameDialog: View {
 
     init(
         jsonPath: URL,
+        allowsSessionRename: Bool = true,
         speakers: [SpeakerEntry],
         initialChannelNames: [String: [String: String]] = [:],
         initialEcho: EchoNotice.Findings = .none,
@@ -88,6 +92,7 @@ struct RenameDialog: View {
         onCancel: @escaping () -> Void = {}
     ) {
         self._jsonPath = State(initialValue: jsonPath)
+        self.allowsSessionRename = allowsSessionRename
         self._sessionName = State(initialValue: SessionRenamer.sessionName(ofTranscript: jsonPath) ?? "")
         self._speakers = State(initialValue: speakers)
         self._cachedChannelNames = State(initialValue: initialChannelNames)
@@ -449,10 +454,15 @@ struct RenameDialog: View {
                     }
                     stopPlayback()
                     saving = true
-                    let name = SessionRenamer.sessionName(ofTranscript: jsonPath) == nil ? nil : sessionName
+                    let name = allowsSessionRename && SessionRenamer.sessionName(ofTranscript: jsonPath) != nil
+                        ? sessionName : nil
                     let path = jsonPath
                     Task {
                         if case .notSaved(let now) = await onSave(mapping, name, path) {
+                            if now != path {
+                                // The session was renamed, the names not written: the samples' audio has new names.
+                                speakers = speakers.map { Self.relocatingSamples(of: $0, from: path, to: now) }
+                            }
                             jsonPath = now
                             saving = false
                         }
@@ -489,7 +499,7 @@ struct RenameDialog: View {
     /// new one renames every file of the recording. Hidden for a transcript that is not a recording's.
     @ViewBuilder
     private var sessionNameSection: some View {
-        if let current = SessionRenamer.sessionName(ofTranscript: jsonPath),
+        if allowsSessionRename, let current = SessionRenamer.sessionName(ofTranscript: jsonPath),
            let stamp = SessionRenamer.sessionId(ofTranscript: jsonPath)?.prefix(6) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Recording name")
@@ -511,6 +521,15 @@ struct RenameDialog: View {
                 }
             }
         }
+    }
+
+    /// `entry` with each sample's audio file under the name a session rename gave it (#357).
+    private static func relocatingSamples(of entry: SpeakerEntry, from old: URL, to new: URL) -> SpeakerEntry {
+        SpeakerEntry(id: entry.id, displayName: entry.displayName, samples: entry.samples.map { sample in
+            SpeakerSample(text: sample.text,
+                          audioFile: sample.audioFile.map { SessionRenamer.relocated($0, from: old, to: new) },
+                          start: sample.start, end: sample.end, isLocal: sample.isLocal)
+        })
     }
 
     /// Per channel, how many minority clusters the pipeline absorbed into the dominant speaker, from

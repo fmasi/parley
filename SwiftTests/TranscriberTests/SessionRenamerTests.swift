@@ -42,7 +42,7 @@ import Foundation
         let id = "093000-standup"
         for name in [".093000-standup.finalized", "093000-standup.json", "093000-standup.json.bak", "093000-standup.srt",
                      "093000-standup.txt", "093000-standup.m4a", "093000-standup-0.m4a", "093000-standup-12.m4a",
-                     "093000-standup-0.wav", "093000-standup-0_mic.wav", "093000-standup-0-RESCUED-remote.wav",
+                     "093000-standup-0.wav", "093000-standup-0_mic.wav", "093000-standup-3_mic.wav",
                      "093000-standup-summary.md", "093000-standup-summary.damaged.md", "093000-standup.diag.jsonl",
                      "093000-standup.relaunch-2.diag.jsonl", "093000-standup.diag.live.jsonl",
                      "093000-standup.damaged.json"] {
@@ -51,7 +51,10 @@ import Foundation
         for name in ["093000-standup", "093000-standup.", "093000-standup-review.json", "093000-standup-2 notes.json",
                      "093000-standup-summary", "093000-standupx.json", ".093000-standup.json.0B0E.tmp",
                      "093000-standup.json.8F7C0A8E-6B5A-4C1E-9A53-0D6A3E7F1A22.tmp", "session.json",
-                     ".093000-standup.finalized.bak", "x093000-standup.json"] {
+                     ".093000-standup.finalized.bak", "x093000-standup.json",
+                     // `-<n>` only as Parley names a chunk: a same-timestamp sibling's files, a hand-made copy.
+                     "093000-standup-3.5 review.json", "093000-standup-3.srt", "093000-standup-3-summary.md",
+                     "093000-standup-0-rescued-remote.wav", "093000-standup-0.m4a.part", "093000-standup-0_mic.m4a"] {
             #expect(!SessionRenamer.belongs(name, to: id), "\(name)")
         }
     }
@@ -91,11 +94,38 @@ import Foundation
     }
 
     @Test func anotherRecordingsTranscriptThatLooksLikeOneOfItsFilesRefusesIt() {
-        // Session "160527-2" shares the timestamp (moved in by hand): its transcript reads as chunk 2 of "160527".
+        // Session "160527-2" shares the timestamp (moved in by hand): its merged archive reads as chunk 2 of "160527".
         #expect(throws: SessionRenamer.RenameError.ambiguous) {
             try SessionRenamer.plan(folder: folder, oldId: "160527", newId: "160527-weekly",
-                                    names: ["160527.json", "160527-2.json"])
+                                    names: ["160527.json", "160527-2.json", "160527-2.m4a"])
         }
+        // Session "160527-summary": its transcript reads as a summary of "160527".
+        #expect(throws: SessionRenamer.RenameError.ambiguous) {
+            try SessionRenamer.plan(folder: folder, oldId: "160527", newId: "160527-weekly",
+                                    names: ["160527.json", "160527-summary.json"])
+        }
+    }
+
+    /// A sibling whose names cannot be taken for this session's is left alone: neither refused nor swept in.
+    @Test func aSiblingWithAnUnrelatedNameIsLeftAlone() throws {
+        let names = ["160527.json", "160527-0.m4a", "160527-3.5 review.json", "160527-3.5 review-0.m4a",
+                     "160527-3.5 review-summary.md"]
+        let plan = try SessionRenamer.plan(folder: folder, oldId: "160527", newId: "160527-weekly", names: names)
+        #expect(Set(plan.moves.map(\.from)) == ["160527.json", "160527-0.m4a"])
+    }
+
+    @Test func aSamplesAudioFollowsTheRename() {
+        let old = URL(fileURLWithPath: "/r/day/160527.json"), new = URL(fileURLWithPath: "/r/day/160527-weekly.json")
+        #expect(SessionRenamer.relocated(URL(fileURLWithPath: "/r/day/160527-1.m4a"), from: old, to: new)
+                == URL(fileURLWithPath: "/r/day/160527-weekly-1.m4a"))
+        #expect(SessionRenamer.relocated(URL(fileURLWithPath: "/r/day/160527-0_mic.wav"), from: old, to: new)
+                == URL(fileURLWithPath: "/r/day/160527-weekly-0_mic.wav"))
+        // Another folder, another session's file, no rename: as it was.
+        for path in ["/elsewhere/160527-1.m4a", "/r/day/101500-other-0.m4a"] {
+            #expect(SessionRenamer.relocated(URL(fileURLWithPath: path), from: old, to: new) == URL(fileURLWithPath: path))
+        }
+        #expect(SessionRenamer.relocated(URL(fileURLWithPath: "/r/day/160527-1.m4a"), from: old, to: old)
+                == URL(fileURLWithPath: "/r/day/160527-1.m4a"))
     }
 }
 
@@ -393,8 +423,17 @@ import Foundation
         h.coordinator.currentSessionKey = nil
         #expect(h.coordinator.isSessionInFlight(transcript: transcript, inUse: inUse))
 
-        // Its summary running.
+        // Its chunks still processing behind a Stop that stopped waiting (#226), by the session's key.
         h.appState.phase = .idle
+        h.coordinator.markChunksStillProcessingForTesting(folder.appendingPathComponent("160527-weekly").path)
+        #expect(h.coordinator.isSessionInFlight(transcript: transcript, inUse: inUse))
+        #expect(!h.coordinator.isSessionInFlight(transcript: folder.appendingPathComponent("170000-next.json"), inUse: inUse))
+    }
+
+    @Test func aSessionIsInFlightWhileItsSummaryRuns() throws {
+        let h = try Harness()
+        let transcript = h.tmp.appendingPathComponent("rec/2026-01-02/160527-weekly.json")
+        let inUse = TranscriptsInUse()
         inUse.begin(transcript)
         #expect(h.coordinator.isSessionInFlight(transcript: transcript, inUse: inUse))
         inUse.end(transcript)

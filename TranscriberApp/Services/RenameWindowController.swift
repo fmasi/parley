@@ -15,7 +15,9 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// The transcript the panel on screen edits: where it opened, until a session rename moves it (#357).
     private var presentedPath: URL?
     /// Whether a session is still being recorded, finished or summarized, so its files must not be renamed (#357):
-    /// `RecordingCoordinator.isSessionInFlight`, set by the app. Unset (the CLI's `rename-gui`): nothing is in flight.
+    /// `RecordingCoordinator.isSessionInFlight`, set by the app. Unset (the CLI's `rename-gui`, a process of its own):
+    /// whether the app is still finishing or summarizing the session cannot be known, so the dialog offers no session
+    /// rename at all.
     var isSessionInFlight: ((URL) -> Bool)?
     /// A session was renamed (#357): the app's "last transcript" follows it (`RecordingCoordinator.transcriptRenamed`).
     var onSessionRenamed: ((_ old: URL, _ new: URL) -> Void)?
@@ -119,11 +121,12 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             Logger.state.debug("Panel closed: RenameSpeakers")
             self?.panel?.close()
             self?.panel = nil
-            self?.dismissed(fallback: jsonPath)
+            self?.dismissed()
         }
 
         let dialog = RenameDialog(
             jsonPath: jsonPath,
+            allowsSessionRename: isSessionInFlight != nil,
             speakers: speakers,
             initialChannelNames: channelNames,
             initialEcho: echo,
@@ -188,12 +191,13 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     }
 
     /// The panel is gone: its dismissal runs once, with the transcript's current path.
-    private func dismissed(fallback: URL) {
-        let path = presentedPath ?? fallback
-        let callback = onDismissCallback
+    /// No path, no callback: the two are set together in `present` and cleared together here, so a panel that has
+    /// already been dismissed has neither.
+    private func dismissed() {
+        let path = presentedPath, callback = onDismissCallback
         onDismissCallback = nil
         presentedPath = nil
-        callback?(path)
+        if let path { callback?(path) }
     }
 
     // MARK: - Session rename (#357)
@@ -211,11 +215,15 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         }
         // The panel stays up until the files are renamed: closed mid-rename, its dismissal would start the auto-summary
         // on the old path while the files move (the dialog's own Cancel and Save are disabled meanwhile).
+        // And a Quit waits for it, as for the auto-summary (`TranscriberApp.isBusy`): cut short, the session would be
+        // left split across two names.
         let closeButton = panel?.standardWindowButton(.closeButton)
         closeButton?.isEnabled = false
+        PostRecordingWork.begin()
         let result = await Task.detached(priority: .userInitiated) {
             Result { try SessionRenamer.rename(transcript: path, toName: name) }
         }.value
+        PostRecordingWork.end()
         closeButton?.isEnabled = true
         switch result {
         case .success(let renamed):
@@ -247,7 +255,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         MainActor.assumeIsolated {
             Logger.state.debug("Panel closed via window button: RenameSpeakers")
             panel = nil
-            dismissed(fallback: presentedPath ?? URL(fileURLWithPath: "/"))
+            dismissed()
         }
     }
 

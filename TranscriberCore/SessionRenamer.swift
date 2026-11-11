@@ -60,7 +60,8 @@ public enum SessionRenamer {
     /// - `.<id>.finalized`, the marker;
     /// - `<id>.<anything>`: the transcript and its formats, the merged archive, the backup, the capture records
     ///   (`.diag.jsonl`, `.relaunch.diag.jsonl`, the live log and coverage), damaged copies a rebuild set aside;
-    /// - `<id>-<n>` followed by `.`, `_` or `-`: a chunk's archive, WAV, `_mic.wav`, or a copy rescued from it;
+    /// - `<id>-<n>.m4a`, `<id>-<n>.wav`, `<id>-<n>_mic.wav`: a chunk's (or a legacy segment's) archive and WAVs — only
+    ///   the names Parley writes, so `<id>-3.5 review.json` or a hand-made `<id>-0-rescued.wav` is never taken;
     /// - `<id>-summary.`: the summary and a damaged one kept aside.
     /// Never a temporary (`.tmp`): it belongs to a write in progress, not to the record.
     static func belongs(_ name: String, to id: String) -> Bool {
@@ -74,9 +75,11 @@ public enum SessionRenamer {
         if tail.hasPrefix("summary.") { return true }
         let digits = tail.prefix(while: { $0.isASCII && $0.isNumber })
         guard !digits.isEmpty else { return false }
-        guard let next = tail.dropFirst(digits.count).first else { return false }
-        return next == "." || next == "_" || next == "-"
+        return chunkSuffixes.contains(String(tail.dropFirst(digits.count)))
     }
+
+    /// What follows `<id>-<n>` in the files Parley writes for a chunk (`ChunkRotator`, `AudioArchiver`).
+    static let chunkSuffixes: Set<String> = [".m4a", ".wav", "_mic.wav"]
 
     /// `name`, one of `oldId`'s files, under `newId`.
     static func renamed(_ name: String, from oldId: String, to newId: String) -> String {
@@ -141,10 +144,13 @@ public enum SessionRenamer {
     /// when a file of `newId` that the plan does not create from one of `oldId`'s is already there.
     public static func plan(folder: URL, oldId: String, newId: String, names: [String]) throws -> Plan {
         let sources = names.filter { belongs($0, to: oldId) }.sorted()
-        // Another recording's transcript among them — `<id>-summary.json` is session "<id>-summary"'s, `<id>-2.json`
-        // session "<id>-2"'s: the name rule would take its files for this session's. (`<id>.<…>.json` is this one's:
-        // its coverage, a damaged copy.) Two sessions share a timestamp only when moved into one folder by hand.
-        if sources.contains(where: { $0.hasPrefix("\(oldId)-") && $0.hasSuffix(".json") }) {
+        // Another recording in the folder whose own files the name rule would take for this session's: session
+        // "<id>-2"'s merged `<id>-2.m4a` reads as this one's chunk 2, session "<id>-summary"'s transcript as a summary.
+        // Two sessions share a timestamp only when moved into one folder by hand.
+        if names.contains(where: { name in
+            guard let other = sessionId(ofTranscript: URL(fileURLWithPath: name)), other != oldId else { return false }
+            return belongs("\(other).m4a", to: oldId) || belongs("\(other).json", to: oldId)
+        }) {
             throw RenameError.ambiguous
         }
         let sourceSet = Set(sources)
@@ -160,6 +166,19 @@ public enum SessionRenamer {
             throw RenameError.nameTaken(newId)
         }
         return Plan(folder: folder, oldId: oldId, newId: newId, moves: moves)
+    }
+
+    /// A speaker sample's audio file after a rename from `oldTranscript` to `newTranscript`: the file under its new name
+    /// when it is one of the session's in the transcript's folder, else as it was. What lets the rename dialog still play
+    /// its samples when it stays open after a rename (#357).
+    public static func relocated(_ file: URL, from oldTranscript: URL, to newTranscript: URL) -> URL {
+        guard let oldId = sessionId(ofTranscript: oldTranscript), let newId = sessionId(ofTranscript: newTranscript),
+              oldId != newId else { return file }
+        func canonical(_ url: URL) -> String { url.standardizedFileURL.resolvingSymlinksInPath().path }
+        let folder = file.deletingLastPathComponent()
+        guard canonical(folder) == canonical(oldTranscript.deletingLastPathComponent()),
+              belongs(file.lastPathComponent, to: oldId) else { return file }
+        return folder.appendingPathComponent(renamed(file.lastPathComponent, from: oldId, to: newId))
     }
 
     // MARK: - Contents

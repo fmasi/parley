@@ -3462,6 +3462,8 @@ public final class RecordingCoordinator {
     /// session is never salvaged in this process: a second pipeline over the same files would transcribe the chunk twice
     /// and write its archive under the first. A relaunch has no such tasks, and salvages it as it stands.
     private(set) var chunksStillProcessing: Set<String> = []
+    /// Tests: a session whose chunks a Stop stopped waiting for, without hanging a real pipeline.
+    func markChunksStillProcessingForTesting(_ session: String) { chunksStillProcessing.insert(session) }
 
     /// Every chunk `processor` holds, processed — `lastChunk` (the Stop's) first — within the bound (#226). False when it
     /// ran out: recorded, and the session marked as still processing; its tasks go on, and a pending retry runs once they
