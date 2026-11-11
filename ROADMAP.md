@@ -25,14 +25,24 @@ memory to anyone.
 - **`v0.11.0`** — a quarter less memory and time per recording; optional mic echo cancellation that
   never touches the recording itself
 
-## Now — `v0.11.1` · Airgap fixes
+## Now — `v0.11.1` · Airgap and echo fixes
 - **Models change only when you ask** — a damaged model is reported, never silently deleted and
   re-downloaded during a transcription
 - **Recognised words stay off the console** — the speech engine's own logging is held to Parley's
   privacy rules
+- **Echo cancellation that can't silently miss** — the echo delay is measured over the whole
+  recording, and a cancellation that removed nothing is reported
+- **The command line never deletes your files** — files you hand it stay where they are
 
-## Next — `v0.12` · Accuracy
-Better words and better speaker attribution. Each change ships only when a benchmark proves it
+## Next — `v0.12` · Naming and accuracy
+First, naming a recording after the fact — for the meetings started in a hurry:
+
+- **Rename the session where you rename the speakers** — the recording's files follow
+- **Re-detect keeps the names you typed**, and the speaker count counts only people
+- **Open any past recording** in the rename dialog, with better voice samples
+- **The calendar title on the meeting prompt**, editable before and during the recording
+
+Then better words and better speaker attribution. Each change ships only when a benchmark proves it
 ([evaluation](docs/fluidaudio-evaluation-2026-10.md)).
 
 - **A more accurate default speech model** — Parakeet Ultra and the corrected v3 encoder, measured
@@ -48,7 +58,7 @@ Better words and better speaker attribution. Each change ships only when a bench
 ## Then — `v0.13` · Speaker memory
 - **Name someone once** — Parley recognises them in later meetings, on this Mac only (voice prints
   are biometric data: stored locally, deletable, never shared)
-- **A rename dialog built for it** — pick across sessions, with better voice samples
+- **A rename dialog built for it** — suggest the people it already knows
 - **Speaker identity the compiler checks** — one speaker type instead of matching strings
 
 ## Later — `v0.14` · The private context layer
