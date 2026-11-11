@@ -43,6 +43,7 @@ release-tools:
     bash scripts/test-publish.sh
     bash scripts/test-verify-release-feed.sh
     bash scripts/test-verify-regression-tests.sh
+    bash scripts/test-test-home.sh
 
 # CI passes the merge base with the PR's base branch, so this does too (not the raw base ref).
 # It runs the merge base's OLD tests too, so it runs under the canary as `test` does (#313).
