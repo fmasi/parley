@@ -462,6 +462,22 @@ import enum FluidAudio.OfflineDiarizationError
         #expect(metadata["diarization"] as? Bool == true && metadata["dual_stream"] as? Bool == true)
     }
 
+    /// #362: the files the CLI hands `run()` are the user's. With `keepInputs` both WAVs stay where they were, and the
+    /// archive is written beside the transcript; without it (Parley's own recording) the WAVs go once archived.
+    @Test func keepInputsLeavesBothSourceWavsInPlace() async throws {
+        for keep in [true, false] {
+            let (dir, system, mic) = try recording(); defer { try? FileManager.default.removeItem(at: dir) }
+            let runner = TranscriptionRunner()
+            runner.engineFactoryForTesting = { _ in (ScriptedEngine(speaks: [.system, .microphone]), NoSpeechDiarizer(silent: [])) }
+            var config = Config.default
+            config.preserveSourceWAV = false
+            _ = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir, config: config, keepInputs: keep)
+            let exists = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
+            #expect(exists(system) == keep && exists(mic) == keep, "keepInputs: \(keep)")
+            #expect(exists(dir.appendingPathComponent("m.m4a")), "the archive is written either way (keepInputs: \(keep))")
+        }
+    }
+
     /// ...while a diarizer that throws on a stream that DOES have words still fails the run: no transcript is written.
     @Test func aDiarizerThrowOnAStreamWithWordsStillFailsTheRun() async throws {
         let (dir, system, mic) = try recording(); defer { try? FileManager.default.removeItem(at: dir) }

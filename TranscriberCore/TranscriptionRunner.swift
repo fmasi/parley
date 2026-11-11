@@ -110,13 +110,17 @@ public final class TranscriptionRunner {
 
     public init() {}
 
+    /// Transcribes one recording's files: the CLI, and the legacy single-file recovery. Dual-stream input is archived to
+    /// AAC in `outputDirectory`; the source WAVs are then deleted unless `keepInputs` (the CLI: files it was handed are the
+    /// user's, #362) or `preserve_source_wav`.
     public func run(
         systemAudio: URL,
         micAudio: URL?,
         outputDirectory: URL,
         config: Config,
         provenance: CaptureProvenance? = nil,
-        micEchoCancel: MicEchoCancelSetup = .off
+        micEchoCancel: MicEchoCancelSetup = .off,
+        keepInputs: Bool = false
     ) async throws -> TranscriptionResult {
         let startTime = ContinuousClock.now
         detectedLanguages = []
@@ -420,7 +424,8 @@ public final class TranscriptionRunner {
                 pairs: contributingPairs,
                 outputDirectory: outputDirectory,
                 bitrateKbps: config.archiveBitrateKbps,
-                preserveSourceWAV: config.preserveSourceWAV ?? false
+                // Files the CLI was handed are the user's, never Parley's to delete (#362).
+                preserveSourceWAV: keepInputs || (config.preserveSourceWAV ?? false)
             )
             Logger.files.info("Archived \(archived.count, privacy: .public) segment(s)")
             // The transcript's audio paths: on the folder's queue, bounded (L review 217). Unanswered, the transcript is
