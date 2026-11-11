@@ -82,6 +82,15 @@ public enum SpeakerAssignment {
     /// exclude it, or it will fire on nearly every real meeting and become noise.
     public static let unknownSpeaker = "Unknown"
 
+    /// A channel's unattributed label, "Local Unknown" / "Remote Unknown": the lines on that channel
+    /// nobody could be tied to. An absence of attribution, never a person — so everything that
+    /// counts people on a channel (`TranscriptRediarizer`'s stored count, the rename dialog's
+    /// stepper via `EchoNotice.Findings.people`) leaves it out, and `tagWithSourcePrefix` writes it.
+    /// One definition, so the label written and the label left out cannot drift apart (#360).
+    public static func unattributedLabel(source: String) -> String {
+        "\(source == "local" ? "Local" : "Remote") \(unknownSpeaker)"
+    }
+
     /// Set aside a repeat that ABUTS the previous segment (a decoder stutter — or "No. No." split
     /// at the punctuation, which is two spoken words). A repeat further away is a real repeated
     /// answer and stays in `segments` (P2).
@@ -808,7 +817,7 @@ public enum SpeakerAssignment {
             } else {
                 // Unknown/empty on a known channel: still attribute the SIDE so the segment is
                 // identifiable as `Local Unknown` / `Remote Unknown` rather than a bare `Unknown` (#71).
-                segments[i].speaker = "\(label) \(unknownSpeaker)"
+                segments[i].speaker = unattributedLabel(source: source)
             }
         }
     }

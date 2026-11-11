@@ -363,7 +363,7 @@ public enum TranscriptRediarizer {
         for i in labeled.indices { labeled[i].source = source }
         SpeakerAssignment.tagWithSourcePrefix(&labeled)
 
-        let unattributed = labelPrefix(for: source) + SpeakerAssignment.unknownSpeaker
+        let unattributed = SpeakerAssignment.unattributedLabel(source: source)
         var segments = rawSegments
         // One rule for every line on this channel that is already flagged (`filtered`, `echo`,
         // `duplicate`, no usable time), on either channel and whether or not the echo check runs
@@ -416,10 +416,8 @@ public enum TranscriptRediarizer {
         // the stepper there were 2 speakers on a channel holding one speaker plus some
         // unattributable backchannels. An echo cluster is the other side's voice, not a person on
         // this one (#243). A label that only flagged lines carry is not counted either.
-        // Built from `labelPrefix(for:)` so the channel-prefix format lives in one place. Note this
-        // is a runtime string comparison, NOT a compile-time guarantee: if `tagWithSourcePrefix`
-        // ever stops using "<Prefix><Unknown>", this silently over-counts again, so the two must
-        // change together.
+        // `SpeakerAssignment.unattributedLabel(source:)` is the one definition of that label:
+        // `tagWithSourcePrefix` writes it and the rename dialog's stepper leaves it out (#360).
         let visible = labeled.filter { !$0.isFlagged }
         let echoClusters = Set((echo?.echoLabels ?? []).compactMap { finalLabels[$0] })
         let found = Set(visible.map(\.speaker)).subtracting([unattributed]).subtracting(echoClusters).count
@@ -591,7 +589,7 @@ public enum TranscriptRediarizer {
                   let text = dict["text"] as? String else { return nil }
             return LabeledSegment(
                 start: start, end: end,
-                speaker: dict["speaker"] as? String ?? labelPrefix(for: "remote") + SpeakerAssignment.unknownSpeaker,
+                speaker: dict["speaker"] as? String ?? SpeakerAssignment.unattributedLabel(source: "remote"),
                 text: text, source: "remote")
         }
         // The raw clusters' embeddings are passed as evidence. The transcript holds none for the

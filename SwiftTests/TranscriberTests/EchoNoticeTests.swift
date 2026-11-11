@@ -189,6 +189,20 @@ import AVFoundation
         #expect(findings([:]).people(on: "local", rows: [you, echo]) == 2)
     }
 
+    /// "<Prefix> Unknown" is the lines nobody could be tied to, not a person (#360): a channel with
+    /// two speakers and an Unknown row pre-filled the stepper with 3.
+    @Test func thePeopleCountLeavesTheUnknownRowOut() {
+        let plain = findings([:])
+        #expect(plain.people(on: "remote", rows: [r1, r2, "Remote Unknown"]) == 2)
+        #expect(plain.people(on: "local", rows: [you, "Local Unknown"]) == 1)
+        // With an echo voice too: both are left out.
+        #expect(findings(speakerMode).people(on: "local", rows: [you, echo, "Local Unknown"]) == 1)
+        // A channel holding only the Unknown row still offers 1, the least the stepper asks for.
+        #expect(plain.people(on: "remote", rows: ["Remote Unknown"]) == 1)
+        // The recorded count still floors it.
+        #expect(findings(["speaker_count_remote": 3]).people(on: "remote", rows: [r1, r2, "Remote Unknown"]) == 3)
+    }
+
     /// The rows leave out speakers with only a few lines; a re-detect recorded how many people it found.
     @Test func thePeopleCountIsNeverBelowTheRecordedOne() {
         var metadata = speakerMode
