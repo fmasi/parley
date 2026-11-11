@@ -54,8 +54,8 @@ The full process, and why each step exists: [docs/development-process.md](docs/d
   and checks the throwaway home and passes the standard flags. Never set `CFFIXED_USER_HOME` inline
   (`CFFIXED_USER_HOME="$(…)" swift test`): when the command fails, the value is empty, which means
   the real home. The test bundle refuses to start in the real home (`SwiftTests/TestHomeGuard`).
-- `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier)
-  and of the red-first gate's own classifier.
+- `just release-tools`: the stdlib tests of the release scripts (appcast, publish, feed verifier),
+  of the red-first gate's own classifier, and of the test home's cleanup (#355).
 - `just red-first [base]`: the PR's changed tests must be RED at the merge base and GREEN at HEAD.
   It runs under the same canary, since it runs the merge base's old tests too.
 - `just build`: build the app bundle (app + XPC service) without installing it. A debug build: it
