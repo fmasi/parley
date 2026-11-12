@@ -180,11 +180,6 @@ struct TranscriberApp: App {
         )
         _launchGate = State(initialValue: LaunchGate(captureClient: client))
         Self.busyCoordinator = coordinator
-        // Renaming a session from the rename panel (#357): never one still in flight, and the menu's last transcript
-        // follows the new name.
-        let renamingCoordinator = coordinator
-        RenameWindowController.shared.isSessionInFlight = { renamingCoordinator.isSessionInFlight(transcript: $0) }
-        RenameWindowController.shared.onSessionRenamed = { renamingCoordinator.transcriptRenamed(from: $0, to: $1) }
         // A recording under a process that has not handed over runs without crash relaunch: re-checked on the
         // transition INTO a recording, so the row says so (final review A-I2).
         coordinator.onRecordingStarted = {
@@ -208,6 +203,13 @@ struct TranscriberApp: App {
            Self.cliSubcommands.contains(first) {
             CLIHandler.run()  // Never returns
         }
+
+        // Renaming a session from the rename panel (#357): never one still in flight, and the menu's last transcript
+        // follows the new name. Wired only after the CLI check: the CLI's `rename-gui` runs in its own process, whose
+        // idle coordinator cannot see what the GUI app is still finishing, so it must offer no session rename at all.
+        let renamingCoordinator = coordinator
+        RenameWindowController.shared.isSessionInFlight = { renamingCoordinator.isSessionInFlight(transcript: $0) }
+        RenameWindowController.shared.onSessionRenamed = { renamingCoordinator.transcriptRenamed(from: $0, to: $1) }
 
         // Single-instance guard (#109): the crash-recovery LaunchAgent can make launchd spawn a
         // duplicate GUI copy while a user-launched instance is already running. Keep only the oldest

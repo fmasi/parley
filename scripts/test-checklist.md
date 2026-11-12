@@ -1348,12 +1348,12 @@ your own lowercase test names. `ls -la` the day folder before and after each ste
       (the auto-summary starts), reopen Rename Speakers… for the same transcript and change the
       name: the alert says the recording is still being finished; once the summary is written it
       renames, summary included.
+- [ ] **S-09 A transcript that is not a recording's** (`Parley transcribe some.wav` → `some.json`,
+      opened with the file picker): no "Recording name" section.
 - [ ] **S-10 rename-gui.** `Parley rename-gui <transcript>`: no "Recording name" section (the CLI
       cannot know whether the app is still summarizing it).
 - [ ] **S-11 Quit during a rename.** On a slow folder (a share), Save a new name and Quit at once:
       the Quit waits for the rename; the folder holds the session under one name only.
-- [ ] **S-09 A transcript that is not a recording's** (`Parley transcribe some.wav` → `some.json`,
-      opened with the file picker): no "Recording name" section.
 - [ ] **U-01 Unknown is not a person (#360).** Open a transcript with a "Remote Unknown" (or
       "Local Unknown") row and two speaker rows on that side: the "Other side" stepper pre-fills **2**,
       not 3.
