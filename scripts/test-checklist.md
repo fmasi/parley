@@ -611,26 +611,38 @@ get** — run them all.
 ## Re-detect keeps the names already typed (#359) — added 2026-11-12
 
 Use a recording with speech you can play (a public podcast or video on the remote side, never a real
-third party) where the other side came out as three speakers for two people.
+third party) where the other side came out as three speakers for two people. The rule: a new speaker
+keeps a name only when most of its lines had the name, most of the name's lines went to it, and no
+other new speaker took a quarter or more of them; every other name is a Suggested button.
 
-- [ ] **N-01 Names follow their voices.** Name all three remote rows (two of them as the same person,
-      e.g. "Anna" and "Anna (2)", the third "Bob"), do NOT save, set "Other side" to 2 and press
-      Re-detect. Confirm the alert (it lists the names). PASS: the two new rows' fields hold "Anna"
-      and "Bob" on the rows whose samples are Anna's and Bob's voices; the Anna card says the name
-      was kept from before; "Anna (2)" appears as a Suggested button on Anna's row; the line under
-      "Other side" says "Names kept: Anna and Bob" and lists "Anna (2)" as a suggestion.
-- [ ] **N-02 Nothing is guessed.** Re-detect the same channel at 1. PASS: one row; it keeps the name
-      with most of the speech only if that name had more than half of it, otherwise the field shows
-      the label and every name is a Suggested button. Click one: the field takes it.
-- [ ] **N-03 The other side is untouched.** Type a name on a "This side" row without saving, then
+- [ ] **RN-01 Names follow their voices.** Name all three remote rows (two of them as the same
+      person, e.g. "Anna" and "Anna (2)", the third "Bob"), do NOT save, set "Other side" to 2 and
+      press Re-detect. PASS: the alert lists the names and says Save writes them to the transcript;
+      afterwards the two new rows' fields hold "Anna" and "Bob" on the rows whose samples are Anna's
+      and Bob's voices; the Anna card says the name was kept from before; "Anna (2)" is a Suggested
+      button on Anna's row; the line under "Other side" says "Names kept: Anna and Bob", lists
+      "Anna (2)" as a suggestion and ends "Save to write them to the transcript."
+- [ ] **RN-02 A split name is not guessed.** Re-detect a channel where one named person's lines end
+      up on two new speakers (raise the count above the number of people). PASS: when the smaller
+      part is a quarter or more of that name's lines, neither row keeps it and both show it as a
+      Suggested button. Click one: the field takes it.
+- [ ] **RN-03 The card note follows the field.** On a kept row, change the name. PASS: the "Kept …"
+      note goes; type the kept name back and it returns.
+- [ ] **RN-04 The other side is untouched.** Type a name on a "This side" row without saving, then
       re-detect "Other side". PASS: the typed name is still in the field afterwards.
-- [ ] **N-04 An echo voice takes no name.** On a loudspeaker recording with an echo voice on "This
-      side", name your row and the echo row, re-detect "This side" at 1. PASS: your name is kept on
-      your row, the echo row's field shows its label (no name, no suggestion), and the echo row's
-      old name is listed as not kept.
-- [ ] **N-05 Saved means saved.** Save, reopen: the kept names are in the transcript; Cancel after a
-      re-detect instead: the transcript's names on that channel are gone (in
+- [ ] **RN-05 An echo voice takes no name.** On a loudspeaker recording with an echo voice on "This
+      side", name your row and the echo row (Save once so the echo row is renamed), reopen,
+      re-detect "This side" at 1. PASS: your name is kept on your row, the echo row's field shows its
+      label (no name, no suggestion), and the echo row's old name is listed as not kept.
+- [ ] **RN-06 Closing asks first.** After RN-01, press Cancel, then Escape, then the window's close
+      button. PASS: each asks "Close without saving the names?", naming the kept names; "Keep
+      Editing" leaves everything as it was. With nothing kept (or after Save) nothing is asked.
+- [ ] **RN-07 Saved means saved.** Save, reopen: the kept names are in the transcript. Close after a
+      re-detect without saving instead: the transcript's names on that channel are gone (in
       `speaker_names_previous`), as before #359.
+- [ ] **RN-08 A second re-detect keeps the unclaimed suggestions.** After RN-01, re-detect "Other
+      side" again at 2 without clicking "Anna (2)". PASS: the outcome line still lists "Anna (2)" as
+      not kept. A re-detect that fails or is cancelled leaves the Suggested buttons where they were.
 
 ## Re-detect keeps the echo voice apart (#243) — added 2026-10-01
 

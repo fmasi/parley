@@ -11,10 +11,12 @@ import Foundation
 ///
 /// The rule is deliberately strict, because a name on the wrong voice is the silent wrong answer
 /// this product exists to avoid (the reason names were dropped at all, #202):
-/// - a new speaker KEEPS a name when more than half of its speech carried that name before, AND
-///   more than half of that name's speech went to it. Both halves: the first says the new speaker
-///   is mostly that person, the second that it is where that person went. So one name is kept on at
-///   most one new speaker, and one new speaker keeps at most one name;
+/// - a new speaker KEEPS a name when more than half of its speech carried that name before, more
+///   than half of that name's speech went to it, AND no other new speaker took a quarter or more of
+///   that name's speech. The first says the new speaker is mostly that person, the second that it is
+///   where that person went, the third that the name was not split: raising the count usually means
+///   one label was really two people, and the larger half of a 60/40 split is a guess. So one name
+///   is kept on at most one new speaker, and one new speaker keeps at most one name;
 /// - a name not kept anywhere is OFFERED as a suggestion — on each new speaker that took at least a
 ///   quarter of its speech, and always on the one that took the most — never filled in;
 /// - the names typed on one person split in two ("Anna" on two rows) count as one person.
@@ -26,7 +28,8 @@ import Foundation
 ///
 /// The transcript itself still drops the channel's names at a re-detect (`clearingChannelNames`,
 /// stashed under `speaker_names_previous`): the kept names go back into the dialog's fields, where
-/// the person sees them and saves them, or not.
+/// the person sees them and saves them, or not. The copy says so, and closing the dialog with kept
+/// names unsaved asks first (`discardConfirmation`).
 public enum SpeakerNameCarryOver {
 
     // MARK: - Speech shared between old and new labels
@@ -174,7 +177,8 @@ public enum SpeakerNameCarryOver {
 
     /// "Most" is more than this share, of the new speaker's speech and of the name's.
     static let most = 0.5
-    /// A name not kept is offered on every new speaker that took at least this share of its speech.
+    /// A name not kept is offered on every new speaker that took at least this share of its speech;
+    /// a name with a second speaker this large is not kept at all — it was split.
     static let offerShare = 0.25
 
     /// Where each name goes. See the type's comment for the rule.
@@ -199,8 +203,11 @@ public enum SpeakerNameCarryOver {
         for (name, perNew) in shared {
             guard let total = speech[name], total > 0 else { continue }
             for (new, seconds) in perNew {
-                guard let newTotal = overlap.newSpeech[new], newTotal > 0 else { continue }
-                if seconds / newTotal > most && seconds / total > most { kept[new] = name }
+                guard let newTotal = overlap.newSpeech[new], newTotal > 0,
+                      seconds / newTotal > most, seconds / total > most else { continue }
+                // Not split: no other new speaker holds a quarter or more of this name.
+                let split = perNew.contains { $0.key != new && $0.value >= offerShare * total }
+                if !split { kept[new] = name }
             }
         }
 
@@ -222,6 +229,40 @@ public enum SpeakerNameCarryOver {
         let notKept = allNames.subtracting(keptNames)
             .sorted { (speech[$0] ?? 0, $1) > (speech[$1] ?? 0, $0) }
         return Plan(kept: kept, suggestions: suggestions, notKept: notKept)
+    }
+
+    /// `plan(_:names:uncarriable:)` from what the dialog holds: its name fields on the channel (row
+    /// label → text, saved or not), the echo findings the transcript recorded before the re-detect,
+    /// and the plan of an earlier re-detect of the same channel in this dialog, if any.
+    ///
+    /// - A row the echo check judged to be the other side's voice (`echo.voice(forRow:)`, which
+    ///   follows the renames `speaker_names` records) is not a person on this side: a name typed on it
+    ///   is never carried or offered, only reported as not kept.
+    /// - The earlier plan's suggestions that no field holds now were never claimed: they are reported
+    ///   as not kept again, so a second re-detect does not drop them silently. (Their speech is under
+    ///   labels that no longer exist, so they cannot be offered anywhere.)
+    public static func plan(
+        _ overlap: Overlap, fields: [String: String], echo: EchoNotice.Findings, previous: Plan? = nil
+    ) -> Plan {
+        let names = names(fields: fields, oldLabels: overlap.oldSpeech.keys)
+        let echoRows = Set(names.keys.filter { echo.voice(forRow: $0) != nil })
+        let plan = plan(overlap, names: names, uncarriable: echoRows)
+        guard let previous else { return plan }
+        let inFields = Set(names.values)
+        let reported = Set(plan.notKept).union(plan.kept.values)
+        let unclaimed = Set(previous.suggestions.values.flatMap { $0 })
+            .subtracting(inFields).subtracting(reported).sorted()
+        return Plan(kept: plan.kept, suggestions: plan.suggestions, notKept: plan.notKept + unclaimed)
+    }
+
+    /// The kept names not yet saved, across the dialog's channels, in each channel's order: what a
+    /// Cancel or a close would lose.
+    public static func unsavedKeptNames(in plans: [String: Plan]) -> [String] {
+        var names: [String] = []
+        for channel in plans.keys.sorted() {
+            for name in plans[channel]?.keptNames ?? [] where !names.contains(name) { names.append(name) }
+        }
+        return names
     }
 
     /// The dialog's name fields after a re-detect, by row label.
@@ -255,10 +296,11 @@ public enum SpeakerNameCarryOver {
         return (
             "Re-detect the speakers on \(side)?",
             named
-                + "A name stays on a new speaker only when most of that speaker's lines had the name and most of "
-                + "the name's lines went to that speaker. Any other name is left off and shown as a suggestion, "
-                + "never filled in — a name on the wrong voice would put it on the wrong words. "
-                + "Check the names before you save. Names on \(other) are unaffected."
+                + "A name stays on a new speaker only when most of that speaker's lines had the name, most of "
+                + "the name's lines went to that speaker, and no other speaker took a large share of them. Any other name is left off and shown as a "
+                + "suggestion, never filled in — a name on the wrong voice would put it on the wrong words. "
+                + "The re-detect removes these names from the transcript; the ones kept come back in the fields. "
+                + "Check them, then Save to write them to the transcript. Names on \(other) are unaffected."
         )
     }
 
@@ -277,13 +319,28 @@ public enum SpeakerNameCarryOver {
         if !lost.isEmpty {
             sentences.append("Not kept or suggested: \(list(lost)).")
         }
+        // The transcript lost the channel's names at the re-detect: they are only in the fields now.
+        if !kept.isEmpty { sentences.append("Save to write them to the transcript.") }
         return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
 
-    /// The note on a speaker card whose name was kept; nil otherwise.
-    public static func cardNote(forRow row: String, plan: Plan) -> String? {
-        guard let name = plan.kept[row] else { return nil }
+    /// The note on a speaker card whose name was kept, while its field (trimmed) still holds that
+    /// name; nil otherwise — once the person changes the name, the note no longer describes it.
+    public static func cardNote(forRow row: String, field: String, plan: Plan) -> String? {
+        guard let name = plan.kept[row], field.trimmingCharacters(in: .whitespacesAndNewlines) == name else { return nil }
         return "Kept “\(name)” from before the re-detect: most of these lines had that name. Play a sample to check."
+    }
+
+    /// Asked before Cancel, Escape or closing the window throws away kept names not yet saved.
+    public static func discardConfirmation(names: [String]) -> (title: String, message: String, discard: String, keep: String) {
+        (
+            "Close without saving the names?",
+            "The re-detect kept \(list(names)), but \(names.count == 1 ? "it is" : "they are") only in the fields — "
+                + "not in the transcript. Closing now leaves \(names.count == 1 ? "that speaker" : "those speakers") "
+                + "unnamed in the transcript.",
+            "Close Without Saving",
+            "Keep Editing"
+        )
     }
 
     /// "A", "A and B", "A, B and C".
