@@ -84,13 +84,18 @@ public enum TranscriptRediarizer {
 
     /// Clear the re-diarized channel's speaker names, stashing them under `speaker_names_previous`.
     ///
-    /// Names are NOT carried across a re-detect, and this is deliberate (#202). Speaker numbering
-    /// is positional: "Remote Speaker 1" after a fresh clustering is whichever cluster that run
-    /// happened to emit first, which can easily be a different person. Keeping a name because its
+    /// Names are NOT carried across a re-detect BY KEY, and this is deliberate (#202). Speaker
+    /// numbering is positional: "Remote Speaker 1" after a fresh clustering is whichever cluster that
+    /// run happened to emit first, which can easily be a different person. Keeping a name because its
     /// key survived therefore re-points it at a voice nobody chose it for — silent mislabelling of
-    /// a record this product asks people to rely on. Losing a name is recoverable in seconds from
-    /// the rows on screen; a name attached to the wrong voice is not recoverable at all, because
-    /// nothing about it looks wrong.
+    /// a record this product asks people to rely on. A name attached to the wrong voice is not
+    /// recoverable at all, because nothing about it looks wrong.
+    ///
+    /// What does carry a name is the speech itself (#359): `Outcome.labelOverlap` says which new
+    /// speaker took which old label's lines, and the rename dialog puts a name back in a new
+    /// speaker's field only where most of the speech on both sides matches
+    /// (`SpeakerNameCarryOver`), for the person to see and save. The transcript keeps none of them
+    /// until then.
     ///
     /// The cleared map is stashed rather than discarded so a mistaken re-detect leaves a trail, and
     /// it MERGES into any existing stash — overwriting would throw away the other channel's history
@@ -133,6 +138,11 @@ public enum TranscriptRediarizer {
         /// The lines on this channel that check flagged `echo`, those that already carried the flag
         /// and were confirmed included. 0 when the check did not run.
         public let echoFlagged: Int
+        /// The speech each label the channel had before shares with each label it has now (#359):
+        /// what lets the rename dialog keep the names already typed where the voice clearly matches
+        /// (`SpeakerNameCarryOver`). Only lines that are somebody's vote, and an echo cluster is not
+        /// among the new labels.
+        public var labelOverlap: SpeakerNameCarryOver.Overlap = .none
     }
 
     /// A coarse phase report for a running `rediarize`, so a caller can show more than a bare
@@ -406,8 +416,8 @@ public enum TranscriptRediarizer {
         }
         segments = mergeRelabeled(into: segments, source: source, relabeled: labeled)
         json["segments"] = segments
-        // The channel's names go, they are not carried over — see `clearingChannelNames`. The
-        // dialog warns before reaching here, so this is never a surprise.
+        // The channel's names go from the transcript — see `clearingChannelNames`. The dialog warns
+        // before reaching here, and puts back in its fields the names the speech carries (#359).
         metadata = clearingChannelNames(in: metadata, source: source)
         // Persist what the diarizer actually PRODUCED, not what was requested. They diverge — on
         // 2026-09-02 a request for 2 could yield 1 — and a stored request would misreport the
@@ -468,8 +478,14 @@ public enum TranscriptRediarizer {
             }
             try DurableFile.replace(url, with: out)
         }
+        // Before and after, the same lines (#359): an echo cluster is not a person on this side, so
+        // no name can go to it.
+        let overlap = SpeakerNameCarryOver.Overlap(
+            old: SpeakerNameCarryOver.votingLines(in: rawSegments, source: source),
+            new: SpeakerNameCarryOver.votingLines(in: segments, source: source, excluding: echoClusters))
         let outcome = Outcome(speakerCount: found, segmentsRelabeled: visible.count,
-                              echoClusters: echo?.echoLabels.count ?? 0, echoFlagged: echo?.result.flaggedCount ?? 0)
+                              echoClusters: echo?.echoLabels.count ?? 0, echoFlagged: echo?.result.flaggedCount ?? 0,
+                              labelOverlap: overlap)
         Logger.transcription.info(
             "Re-diarized \(source, privacy: .public) at \(speakerCount, privacy: .public) speakers: \(found, privacy: .public) label(s) across \(outcome.segmentsRelabeled, privacy: .public) segments, \(outcome.echoClusters, privacy: .public) echo cluster(s), \(outcome.echoFlagged, privacy: .public) segment(s) flagged as echo")
         return outcome
