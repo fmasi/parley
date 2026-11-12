@@ -588,15 +588,17 @@ get** — run them all.
       `SpeakerCountEnforcer: merged N cluster(s) to honour the stated count of 1`.
 - [ ] **Count 2 and 3 still behave.** Re-detect the same channel at 2, then 3. Each must produce at
       most the stated number of speakers, and never more.
-- [ ] **Re-detect warns before clearing names (#202).** Name at least one speaker on a channel and
-      Save. Reopen the rename dialog and press Re-detect on that channel. An alert must appear
-      saying the names on that side will be cleared, before any work starts (no spinner first).
+- [ ] **Re-detect asks first when the channel has names (#202, #359).** Name at least one speaker on
+      a channel and Save. Reopen the rename dialog and press Re-detect on that channel. An alert
+      must appear naming that side and its names, and saying a name stays only where the voice
+      clearly matches, before any work starts (no spinner first).
 - [ ] **Cancel changes nothing.** Dismiss that alert with Cancel: no spinner, no rewrite, the rows
       and names are exactly as they were. Reopen the transcript to confirm it is byte-for-byte
       unchanged in substance — same speakers, same names.
-- [ ] **Confirming clears only that channel.** Press Re-detect again and confirm. Afterwards the
-      re-detected channel's rows show plain `Local Speaker N` / `Remote Speaker N` labels with empty
-      name fields, and **the other channel's names are still there**.
+- [ ] **Confirming touches only that channel.** Press Re-detect again and confirm. Afterwards the
+      re-detected channel's rows show `Local Speaker N` / `Remote Speaker N` labels, their fields
+      holding the names kept (#359, below) or the label, and **the other channel's names are still
+      there** — a name typed there and not yet saved included.
 - [ ] **The old names are recoverable.** In the transcript JSON, `metadata.speaker_names_previous`
       contains the cleared name(s); the other channel's entries in `metadata.speaker_names` survive.
 - [ ] **Re-nameable afterwards.** Type new names into the rebuilt rows, Save, reopen: the names
@@ -605,6 +607,30 @@ get** — run them all.
       `speaker_names_previous` now holds the newer names and has not lost the other channel's.
 - [ ] **No warning when there is nothing to lose.** On a channel with no names at all, Re-detect
       must run straight away with no alert.
+
+## Re-detect keeps the names already typed (#359) — added 2026-11-12
+
+Use a recording with speech you can play (a public podcast or video on the remote side, never a real
+third party) where the other side came out as three speakers for two people.
+
+- [ ] **N-01 Names follow their voices.** Name all three remote rows (two of them as the same person,
+      e.g. "Anna" and "Anna (2)", the third "Bob"), do NOT save, set "Other side" to 2 and press
+      Re-detect. Confirm the alert (it lists the names). PASS: the two new rows' fields hold "Anna"
+      and "Bob" on the rows whose samples are Anna's and Bob's voices; the Anna card says the name
+      was kept from before; "Anna (2)" appears as a Suggested button on Anna's row; the line under
+      "Other side" says "Names kept: Anna and Bob" and lists "Anna (2)" as a suggestion.
+- [ ] **N-02 Nothing is guessed.** Re-detect the same channel at 1. PASS: one row; it keeps the name
+      with most of the speech only if that name had more than half of it, otherwise the field shows
+      the label and every name is a Suggested button. Click one: the field takes it.
+- [ ] **N-03 The other side is untouched.** Type a name on a "This side" row without saving, then
+      re-detect "Other side". PASS: the typed name is still in the field afterwards.
+- [ ] **N-04 An echo voice takes no name.** On a loudspeaker recording with an echo voice on "This
+      side", name your row and the echo row, re-detect "This side" at 1. PASS: your name is kept on
+      your row, the echo row's field shows its label (no name, no suggestion), and the echo row's
+      old name is listed as not kept.
+- [ ] **N-05 Saved means saved.** Save, reopen: the kept names are in the transcript; Cancel after a
+      re-detect instead: the transcript's names on that channel are gone (in
+      `speaker_names_previous`), as before #359.
 
 ## Re-detect keeps the echo voice apart (#243) — added 2026-10-01
 

@@ -290,7 +290,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `processing_issues`, after a re-detect of the mic channel: the track's `echo_flagged` / `echo_cluster` entries are replaced by one of each for the whole channel (no `chunk`), when there is something to report. A transcript with no `processing_issues` key (the CLI path) gets none.
 - `metadata.mic_echo_cancel` is left as the pipeline wrote it: a re-detect of the mic channel cancels the archive's mic again (from the AAC, so close to, not identical with, the first pass) but records nothing new.
 - `metadata.echo_segments_flagged` follows the segments: it is the number carrying `echo: true` after the rewrite.
-- `metadata.speaker_names_previous` — the names a re-detect cleared from the channel, kept so a mistaken one is recoverable.
+- `metadata.speaker_names_previous` — the names a re-detect cleared from the channel, kept so a mistaken one is recoverable. The rename dialog puts back in its fields the names the speech carries (#359, "Names after a re-detect" below); they reach `speaker_names` only when the user saves.
 
 **Storage limit** (#224):
 - `metadata.audio_removed` — `{at, files, reason}` when the storage limit (`audio_archive_limit_hours`) deleted some of the audio this transcript lists: `at` the ISO 8601 time of the latest removal, `files` the deleted file names (names only, never paths; a later removal adds to the list), `reason` `"storage_limit"`. Nothing else in the transcript changes: `audio_files` / `audio_paths` still list what there was, and the segments are untouched. Absent while all its audio is there.
@@ -376,7 +376,7 @@ A stated count is about people. With the far side on loudspeakers the diarizer f
 4. The segments are labelled with the result:
    - a line of an echo cluster carries that cluster's own label; its matched lines are flagged `echo`, its unmatched lines are not. Nothing of it is given to the stated speaker, and at a count of 1 unattributed speech is never folded into it;
    - in any other cluster a matched line of 3 words or more is flagged `echo` and takes the channel's unattributed label (`Local Unknown`). It is never relabelled to a stated speaker, and it does not keep the label it had before the re-detect either (#277): after a repair that label is the user's, and the words are the other side's. A 1–2-word match is an ordinary line.
-5. The metadata is rewritten as listed under "Re-detect" in the transcript metadata above; `Outcome` reports `speakerCount` (people), `segmentsRelabeled` (unflagged lines labelled), `echoClusters` and `echoFlagged`.
+5. The metadata is rewritten as listed under "Re-detect" in the transcript metadata above; `Outcome` reports `speakerCount` (people), `segmentsRelabeled` (unflagged lines labelled), `echoClusters`, `echoFlagged` and `labelOverlap` (the speech each old label shares with each new one, #359).
 
 What follows from that:
 
@@ -389,6 +389,17 @@ What follows from that:
 - **The unattributed label is nobody.** A line flagged outside an echo cluster adds no person to `speaker_count_<track>`, no entry to `echo_clusters`, no row to the rename dialog and no participant to the summary; a rename does not reach it.
 - **The other channel is not checked.** The deduplicator judges mic clusters against system audio and has no answer to the reverse, so re-detecting the remote channel does what it always did, except that its flagged lines take `Remote Unknown` (#296). One consequence: the keys of `echo_clusters[].matched_remote` are the remote labels at the time of the check, and a later re-detect of the remote channel does not rewrite them.
 - **If the raw labelling is ever not one-to-one** the check is skipped (logged as an error) and the re-detect is the unguarded one: a relabel must never lose or misplace words.
+
+### Names after a re-detect (#359)
+
+Speaker numbers are positional, so a name cannot follow its label across a re-detect (#202). It follows its speech instead: the lines before and after are the same lines, and `SpeakerNameCarryOver` (TranscriberCore) maps them. The dialog only gathers the inputs and shows the result.
+
+- **What votes.** The channel's unflagged lines with a usable time, under a label that is somebody's: never a flagged line (`echo`, `filtered`, `duplicate`, no usable time) and never the unattributed label. On the new side an echo cluster's lines are left out altogether, so no name can land on it. `Outcome.labelOverlap` holds the seconds each old label shares with each new one, by time (a split line counts in parts), plus each label's own total.
+- **Which names.** What the channel's name fields hold when the re-detect ends, saved or typed and not yet saved; a field that is empty or holds a pipeline label (`Remote Speaker 2`, `Remote Unknown`) is no name. A label no row shows (too few lines) that is not a pipeline label is a saved name. One name typed on two rows is one person: their speech is pooled. A name typed on an echo row is never carried, nor offered.
+- **Kept.** A new speaker keeps a name when more than half of its speech had that name AND more than half of that name's speech went to it. So a name is kept on at most one new speaker and a new speaker keeps at most one name. Two names merged into one speaker: the one with more speech is kept (it holds more than half), the other offered.
+- **Offered, never filled in.** A name not kept is offered as a one-click suggestion on every new speaker that took at least a quarter of its speech, and always on the one that took the most.
+- **Said.** Before: the confirmation names the side and its names and states the rule (which name lands where is only known after). After: a kept name's card says so, a suggestion is a button under the name field, and the channel's row lists the names kept, those only suggested and those neither. The other channel's fields, typed and unsaved included, are left as they were.
+- **The transcript.** Unchanged by this: the re-detect still clears the channel's `speaker_names` into `speaker_names_previous`; the fields reach the transcript on Save.
 
 ### What the user is told (#244)
 
