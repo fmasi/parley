@@ -164,9 +164,10 @@ struct TranscriberApp: App {
             },
             presentTranscript: { jsonPath, config in
                 // Queued: several salvaged transcripts open one rename panel at a time (L review 90).
-                RenameWindowController.shared.enqueue(jsonPath: jsonPath) {
-                    // Auto-summarize after rename completes (so summary has real speaker names)
-                    MenuView.autoSummarize(jsonPath: jsonPath, config: config)
+                RenameWindowController.shared.enqueue(jsonPath: jsonPath) { finalPath in
+                    // Auto-summarize after rename completes (so summary has real speaker names), on the
+                    // transcript's path as the panel left it: a renamed session's new one (#357).
+                    MenuView.autoSummarize(jsonPath: finalPath, config: config)
                 }
             },
             onSystemAudioPermissionDenied: {
@@ -202,6 +203,13 @@ struct TranscriberApp: App {
            Self.cliSubcommands.contains(first) {
             CLIHandler.run()  // Never returns
         }
+
+        // Renaming a session from the rename panel (#357): never one still in flight, and the menu's last transcript
+        // follows the new name. Wired only after the CLI check: the CLI's `rename-gui` runs in its own process, whose
+        // idle coordinator cannot see what the GUI app is still finishing, so it must offer no session rename at all.
+        let renamingCoordinator = coordinator
+        RenameWindowController.shared.isSessionInFlight = { renamingCoordinator.isSessionInFlight(transcript: $0) }
+        RenameWindowController.shared.onSessionRenamed = { renamingCoordinator.transcriptRenamed(from: $0, to: $1) }
 
         // Single-instance guard (#109): the crash-recovery LaunchAgent can make launchd spawn a
         // duplicate GUI copy while a user-launched instance is already running. Keep only the oldest

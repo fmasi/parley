@@ -150,17 +150,20 @@ public enum EchoNotice {
             EchoNotice.redetectHint(echoVoices: voices.filter { $0.track == track }.count)
         }
 
-        /// How many PEOPLE the speaker-count stepper offers for a channel: its rows that are not an
-        /// echo voice. A stated count is a count of people (`SpeakerCountEnforcer` keeps an echo
-        /// cluster out of it), so pre-filling the number of rows would ask for one speaker too many.
+        /// How many PEOPLE the speaker-count stepper offers for a channel: its rows that are neither
+        /// an echo voice nor the channel's unattributed label ("Remote Unknown"). A stated count is a
+        /// count of people (`SpeakerCountEnforcer` keeps an echo cluster out of it, and the stored
+        /// `speaker_count_<track>` leaves the unattributed label out), so pre-filling the number of
+        /// rows would ask for one speaker too many (#244, #360).
         ///
         /// Never below what a re-detect recorded in `speaker_count_<track>` — the rows leave out a
         /// speaker with only a few lines — and never below 1, the least the stepper can ask for.
         ///
         /// - Parameter rows: the labels of the channel's speaker rows.
         public func people(on track: String, rows: [String]) -> Int {
-            let echoRows = Set(voices.filter { $0.track == track }.flatMap { rowLabels(of: $0.label) })
-            return max(1, rows.filter { !echoRows.contains($0) }.count, recordedPeople[track] ?? 0)
+            var notPeople = Set(voices.filter { $0.track == track }.flatMap { rowLabels(of: $0.label) })
+            notPeople.insert(SpeakerAssignment.unattributedLabel(source: track))
+            return max(1, rows.filter { !notPeople.contains($0) }.count, recordedPeople[track] ?? 0)
         }
 
         /// The lines the completion notice counts: 0 when no label was judged echo, else every line

@@ -9,7 +9,18 @@ import TranscriberCore
 final class RenameWindowController: NSObject, NSWindowDelegate {
     static let shared = RenameWindowController()
     private var panel: NSPanel?
-    private var onDismissCallback: (() -> Void)?
+    /// Called with the transcript's path as the panel closes — its NEW path when the session was renamed (#357), so the
+    /// auto-summary that follows reads and writes under the new name.
+    private var onDismissCallback: ((URL) -> Void)?
+    /// The transcript the panel on screen edits: where it opened, until a session rename moves it (#357).
+    private var presentedPath: URL?
+    /// Whether a session is still being recorded, finished or summarized, so its files must not be renamed (#357):
+    /// `RecordingCoordinator.isSessionInFlight`, set by the app. Unset (the CLI's `rename-gui`, a process of its own):
+    /// whether the app is still finishing or summarizing the session cannot be known, so the dialog offers no session
+    /// rename at all.
+    var isSessionInFlight: ((URL) -> Bool)?
+    /// A session was renamed (#357): the app's "last transcript" follows it (`RecordingCoordinator.transcriptRenamed`).
+    var onSessionRenamed: ((_ old: URL, _ new: URL) -> Void)?
     /// The in-flight parse+present task. A second `show()` cancels the first, so two rapid calls
     /// cannot both reach `present()` and leave an orphaned panel on screen.
     private var showTask: Task<Void, Never>?
@@ -21,19 +32,20 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// The app's rename panels, one at a time (L review 90): a recovery pass that salvages several recordings
     /// presents each transcript in turn, and a rename asked for from the menu waits for the one on screen —
     /// never a panel superseding another (whose auto-summary would then never run).
-    private lazy var queue = OneAtATimeQueue<(jsonPath: URL, onDismiss: (() -> Void)?)> { [weak self] item, done in
-        self?.show(jsonPath: item.jsonPath) {
-            item.onDismiss?()
+    private lazy var queue = OneAtATimeQueue<(jsonPath: URL, onDismiss: ((URL) -> Void)?)> { [weak self] item, done in
+        self?.show(jsonPath: item.jsonPath) { finalPath in
+            item.onDismiss?(finalPath)
             done()
         }
     }
 
-    /// Present the rename panel for `jsonPath` once the one on screen (if any) is dismissed.
-    func enqueue(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
+    /// Present the rename panel for `jsonPath` once the one on screen (if any) is dismissed. `onDismiss` gets the
+    /// transcript's path when the panel closes: a new one if its session was renamed (#357).
+    func enqueue(jsonPath: URL, onDismiss: ((URL) -> Void)? = nil) {
         queue.enqueue((jsonPath, onDismiss))
     }
 
-    func show(jsonPath: URL, onDismiss: (() -> Void)? = nil) {
+    func show(jsonPath: URL, onDismiss: ((URL) -> Void)? = nil) {
         // Supersede any in-flight show: cancel its task and close its panel, so two rapid calls
         // cannot both reach present() and orphan a window.
         showTask?.cancel()
@@ -58,7 +70,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             defer { self.endPreparing(request) }
             let parsed = await RenameReads.shared.read(transcript: jsonPath) { Self.parseSpeakersAndChannelNames(from: $0) }
             guard !Task.isCancelled else {
-                onDismiss?()
+                onDismiss?(jsonPath)
                 return
             }
             guard let (speakers, channelNames, echo) = parsed else {
@@ -70,7 +82,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                     + "Rename its speakers later with “Rename Speakers…” in the menu."
                 alert.alertStyle = .informational
                 alert.runModal()
-                onDismiss?()
+                onDismiss?(jsonPath)
                 return
             }
             guard !speakers.isEmpty else {
@@ -82,7 +94,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                     + "(a .json produced alongside a recording), not session.json or another file."
                 alert.alertStyle = .informational
                 alert.runModal()
-                onDismiss?()
+                onDismiss?(jsonPath)
                 return
             }
             self.present(jsonPath: jsonPath, speakers: speakers, channelNames: channelNames, echo: echo, onDismiss: onDismiss)
@@ -99,28 +111,38 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// Build and show the panel. Main actor; assumes `speakers` is non-empty.
     private func present(
         jsonPath: URL, speakers: [SpeakerEntry], channelNames: [String: [String: String]],
-        echo: EchoNotice.Findings, onDismiss: (() -> Void)?
+        echo: EchoNotice.Findings, onDismiss: ((URL) -> Void)?
     ) {
 
         self.onDismissCallback = onDismiss
+        self.presentedPath = jsonPath
 
         let closePanel = { [weak self] in
             Logger.state.debug("Panel closed: RenameSpeakers")
             self?.panel?.close()
             self?.panel = nil
-            self?.onDismissCallback?()
-            self?.onDismissCallback = nil
+            self?.dismissed()
         }
 
         let dialog = RenameDialog(
             jsonPath: jsonPath,
+            allowsSessionRename: isSessionInFlight != nil,
             speakers: speakers,
             initialChannelNames: channelNames,
             initialEcho: echo,
-            onSave: { mapping in
-                guard TranscriptRenamer.applyRenames(mapping, jsonPath: jsonPath) else {
+            onSave: { [weak self] mapping, sessionName, path in
+                // The session's files first (#357): a refusal leaves everything as it was, the panel open.
+                var path = path
+                if let sessionName, let self {
+                    guard let renamed = await self.renameSession(at: path, to: sessionName) else {
+                        return .notSaved(jsonPath: path)
+                    }
+                    path = renamed
+                }
+                guard TranscriptRenamer.applyRenames(mapping, jsonPath: path) else {
                     // Keep the panel open: the names are still in the fields, so the user can
-                    // retry rather than discovering later that nothing was saved.
+                    // retry rather than discovering later that nothing was saved. On the transcript's
+                    // path now, which a session rename just above may have changed.
                     let alert = NSAlert()
                     alert.messageText = "Couldn't save speaker names"
                     alert.informativeText =
@@ -128,13 +150,15 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                         + "available and has free space, then try again."
                     alert.alertStyle = .warning
                     alert.runModal()
-                    return
+                    return .notSaved(jsonPath: path)
                 }
-                Task.detached { Self.generateFormatFile(jsonPath: jsonPath) }
+                Task.detached { Self.generateFormatFile(jsonPath: path) }
                 closePanel()
+                return .saved
             },
-            onCancel: {
-                Task.detached { Self.generateFormatFile(jsonPath: jsonPath) }
+            onCancel: { [weak self] in
+                let path = self?.presentedPath ?? jsonPath
+                Task.detached { Self.generateFormatFile(jsonPath: path) }
                 closePanel()
             }
         )
@@ -166,14 +190,72 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         Logger.state.debug("Panel shown: RenameSpeakers")
     }
 
+    /// The panel is gone: its dismissal runs once, with the transcript's current path.
+    /// No path, no callback: the two are set together in `present` and cleared together here, so a panel that has
+    /// already been dismissed has neither.
+    private func dismissed() {
+        let path = presentedPath, callback = onDismissCallback
+        onDismissCallback = nil
+        presentedPath = nil
+        if let path { callback?(path) }
+    }
+
+    // MARK: - Session rename (#357)
+
+    /// Rename the session of the transcript at `path` to `name`: the new transcript path, `path` itself when the name
+    /// gives the same id, nil when it was refused or failed (said in an alert; nothing changed, or — a rollback that
+    /// failed — said so). The files are renamed off the main actor: the folder can be a slow share.
+    private func renameSession(at path: URL, to name: String) async -> URL? {
+        guard let oldId = SessionRenamer.sessionId(ofTranscript: path),
+              SessionRenamer.newSessionId(oldId: oldId, name: name) != oldId
+        else { return path }
+        guard isSessionInFlight?(path) != true else {
+            sessionRenameAlert(SessionRenamer.RenameError.inProgress.errorDescription ?? "")
+            return nil
+        }
+        // The panel stays up until the files are renamed: closed mid-rename, its dismissal would start the auto-summary
+        // on the old path while the files move (the dialog's own Cancel and Save are disabled meanwhile).
+        // And a Quit waits for it, as for the auto-summary (`TranscriberApp.isBusy`): cut short, the session would be
+        // left split across two names.
+        let closeButton = panel?.standardWindowButton(.closeButton)
+        closeButton?.isEnabled = false
+        PostRecordingWork.begin()
+        let result = await Task.detached(priority: .userInitiated) {
+            Result { try SessionRenamer.rename(transcript: path, toName: name) }
+        }.value
+        PostRecordingWork.end()
+        closeButton?.isEnabled = true
+        switch result {
+        case .success(let renamed):
+            if renamed != path {
+                presentedPath = renamed
+                onSessionRenamed?(path, renamed)
+            }
+            return renamed
+        case .failure(let error):
+            Logger.files.error("Session rename failed: \(error, privacy: .private)")
+            // Only our own messages verbatim: they name no path (the dialog can be on a shared screen).
+            sessionRenameAlert((error as? SessionRenamer.RenameError)?.errorDescription
+                               ?? "The recording could not be renamed. Nothing was changed.")
+            return nil
+        }
+    }
+
+    private func sessionRenameAlert(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't rename the recording"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
     // MARK: - NSWindowDelegate
 
     nonisolated func windowWillClose(_ notification: Notification) {
         MainActor.assumeIsolated {
             Logger.state.debug("Panel closed via window button: RenameSpeakers")
             panel = nil
-            onDismissCallback?()
-            onDismissCallback = nil
+            dismissed()
         }
     }
 

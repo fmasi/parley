@@ -1315,3 +1315,45 @@ speakers, not headphones) so the mic hears the far side.
 - [ ] Run the app from a terminal (`/Applications/Parley.app/Contents/MacOS/Parley`), record and transcribe 30 s of speech: no FluidAudio lines and no recognised words on stderr.
 - [ ] CLI: `Parley download-models` still downloads into an empty test home; `Parley transcribe <file>` with a model missing fails with "not downloaded", never fetches it.
 - [ ] While a recording is being transcribed, switch Settings → Transcription to an engine whose model is missing (or hide `speaker-diarization` aside) and Save: no download starts; the row reads "…when you save, once the recording is stopped and transcribed". Save again once idle: it downloads.
+
+## Rename the recording from the rename dialog (#357), and the Unknown row (#360) — added 2026-11-11
+
+Synthetic recordings only (a podcast or `say` through the speakers): the names below are examples, use
+your own lowercase test names. `ls -la` the day folder before and after each step.
+
+- [ ] **S-01 The field.** Record 30 s without a name, Stop. The rename dialog shows "Recording name"
+      above the speakers: the timestamp (`HHMMSS-`) in grey, then an empty Name field. Type a name:
+      a grey line "Saving renames the recording's audio, transcript and summary files." appears;
+      clear it again and the line goes.
+- [ ] **S-02 Save renames everything.** Type `rename test`, name one speaker, Save. In the folder:
+      `HHMMSS-rename test.json`, `.srt`/`.txt`, `-0.m4a` (every chunk), `.diag.jsonl` and
+      `.json.bak` if they were there, `.HHMMSS-rename test.finalized`; no file of the old name left.
+      Once the auto-summary is written it is `HHMMSS-rename test-summary.md` and its last line reads
+      ``*Source transcript: `HHMMSS-rename test.json`*``. In the JSON, `metadata.audio_files` and
+      `audio_paths` name the new files; the marker's `session_id` / `transcript` name the new id.
+      The speaker name is applied.
+- [ ] **S-03 It still plays and re-detects.** Menu → Rename Speakers… opens the renamed transcript
+      directly (no file picker); its play buttons play; Re-detect on either side works.
+- [ ] **S-04 Rename again, and back.** Rename it to `other test`, then to an empty name: the files
+      end as `HHMMSS.json` etc., the summary's source line follows each time.
+- [ ] **S-05 Case only.** Rename `rename test` to `Rename Test`: the files change case, nothing else
+      is in the folder twice.
+- [ ] **S-06 A taken name.** Make a copy of the transcript named `HHMMSS-taken.json`, try to rename
+      to `taken`: an alert "A recording named "HHMMSS-taken" is already in this folder…", the dialog
+      stays open, no file changed. Delete the copy.
+- [ ] **S-07 While it is being finished.** Stop a recording and, as soon as the dialog appears, type a
+      name and Save at once: either it renames, or the alert says the recording is still being
+      finished and the dialog stays open; Save a few seconds later renames it.
+- [ ] **S-08 While its summary runs.** With a slow summary endpoint configured, Save the dialog
+      (the auto-summary starts), reopen Rename Speakers… for the same transcript and change the
+      name: the alert says the recording is still being finished; once the summary is written it
+      renames, summary included.
+- [ ] **S-09 A transcript that is not a recording's** (`Parley transcribe some.wav` → `some.json`,
+      opened with the file picker): no "Recording name" section.
+- [ ] **S-10 rename-gui.** `Parley rename-gui <transcript>`: no "Recording name" section (the CLI
+      cannot know whether the app is still summarizing it).
+- [ ] **S-11 Quit during a rename.** On a slow folder (a share), Save a new name and Quit at once:
+      the Quit waits for the rename; the folder holds the session under one name only.
+- [ ] **U-01 Unknown is not a person (#360).** Open a transcript with a "Remote Unknown" (or
+      "Local Unknown") row and two speaker rows on that side: the "Other side" stepper pre-fills **2**,
+      not 3.
