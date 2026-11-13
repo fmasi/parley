@@ -89,9 +89,9 @@ struct RenameDialog: View {
     /// given path. The controller renames the session's files (`SessionRenamer`) before writing the names.
     let onSave: @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome
     let onCancel: () -> Void
-    /// The kept names not yet saved, each time they change (#359): the window asks before a close
+    /// The names a close would lose, each time they change (#359): the window asks before a close
     /// throws them away.
-    let onUnsavedKeptNamesChange: ([String]) -> Void
+    let onUnsavedNamesChange: ([String]) -> Void
 
     init(
         jsonPath: URL,
@@ -101,7 +101,7 @@ struct RenameDialog: View {
         initialEcho: EchoNotice.Findings = .none,
         onSave: @escaping @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome,
         onCancel: @escaping () -> Void = {},
-        onUnsavedKeptNamesChange: @escaping ([String]) -> Void = { _ in }
+        onUnsavedNamesChange: @escaping ([String]) -> Void = { _ in }
     ) {
         self._jsonPath = State(initialValue: jsonPath)
         self.allowsSessionRename = allowsSessionRename
@@ -111,7 +111,7 @@ struct RenameDialog: View {
         self._echo = State(initialValue: initialEcho)
         self.onSave = onSave
         self.onCancel = onCancel
-        self.onUnsavedKeptNamesChange = onUnsavedKeptNamesChange
+        self.onUnsavedNamesChange = onUnsavedNamesChange
     }
 
     /// Ask before a Cancel, Escape or a window close throws away kept names not yet saved (#359).
@@ -408,7 +408,8 @@ struct RenameDialog: View {
                         // The transcript HAS been rewritten at this point. Silently keeping the old
                         // rows would show a stale speaker list under a dialog that looked like it
                         // succeeded — worse than saying nothing happened.
-                        rediarizeError = "Re-detection finished but the speaker list could not be reloaded."
+                        rediarizeError = "Re-detection finished but the speaker list could not be reloaded. "
+                            + "Names typed on \(channel == "local" ? "this side" : "the other side") were not carried over."
                         // The rows on screen carry labels the transcript no longer has: no name is
                         // carried, and none is matched to the new labels by position (#202). The
                         // channel's fields go back to their labels; Save and Re-detect wait for a
@@ -427,7 +428,8 @@ struct RenameDialog: View {
                         // before it: a name typed on an echo row is never carried. An earlier
                         // re-detect's suggestions nobody took are reported again, not dropped.
                         let plan = SpeakerNameCarryOver.plan(
-                            outcome.labelOverlap, fields: fields(on: channel), echo: echo, previous: carryOver[channel])
+                            outcome.labelOverlap, fields: fields(on: channel), echo: echo, channel: channel,
+                            previous: carryOver[channel])
                         carryOver[channel] = plan
                         let fields = SpeakerNameCarryOver.fields(
                             rows: refreshed.map { ($0.id, self.channel(of: $0)) },
@@ -483,6 +485,13 @@ struct RenameDialog: View {
                 }
             }
         }
+    }
+
+    /// The names a Cancel or a close would lose (#359): what the fields hold on each channel a
+    /// re-detect rewrote. Watched, so the window's close button asks too.
+    private var unsavedNames: [String] {
+        SpeakerNameCarryOver.unsavedNames(
+            fields: Dictionary(uniqueKeysWithValues: carryOver.keys.map { ($0, fields(on: $0)) }), plans: carryOver)
     }
 
     /// The name fields of a channel's rows, by row label.
@@ -546,7 +555,7 @@ struct RenameDialog: View {
                 Spacer()
                 Button("Cancel") {
                     // Escape lands here too (`.cancelAction`). Kept names not yet saved are asked about (#359).
-                    guard Self.confirmDiscard(names: SpeakerNameCarryOver.unsavedKeptNames(in: carryOver)) else { return }
+                    guard Self.confirmDiscard(names: unsavedNames) else { return }
                     rediarizeTask?.cancel()
                     onCancel()
                 }
@@ -589,8 +598,8 @@ struct RenameDialog: View {
         .padding(20)
         .frame(width: 400)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
-        .onChange(of: carryOver) { _, plans in
-            onUnsavedKeptNamesChange(SpeakerNameCarryOver.unsavedKeptNames(in: plans))
+        .onChange(of: unsavedNames) { _, names in
+            onUnsavedNamesChange(names)
         }
         .task {
             // Off the main actor: a long meeting's transcript is several hundred KB.

@@ -235,17 +235,19 @@ public enum SpeakerNameCarryOver {
     /// label → text, saved or not), the echo findings the transcript recorded before the re-detect,
     /// and the plan of an earlier re-detect of the same channel in this dialog, if any.
     ///
-    /// - A row the echo check judged to be the other side's voice (`echo.voice(forRow:)`, which
-    ///   follows the renames `speaker_names` records) is not a person on this side: a name typed on it
-    ///   is never carried or offered, only reported as not kept.
+    /// - A row the echo check judged to be the other side's voice ON THIS CHANNEL
+    ///   (`echo.voice(forRow:)`, which follows the renames `speaker_names` records, with its track the
+    ///   re-detected `channel`) is not a person on this side: a name typed on it is never carried or
+    ///   offered, only reported as not kept. The check judges only the mic side, so a remote speaker
+    ///   that happens to share a local echo row's name is not one.
     /// - The earlier plan's suggestions that no field holds now were never claimed: they are reported
     ///   as not kept again, so a second re-detect does not drop them silently. (Their speech is under
     ///   labels that no longer exist, so they cannot be offered anywhere.)
     public static func plan(
-        _ overlap: Overlap, fields: [String: String], echo: EchoNotice.Findings, previous: Plan? = nil
+        _ overlap: Overlap, fields: [String: String], echo: EchoNotice.Findings, channel: String, previous: Plan? = nil
     ) -> Plan {
         let names = names(fields: fields, oldLabels: overlap.oldSpeech.keys)
-        let echoRows = Set(names.keys.filter { echo.voice(forRow: $0) != nil })
+        let echoRows = Set(names.keys.filter { echo.voice(forRow: $0)?.track == channel })
         let plan = plan(overlap, names: names, uncarriable: echoRows)
         guard let previous else { return plan }
         let inFields = Set(names.values)
@@ -255,14 +257,21 @@ public enum SpeakerNameCarryOver {
         return Plan(kept: plan.kept, suggestions: plan.suggestions, notKept: plan.notKept + unclaimed)
     }
 
-    /// The kept names not yet saved, across the dialog's channels, in each channel's order: what a
-    /// Cancel or a close would lose.
-    public static func unsavedKeptNames(in plans: [String: Plan]) -> [String] {
-        var names: [String] = []
+    /// What a Cancel or a close would lose: the names the fields hold on every channel a re-detect
+    /// rewrote in this dialog (one with a plan). That re-detect took the channel's names out of the
+    /// transcript, so whatever its fields hold — kept, taken from a suggestion, edited or typed — is
+    /// only there until Save. By channel, then by row label.
+    ///
+    /// - Parameter fields: channel → row label → what its name field holds.
+    public static func unsavedNames(fields: [String: [String: String]], plans: [String: Plan]) -> [String] {
+        var unsaved: [String] = []
         for channel in plans.keys.sorted() {
-            for name in plans[channel]?.keptNames ?? [] where !names.contains(name) { names.append(name) }
+            let named = names(fields: fields[channel] ?? [:], oldLabels: [])
+            for label in named.keys.sorted(by: { $0.localizedStandardCompare($1) == .orderedAscending }) {
+                if let name = named[label], !unsaved.contains(name) { unsaved.append(name) }
+            }
         }
-        return names
+        return unsaved
     }
 
     /// The dialog's name fields after a re-detect, by row label.
@@ -335,7 +344,7 @@ public enum SpeakerNameCarryOver {
     public static func discardConfirmation(names: [String]) -> (title: String, message: String, discard: String, keep: String) {
         (
             "Close without saving the names?",
-            "The re-detect kept \(list(names)), but \(names.count == 1 ? "it is" : "they are") only in the fields — "
+            "\(list(names)) \(names.count == 1 ? "is" : "are") only in the fields since the re-detect — "
                 + "not in the transcript. Closing now leaves \(names.count == 1 ? "that speaker" : "those speakers") "
                 + "unnamed in the transcript.",
             "Close Without Saving",

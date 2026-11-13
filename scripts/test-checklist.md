@@ -634,9 +634,14 @@ other new speaker took a quarter or more of them; every other name is a Suggeste
       side", name your row and the echo row (Save once so the echo row is renamed), reopen,
       re-detect "This side" at 1. PASS: your name is kept on your row, the echo row's field shows its
       label (no name, no suggestion), and the echo row's old name is listed as not kept.
-- [ ] **RN-06 Closing asks first.** After RN-01, press Cancel, then Escape, then the window's close
-      button. PASS: each asks "Close without saving the names?", naming the kept names; "Keep
-      Editing" leaves everything as it was. With nothing kept (or after Save) nothing is asked.
+- [ ] **RN-06 Closing asks first.** After RN-01, take a Suggested button on one row, edit a kept
+      name on another, then press Cancel, then Escape, then the window's close button. PASS: each
+      asks "Close without saving the names?", naming what the re-detected side's fields hold now
+      (the edited name, the suggestion taken); "Keep Editing" leaves everything as it was. With no
+      re-detect in this dialog, or after Save, nothing is asked.
+- [ ] **RN-06b Same name on both sides.** On a loudspeaker recording whose echo row on "This side"
+      was saved as "Bob", name a remote speaker "Bob" too, then re-detect "Other side". PASS: the
+      remote "Bob" is kept like any other name (it is not taken for the echo row).
 - [ ] **RN-07 Saved means saved.** Save, reopen: the kept names are in the transcript. Close after a
       re-detect without saving instead: the transcript's names on that channel are gone (in
       `speaker_names_previous`), as before #359.
