@@ -325,7 +325,7 @@ import Foundation
         let new = relabel(old) { $0.label == "Fred" ? "Local Speaker 1" : "Local Speaker 2" }
         let plan = SpeakerNameCarryOver.plan(
             SpeakerNameCarryOver.Overlap(old: old, new: new),
-            fields: ["Fred": "Fred", "Bob": "Bob"], echo: EchoNotice.Findings(metadata: echoMetadata))
+            fields: ["Fred": "Fred", "Bob": "Bob"], echo: EchoNotice.Findings(metadata: echoMetadata), channel: "local")
         #expect(plan.kept == ["Local Speaker 1": "Fred"])
         #expect(plan.suggestions.isEmpty)
         #expect(plan.notKept == ["Bob"])
@@ -339,9 +339,26 @@ import Foundation
         metadata["speaker_names"] = nil
         let plan = SpeakerNameCarryOver.plan(
             SpeakerNameCarryOver.Overlap(old: old, new: new),
-            fields: ["Local Speaker 1": "Fred", "Local Speaker 2": "Bob"], echo: EchoNotice.Findings(metadata: metadata))
+            fields: ["Local Speaker 1": "Fred", "Local Speaker 2": "Bob"], echo: EchoNotice.Findings(metadata: metadata), channel: "local")
         #expect(plan.kept == ["Local Speaker 1": "Fred"])
         #expect(plan.notKept == ["Bob"])
+    }
+
+    /// The echo check judges only the mic side. A remote speaker saved under the same name as a local
+    /// echo row is somebody on the other side, and its name is carried like any other.
+    @Test("a remote row with the same name as a local echo row is not an echo row")
+    func theEchoMatchIsPerTrack() {
+        let old = lines("Bob", count: 10, offset: 0) + lines("Remote Speaker 2", count: 3, offset: 1)
+        let new = relabel(old) { $0.label == "Bob" ? "Remote Speaker 1" : "Remote Speaker 2" }
+        let overlap = SpeakerNameCarryOver.Overlap(old: old, new: new)
+        let echo = EchoNotice.Findings(metadata: echoMetadata)   // the local echo row is named "Bob"
+        let remote = SpeakerNameCarryOver.plan(overlap, fields: ["Bob": "Bob"], echo: echo, channel: "remote")
+        #expect(remote.kept == ["Remote Speaker 1": "Bob"])
+        #expect(remote.notKept.isEmpty)
+        // The same row on the mic side is the echo voice, and is not carried.
+        let local = SpeakerNameCarryOver.plan(overlap, fields: ["Bob": "Bob"], echo: echo, channel: "local")
+        #expect(local.kept.isEmpty)
+        #expect(local.notKept == ["Bob"])
     }
 
     @Test("without echo findings the same names are carried as usual")
@@ -349,7 +366,7 @@ import Foundation
         let old = lines("Fred", count: 10, offset: 0) + lines("Bob", count: 10, offset: 1)
         let new = relabel(old) { $0.label == "Fred" ? "Local Speaker 1" : "Local Speaker 2" }
         let plan = SpeakerNameCarryOver.plan(
-            SpeakerNameCarryOver.Overlap(old: old, new: new), fields: ["Fred": "Fred", "Bob": "Bob"], echo: .none)
+            SpeakerNameCarryOver.Overlap(old: old, new: new), fields: ["Fred": "Fred", "Bob": "Bob"], echo: .none, channel: "local")
         #expect(plan.kept == ["Local Speaker 1": "Fred", "Local Speaker 2": "Bob"])
     }
 
@@ -365,7 +382,7 @@ import Foundation
         let new = relabel(old) { $0.label }
         let plan = SpeakerNameCarryOver.plan(
             SpeakerNameCarryOver.Overlap(old: old, new: new),
-            fields: ["Remote Speaker 1": "Anna", "Remote Speaker 2": "Bob"], echo: .none, previous: first)
+            fields: ["Remote Speaker 1": "Anna", "Remote Speaker 2": "Bob"], echo: .none, channel: "remote", previous: first)
         #expect(plan.kept == ["Remote Speaker 1": "Anna", "Remote Speaker 2": "Bob"])
         #expect(plan.notKept == ["Anna (2)"])
     }
@@ -375,7 +392,7 @@ import Foundation
         let first = SpeakerNameCarryOver.Plan(kept: [:], suggestions: ["Remote Speaker 1": ["Anna", "Carl"]], notKept: ["Anna", "Carl"])
         let old = lines("Remote Speaker 1", count: 6, offset: 0)
         let plan = SpeakerNameCarryOver.plan(
-            SpeakerNameCarryOver.Overlap(old: old, new: old), fields: ["Remote Speaker 1": "Carl"], echo: .none, previous: first)
+            SpeakerNameCarryOver.Overlap(old: old, new: old), fields: ["Remote Speaker 1": "Carl"], echo: .none, channel: "remote", previous: first)
         #expect(plan.kept == ["Remote Speaker 1": "Carl"])
         #expect(plan.notKept == ["Anna"])
     }
@@ -456,8 +473,8 @@ import Foundation
     @Test("closing with kept names not saved asks first, naming them")
     func discardCopy() {
         let plan = SpeakerNameCarryOver.Plan(kept: ["Remote Speaker 1": "Anna", "Remote Speaker 2": "Bob"], suggestions: [:], notKept: [])
-        #expect(SpeakerNameCarryOver.unsavedKeptNames(in: ["remote": plan, "local": .none]) == ["Anna", "Bob"])
-        #expect(SpeakerNameCarryOver.unsavedKeptNames(in: ["local": .none]).isEmpty)
+        #expect(SpeakerNameCarryOver.unsavedNames(
+            fields: ["remote": ["Remote Speaker 1": "Anna", "Remote Speaker 2": "Bob"]], plans: ["remote": plan]) == ["Anna", "Bob"])
         let copy = SpeakerNameCarryOver.discardConfirmation(names: ["Anna", "Bob"])
         #expect(copy.title == "Close without saving the names?")
         #expect(copy.message.contains("Anna and Bob"))
@@ -473,6 +490,31 @@ import Foundation
         #expect(SpeakerNameCarryOver.cardNote(forRow: "Remote Speaker 1", field: "  Anna ", plan: plan) != nil)
         #expect(SpeakerNameCarryOver.cardNote(forRow: "Remote Speaker 2", field: "Bob", plan: plan) == nil)
         #expect(SpeakerNameCarryOver.cardNote(forRow: "Remote Speaker 3", field: "x", plan: .none) == nil)
+    }
+
+    /// The close prompt reads the fields, not the plan: after a re-detect the transcript has none of
+    /// that channel's names, so whatever its fields hold is what a close would lose.
+    @Test("the close prompt lists what the re-detected channel's fields hold, however the names got there")
+    func theClosePromptReadsTheFields() {
+        let plan = SpeakerNameCarryOver.Plan(
+            kept: ["Remote Speaker 1": "Anna", "Remote Speaker 2": "Bob"], suggestions: ["Remote Speaker 3": ["Carl"]], notKept: ["Carl"])
+        let fields: [String: [String: String]] = [
+            "remote": [
+                "Remote Speaker 1": "Anna B",           // a kept name, edited
+                "Remote Speaker 2": " ",                // a kept name, cleared
+                "Remote Speaker 3": "Carl",             // taken from a Suggested button
+                "Remote Speaker 4": "Dana",             // typed
+                "Remote Speaker 5": "Remote Speaker 5", // untouched
+            ],
+            // A channel nobody re-detected: its names are still in the transcript, or were never asked about.
+            "local": ["Local Speaker 1": "Fred"],
+        ]
+        #expect(SpeakerNameCarryOver.unsavedNames(fields: fields, plans: ["remote": plan]) == ["Anna B", "Carl", "Dana"])
+        // No re-detect, nothing to ask: Cancel discards typed names as it always did.
+        #expect(SpeakerNameCarryOver.unsavedNames(fields: fields, plans: [:]).isEmpty)
+        // A re-detect that kept nothing still leaves names typed since in fields only.
+        #expect(SpeakerNameCarryOver.unsavedNames(fields: ["remote": ["Remote Speaker 1": "Eve"]], plans: ["remote": .none]) == ["Eve"])
+        #expect(SpeakerNameCarryOver.unsavedNames(fields: ["remote": ["Remote Speaker 1": "Remote Speaker 1"]], plans: ["remote": plan]).isEmpty)
     }
 
     @Test("the kept note goes once the field no longer holds the kept name")
