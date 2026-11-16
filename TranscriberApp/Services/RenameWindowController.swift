@@ -19,6 +19,9 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// whether the app is still finishing or summarizing the session cannot be known, so the dialog offers no session
     /// rename at all.
     var isSessionInFlight: ((URL) -> Bool)?
+    /// Whether Parley is idle (not recording, not finishing a recording), set by the app: a past recording opens only
+    /// then (#29 review). Unset (the CLI's `rename-gui`): idle.
+    var isIdle: (() -> Bool)?
     /// A session was renamed (#357): the app's "last transcript" follows it (`RecordingCoordinator.transcriptRenamed`).
     var onSessionRenamed: ((_ old: URL, _ new: URL) -> Void)?
     /// A name chosen while the recording ran that its finish could not apply (#358,
@@ -38,8 +41,18 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// The app's rename panels, one at a time (L review 90): a recovery pass that salvages several recordings
     /// presents each transcript in turn, and a rename asked for from the menu waits for the one on screen —
     /// never a panel superseding another (whose auto-summary would then never run).
-    private lazy var queue = OneAtATimeQueue<(jsonPath: URL, onDismiss: ((URL) -> Void)?)> { [weak self] item, done in
-        self?.show(jsonPath: item.jsonPath) { finalPath in
+    ///
+    /// A past recording's pick (#29) is decided HERE, right before its panel shows, not when it was made: it can wait
+    /// behind another panel while a recording starts or its own auto-summary begins (#29 review).
+    private lazy var queue = OneAtATimeQueue<(jsonPath: URL, onDismiss: ((URL) -> Void)?, pastPick: Bool)> { [weak self] item, done in
+        guard let self else { return done() }
+        if item.pastPick, case .refuse(let title, let message) = PastRecordings.openDecision(
+            isIdle: self.isIdle?() ?? true, isSessionInFlight: self.isSessionInFlight?(item.jsonPath) == true) {
+            Logger.files.info("Rename: a past recording was not opened — Parley or the recording is not done")
+            Self.inform(title: title, message: message)
+            return done()
+        }
+        self.show(jsonPath: item.jsonPath, pastPick: item.pastPick) { finalPath in
             item.onDismiss?(finalPath)
             done()
         }
@@ -48,29 +61,38 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// Present the rename panel for `jsonPath` once the one on screen (if any) is dismissed. `onDismiss` gets the
     /// transcript's path when the panel closes: a new one if its session was renamed (#357).
     func enqueue(jsonPath: URL, onDismiss: ((URL) -> Void)? = nil) {
-        queue.enqueue((jsonPath, onDismiss))
+        queue.enqueue((jsonPath, onDismiss, false))
     }
 
-    /// Open a past recording chosen in the menu's picker (#29), any recording, not only the latest. It is
-    /// refused while still being recorded, finished or summarized (`RecordingCoordinator.isSessionInFlight`), since its
-    /// transcript can still be rewritten under the dialog. Nothing runs when its panel closes: no auto-summary, and the menu's
-    /// last transcript is not touched. Only the newest recording's own flow (`presentTranscript`) does either.
+    /// Open a past recording chosen in the menu's picker (#29), any recording, not only the latest. Refused, when its turn
+    /// comes, while Parley is not idle or the recording is still being finished or summarized (the queue decides). Nothing
+    /// runs when its panel closes: no auto-summary, and the menu's last transcript is not touched — only the newest
+    /// recording's own flow (`presentTranscript`) does either. The transcript on screen comes forward instead of opening
+    /// twice; a pick that has to wait says so.
     func openPastRecording(_ jsonPath: URL) {
-        switch PastRecordings.openDecision(isSessionInFlight: isSessionInFlight?(jsonPath) == true) {
-        case .open:
-            enqueue(jsonPath: jsonPath)
-        case .refuse(let title, let message):
-            Logger.files.info("Rename: a recording still in flight was not opened")
-            let alert = NSAlert()
-            alert.messageText = title
-            alert.informativeText = message
-            alert.alertStyle = .informational
+        switch PastRecordings.placement(of: jsonPath, onScreen: panel == nil ? nil : presentedPath, queueBusy: queue.isBusy) {
+        case .bringToFront:
+            panel?.makeKeyAndOrderFront(nil)
             NSApp.activate()
-            alert.runModal()
+        case .openNow:
+            queue.enqueue((jsonPath, nil, true))
+        case .opensNext:
+            queue.enqueue((jsonPath, nil, true))
+            Self.inform(title: "The rename window is in use", message: PastRecordings.opensNextNotice)
         }
     }
 
-    func show(jsonPath: URL, onDismiss: ((URL) -> Void)? = nil) {
+    private static func inform(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        NSApp.activate()
+        alert.runModal()
+    }
+
+    /// `pastPick`: opened from the picker (#29) — a Cancel then leaves its text files alone unless a re-detect rewrote it.
+    func show(jsonPath: URL, pastPick: Bool = false, onDismiss: ((URL) -> Void)? = nil) {
         // Supersede any in-flight show: cancel its task and close its panel, so two rapid calls
         // cannot both reach present() and orphan a window.
         showTask?.cancel()
@@ -125,7 +147,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                 return
             }
             self.present(jsonPath: jsonPath, speakers: speakers, channelNames: channelNames, echo: echo, audio: audio,
-                         onDismiss: onDismiss)
+                         pastPick: pastPick, onDismiss: onDismiss)
         }
     }
 
@@ -139,7 +161,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// Build and show the panel. Main actor; assumes `speakers` is non-empty.
     private func present(
         jsonPath: URL, speakers: [SpeakerEntry], channelNames: [String: [String: String]],
-        echo: EchoNotice.Findings, audio: RecordingAudioAvailability, onDismiss: ((URL) -> Void)?
+        echo: EchoNotice.Findings, audio: RecordingAudioAvailability, pastPick: Bool, onDismiss: ((URL) -> Void)?
     ) {
 
         self.onDismissCallback = onDismiss
@@ -187,9 +209,12 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                 closePanel()
                 return .saved
             },
-            onCancel: { [weak self] in
+            onCancel: { [weak self] rewritten in
                 let path = self?.presentedPath ?? jsonPath
-                Task.detached { Self.generateFormatFile(jsonPath: path) }
+                // A past recording's text files are rewritten only when a re-detect changed its transcript (#29 review).
+                if PastRecordings.rewritesFormatsOnCancel(pastPick: pastPick, transcriptRewritten: rewritten) {
+                    Task.detached { Self.generateFormatFile(jsonPath: path) }
+                }
                 closePanel()
             },
             onUnsavedNamesChange: { [weak self] names in self?.unsavedNames = names }
@@ -375,7 +400,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         speakers: [SpeakerEntry], channelNames: [String: [String: String]], echo: EchoNotice.Findings,
         audio: RecordingAudioAvailability
     ) {
-        guard let json = readTranscript(jsonPath) else { return ([], [:], .none, .notListed) }
+        guard let json = readTranscript(jsonPath) else { return ([], [:], .none, RecordingAudioAvailability(status: .notListed, redetectable: [])) }
         return (parseSpeakers(json: json), loadChannelNames(json: json), EchoNotice.Findings(json: json),
                 RecordingAudioAvailability.of(json: json))
     }

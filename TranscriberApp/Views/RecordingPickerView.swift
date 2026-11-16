@@ -7,7 +7,8 @@ import TranscriberCore
 final class RecordingPickerModel {
     enum State: Equatable {
         case loading
-        case loaded([PastRecording])
+        /// The recordings, and the line about day folders that could not be read (`PastRecordings.Scan.note`).
+        case loaded([PastRecording], note: String?)
         /// The recordings folder could not be listed (missing, no permission).
         case folderUnreadable
         /// The recordings folder did not answer in time (a share that hangs).
@@ -21,6 +22,8 @@ final class RecordingPickerModel {
 /// transcript through Choose File…. The latest recording is selected, so Return opens it as the menu item used to.
 struct RecordingPickerView: View {
     let model: RecordingPickerModel
+    /// Opening waits while Parley records or finishes a recording (#29 review): the picker can be left open.
+    let appState: AppState
     let onOpen: (URL) -> Void
     let onChooseFile: () -> Void
     let onCancel: () -> Void
@@ -28,7 +31,7 @@ struct RecordingPickerView: View {
     @State private var selection: PastRecording.ID?
 
     private var recordings: [PastRecording] {
-        if case .loaded(let list) = model.state { return list }
+        if case .loaded(let list, _) = model.state { return list }
         return []
     }
 
@@ -48,6 +51,19 @@ struct RecordingPickerView: View {
             content
                 .frame(height: 260)
 
+            if case .loaded(let list, let note?) = model.state, !list.isEmpty {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !appState.isIdle {
+                Text("Parley is recording or finishing a recording. Open one once it is done.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack {
                 Button("Choose File…", action: onChooseFile)
                 Spacer()
@@ -55,7 +71,7 @@ struct RecordingPickerView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Open") { selected.map { onOpen($0.transcript) } }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(selected == nil)
+                    .disabled(selected == nil || !appState.isIdle)
             }
         }
         .padding(20)
@@ -75,9 +91,10 @@ struct RecordingPickerView: View {
             placeholder { Text("Parley couldn’t open the recordings folder. Choose a transcript file instead.") }
         case .timedOut:
             placeholder { Text("The recordings folder didn’t answer. Choose a transcript file instead.") }
-        case .loaded(let list) where list.isEmpty:
-            placeholder { Text("No recordings in the recordings folder yet.") }
-        case .loaded(let list):
+        case .loaded(let list, let note) where list.isEmpty:
+            // Day folders that could not be read are said, never taken for "no recordings" (#29 review).
+            placeholder { Text(note ?? "No recordings in the recordings folder yet.") }
+        case .loaded(let list, _):
             List(list, selection: $selection) { recording in
                 row(recording)
             }
@@ -85,7 +102,7 @@ struct RecordingPickerView: View {
             .alternatingRowBackgrounds()
             // Double-click (and Return in the list) opens the row.
             .contextMenu(forSelectionType: PastRecording.ID.self, menu: { _ in }) { ids in
-                guard let id = ids.first, let recording = list.first(where: { $0.id == id }) else { return }
+                guard appState.isIdle, let id = ids.first, let recording = list.first(where: { $0.id == id }) else { return }
                 onOpen(recording.transcript)
             }
         }

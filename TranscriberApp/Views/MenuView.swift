@@ -170,7 +170,8 @@ struct MenuView: View {
                     dismissPanel()
                     RecordingPickerWindowController.shared.show(
                         root: URL(fileURLWithPath: configManager.config.recordingDirectory, isDirectory: true),
-                        latest: appState.lastJsonPath.map { URL(fileURLWithPath: $0) }
+                        latest: appState.lastJsonPath.map { URL(fileURLWithPath: $0, isDirectory: false) },
+                        appState: appState
                     ) { RenameWindowController.shared.openPastRecording($0) }
                 }
 

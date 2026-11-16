@@ -4,7 +4,8 @@ import Foundation
 
 /// Whether a transcript's audio is still there for the rename dialog's Play and Re-detect (#29): an old recording's
 /// archives may have been removed by the storage limit (`audio_removed`, #224) or be gone from where the transcript says.
-/// Renaming never needs audio; Play and Re-detect do, and the dialog says why they are not offered.
+/// Renaming never needs audio; Play and Re-detect do, and the dialog says why they are not offered. Which channels can be
+/// re-detected is `TranscriptRediarizer`'s own audio check, never a second rule (#29 review).
 @Suite struct RecordingAudioAvailabilityTests {
 
     private func metadata(paths: [String], removed: [String]? = nil) -> [String: Any] {
@@ -16,38 +17,40 @@ import Foundation
     @Test func everyFileOnDiskIsAvailable() {
         let audio = RecordingAudioAvailability.of(
             metadata: metadata(paths: ["/r/d/093000-a-0.m4a", "/r/d/093000-a-1.m4a"]), fileExists: { _ in true })
-        #expect(audio == .available)
+        #expect(audio.status == .available)
         #expect(audio.allowsRedetect(on: "local") && audio.allowsRedetect(on: "remote"))
         #expect(audio.notice == nil)
+        #expect(audio.redetectHelp(on: "local") == nil)
     }
 
     @Test func removedByTheStorageLimit_allOrPart() {
         let paths = ["/r/d/093000-a-0.m4a", "/r/d/093000-a-1.m4a"]
         let all = RecordingAudioAvailability.of(metadata: metadata(paths: paths, removed: ["093000-a-0.m4a", "093000-a-1.m4a"]),
                                                 fileExists: { _ in false })
-        #expect(all == .removedByStorageLimit(all: true))
+        #expect(all.status == .removedByStorageLimit(all: true))
         let part = RecordingAudioAvailability.of(metadata: metadata(paths: paths, removed: ["093000-a-0.m4a"]),
                                                  fileExists: { $0.hasSuffix("-1.m4a") })
-        #expect(part == .removedByStorageLimit(all: false))
+        #expect(part.status == .removedByStorageLimit(all: false))
         for audio in [all, part] {
-            #expect(!audio.allowsRedetect(on: "local") && !audio.allowsRedetect(on: "remote"), "\(audio)")
+            #expect(audio.redetectable.isEmpty, "\(audio)")
             let notice = audio.notice ?? ""
             #expect(notice.contains("storage limit"), "\(audio)")
             #expect(notice.contains("Names can still be changed"), "\(audio)")
+            #expect(audio.redetectHelp(on: "remote") == audio.notice)
         }
         // A mark whose files are all back on disk (restored from a backup): the audio is there.
         #expect(RecordingAudioAvailability.of(metadata: metadata(paths: paths, removed: ["093000-a-0.m4a"]),
-                                              fileExists: { _ in true }) == .available)
+                                              fileExists: { _ in true }).status == .available)
     }
 
     @Test func notWhereTheTranscriptSays_allOrPart() {
         let paths = ["/old/d/093000-a-0.m4a", "/old/d/093000-a-1.m4a"]
         let all = RecordingAudioAvailability.of(metadata: metadata(paths: paths), fileExists: { _ in false })
-        #expect(all == .missing(all: true))
+        #expect(all.status == .missing(all: true))
         let part = RecordingAudioAvailability.of(metadata: metadata(paths: paths), fileExists: { $0.hasSuffix("-0.m4a") })
-        #expect(part == .missing(all: false))
+        #expect(part.status == .missing(all: false))
         for audio in [all, part] {
-            #expect(!audio.allowsRedetect(on: "local") && !audio.allowsRedetect(on: "remote"), "\(audio)")
+            #expect(audio.redetectable.isEmpty, "\(audio)")
             #expect(audio.notice?.contains("Names can still be changed") == true, "\(audio)")
             #expect(audio.notice?.contains("storage limit") == false, "\(audio)")
         }
@@ -58,38 +61,89 @@ import Foundation
     @Test func aLegacyTwoFileRecordingKeepsTheSideStillThere() {
         let paths = ["/r/d/093000-a.wav", "/r/d/093000-a_mic.wav"]
         let micGone = RecordingAudioAvailability.of(metadata: metadata(paths: paths), fileExists: { !$0.hasSuffix("_mic.wav") })
-        #expect(micGone == .missing(all: false, redetectable: ["remote"]))
-        #expect(micGone.allowsRedetect(on: "remote"))
-        #expect(!micGone.allowsRedetect(on: "local"))
+        #expect(micGone.status == .missing(all: false))
+        #expect(micGone.redetectable == ["remote"])
         #expect(micGone.notice?.contains("One side") == true)
-        // A chunked recording with a chunk gone: neither side (every chunk is read).
-        let chunked = RecordingAudioAvailability.of(metadata: metadata(paths: ["/r/d/a-0.m4a", "/r/d/a-1.m4a"]),
-                                                    fileExists: { $0.hasSuffix("-0.m4a") })
-        #expect(chunked == .missing(all: false, redetectable: []))
+        #expect(micGone.redetectHelp(on: "remote") == nil)
+        #expect(micGone.redetectHelp(on: "local") == micGone.notice)
+    }
+
+    /// A mic-only recording: every file there, but no chunk carries the other side — Re-detect is not offered for it,
+    /// and the hover says why, though the recording's audio is whole.
+    @Test func aSideNoChunkCarriesIsNotRedetectable() {
+        let audio = RecordingAudioAvailability.of(metadata: metadata(paths: ["/r/d/093000-a-0_mic.wav"]), fileExists: { _ in true })
+        #expect(audio.status == .available)
+        #expect(audio.notice == nil)
+        #expect(audio.redetectable == ["local"])
+        #expect(audio.redetectHelp(on: "remote")?.isEmpty == false)
     }
 
     @Test func aTranscriptThatListsNoAudio() {
         for meta in [[String: Any](), ["audio_paths": [String]()], nil] as [[String: Any]?] {
             let audio = RecordingAudioAvailability.of(metadata: meta, fileExists: { _ in true })
-            #expect(audio == .notListed)
-            #expect(!audio.allowsRedetect(on: "local") && !audio.allowsRedetect(on: "remote"))
+            #expect(audio.status == .notListed)
+            #expect(audio.redetectable.isEmpty)
             #expect(audio.notice != nil)
         }
         // The storage limit removed everything a transcript listed under `audio_files` only.
         let removedOnly: [String: Any] = ["audio_removed": ["files": ["093000-a.m4a"], "reason": "storage_limit"]]
-        #expect(RecordingAudioAvailability.of(metadata: removedOnly, fileExists: { _ in true }) == .removedByStorageLimit(all: true))
+        #expect(RecordingAudioAvailability.of(metadata: removedOnly, fileExists: { _ in true }).status == .removedByStorageLimit(all: true))
     }
 
     @Test func eachNoticeIsOneLineAndNamesNoPath() {
         let cases: [RecordingAudioAvailability] = [
-            .removedByStorageLimit(all: true), .removedByStorageLimit(all: false), .missing(all: true), .missing(all: false),
-            .missing(all: false, redetectable: ["remote"]), .notListed,
+            .init(status: .removedByStorageLimit(all: true), redetectable: []),
+            .init(status: .removedByStorageLimit(all: false), redetectable: []),
+            .init(status: .missing(all: true), redetectable: []),
+            .init(status: .missing(all: false), redetectable: []),
+            .init(status: .missing(all: false), redetectable: ["remote"]),
+            .init(status: .notListed, redetectable: []),
         ]
         for audio in cases {
             let notice = audio.notice ?? ""
             #expect(!notice.isEmpty, "\(audio)")
             #expect(!notice.contains("\n"), "\(audio)")
             #expect(!notice.contains("/"), "\(audio)")
+        }
+    }
+
+    /// The dialog's Re-detect and the re-detect itself agree, on the same files on disk: where the dialog offers it, the
+    /// re-detect's audio check passes; where it does not, the re-detect refuses before decoding a thing.
+    @Test func theDialogAndTheRedetectAgree() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("audio-agree-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let fixtures: [(paths: [String], onDisk: Set<String>)] = [
+            (["a-0.m4a", "a-1.m4a"], ["a-0.m4a"]),           // a chunk gone
+            (["a-0.m4a", "a-1.m4a"], []),                    // every chunk gone
+            (["a-0_mic.wav"], ["a-0_mic.wav"]),              // mic only: no remote side
+            (["a.wav", "a_mic.wav"], ["a.wav"]),             // legacy, mic gone
+            (["a.wav", "a_mic.wav"], ["a_mic.wav"]),         // legacy, system gone
+            ([], []),                                        // nothing listed
+        ]
+        for fixture in fixtures {
+            let paths = fixture.paths.map { folder.appendingPathComponent($0).path }
+            let layout = SpeakerSampleLocator.classify(audioPaths: paths.map { URL(fileURLWithPath: $0) })
+            let exists = { (path: String) in fixture.onDisk.contains((path as NSString).lastPathComponent) }
+            let audio = RecordingAudioAvailability.of(metadata: metadata(paths: paths), fileExists: exists)
+            for channel in ["local", "remote"] {
+                let check = Result { try TranscriptRediarizer.audioPrecheck(layout: layout, source: channel, fileExists: exists) }
+                let passes = (try? check.get()) != nil
+                #expect(audio.allowsRedetect(on: channel) == passes, "\(fixture) \(channel)")
+            }
+        }
+
+        // And the re-detect itself, on a transcript on disk whose second chunk is gone: refused before any decode.
+        let chunk0 = folder.appendingPathComponent("b-0.m4a"), chunk1 = folder.appendingPathComponent("b-1.m4a")
+        try Data([0]).write(to: chunk0)
+        let transcript = folder.appendingPathComponent("093000-b.json")
+        let json: [String: Any] = ["metadata": metadata(paths: [chunk0.path, chunk1.path]),
+                                   "segments": [["speaker": "Remote Speaker 1", "source": "remote", "start": 0.0, "end": 1.0, "text": "x"]]]
+        try JSONSerialization.data(withJSONObject: json).write(to: transcript)
+        #expect(!RecordingAudioAvailability.of(json: json).allowsRedetect(on: "remote"))
+        await #expect(throws: TranscriptRediarizer.RediarizeError.self) {
+            _ = try await TranscriptRediarizer.rediarize(transcript: transcript, source: "remote", speakerCount: 1,
+                                                         diarizer: FakeDiarizer(), echoCanceller: nil)
         }
     }
 
@@ -101,8 +155,8 @@ import Foundation
         let archive = folder.appendingPathComponent("093000-a.m4a")
         try Data([0]).write(to: archive)
         let json: [String: Any] = ["metadata": metadata(paths: [archive.path]), "segments": [[String: Any]]()]
-        #expect(RecordingAudioAvailability.of(json: json) == .available)
+        #expect(RecordingAudioAvailability.of(json: json).status == .available)
         try FileManager.default.removeItem(at: archive)
-        #expect(RecordingAudioAvailability.of(json: json) == .missing(all: true))
+        #expect(RecordingAudioAvailability.of(json: json).status == .missing(all: true))
     }
 }

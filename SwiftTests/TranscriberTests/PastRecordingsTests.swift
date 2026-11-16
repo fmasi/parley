@@ -56,7 +56,10 @@ import Foundation
 
     @Test func aNameWithDotsOrDashesIsStillARecording() {
         // `sanitizeFilename` keeps dots and dashes: "v1.2 review" and "Q3-plan" are names, not sidecars.
-        let names = ["093000-v1.2 review.json", "100000-Q3-plan.json", "110000-2.json", "110000.json"]
+        // A dot-part that only looks like a sidecar's is a name too: only the exact tails Parley writes are sidecars.
+        let names = ["093000-v1.2 review.json", "100000-Q3-plan.json", "110000-2.json", "110000.json",
+                     "120000-sync.diag.json", "130000-a.diag.b.json", "140000-v1.damaged-copy.json", "150000-x.damaged.notes.json",
+                     "160000-x.diag.coverage notes.json"]
         let list = PastRecordings.list(root: root, days: [.init(day: "2026-11-16", names: names)], limit: 50)
         #expect(Set(ids(list)) == Set(names.map { "2026-11-16/\($0)" }))
     }
@@ -74,10 +77,15 @@ import Foundation
         ])
     }
 
+    /// The day-folder rule is the storage limit's (`StorageManager.isDayFolderName`): one rule for what a day folder is.
     @Test func onlyDayFoldersAreRead() {
-        for day in ["2026-11-16", "1999-01-01"] { #expect(PastRecordings.isDayFolder(day), "\(day)") }
-        for other in ["2026-11-1", "2026-13-01", "2026-11-32", "2026_11_16", "2026-11-16 copy", "Archive", ".2026-11-16", ""] {
-            #expect(!PastRecordings.isDayFolder(other), "\(other)")
+        for name in ["2026-11-16", "1999-01-01", "2026-13-01", "2026-11-1", "2026_11_16", "2026-11-16 copy", "Archive",
+                     ".2026-11-16", "", "２０２６-11-16"] {
+            let listed = PastRecordings.list(root: root, days: [.init(day: name, names: ["093000-a.json"])], limit: 50)
+            #expect(listed.isEmpty == !StorageManager.isDayFolderName(name), "\(name)")
+        }
+        for other in ["2026-11-1", "2026_11_16", "2026-11-16 copy", "Archive", ".2026-11-16", ""] {
+            #expect(!StorageManager.isDayFolderName(other), "\(other)")
         }
         let list = PastRecordings.list(root: root, days: [
             .init(day: "Archive", names: ["093000-a.json"]),
@@ -135,13 +143,48 @@ import Foundation
     }
 
     @Test func aRecordingStillInFlightIsRefused_anyOtherOpens() {
-        #expect(PastRecordings.openDecision(isSessionInFlight: false) == .open)
-        guard case .refuse(let title, let message) = PastRecordings.openDecision(isSessionInFlight: true) else {
+        #expect(PastRecordings.openDecision(isIdle: true, isSessionInFlight: false) == .open)
+        guard case .refuse(let title, let message) = PastRecordings.openDecision(isIdle: true, isSessionInFlight: true) else {
             Issue.record("an in-flight recording must be refused")
             return
         }
         #expect(!title.isEmpty)
         #expect(message == SessionRenamer.RenameError.inProgress.errorDescription)
+    }
+
+    /// While Parley records or finishes a recording, no past recording opens — and the reason says that, not that THIS
+    /// recording is being finished (while transcribing every session reads as in flight).
+    @Test func nothingOpensWhileParleyIsNotIdle() {
+        for inFlight in [false, true] {
+            guard case .refuse(_, let message) = PastRecordings.openDecision(isIdle: false, isSessionInFlight: inFlight) else {
+                Issue.record("a pick while not idle must be refused")
+                continue
+            }
+            #expect(message == "Parley is recording or finishing a recording. Try again once it is done.")
+        }
+    }
+
+    /// A pick while a rename panel is up (#29 review): the same transcript brings that panel forward, another one waits
+    /// its turn and the user is told; with nothing up it opens at once. Compared lexically.
+    @Test func whereAPickGoes() {
+        let a = URL(fileURLWithPath: "/r/2026-11-16/093000-a.json", isDirectory: false)
+        let aAgain = URL(fileURLWithPath: "/r/2026-11-16/../2026-11-16/093000-a.json", isDirectory: false)
+        let b = URL(fileURLWithPath: "/r/2026-11-15/100000-b.json", isDirectory: false)
+        #expect(PastRecordings.placement(of: a, onScreen: nil, queueBusy: false) == .openNow)
+        #expect(PastRecordings.placement(of: aAgain, onScreen: a, queueBusy: true) == .bringToFront)
+        #expect(PastRecordings.placement(of: b, onScreen: a, queueBusy: true) == .opensNext)
+        // A panel still preparing (nothing on screen yet) is the queue at work: the pick waits.
+        #expect(PastRecordings.placement(of: b, onScreen: nil, queueBusy: true) == .opensNext)
+        #expect(!PastRecordings.opensNextNotice.isEmpty)
+    }
+
+    /// Cancel on a past recording leaves its text files alone unless a re-detect rewrote the transcript; the newest
+    /// recording's flow writes them as before (they may not exist yet).
+    @Test func cancelRewritesTheTextFilesOnlyWhenTheTranscriptChanged() {
+        #expect(!PastRecordings.rewritesFormatsOnCancel(pastPick: true, transcriptRewritten: false))
+        #expect(PastRecordings.rewritesFormatsOnCancel(pastPick: true, transcriptRewritten: true))
+        #expect(PastRecordings.rewritesFormatsOnCancel(pastPick: false, transcriptRewritten: false))
+        #expect(PastRecordings.rewritesFormatsOnCancel(pastPick: false, transcriptRewritten: true))
     }
 }
 
@@ -195,15 +238,62 @@ import Foundation
         #expect(scan.recordings.isEmpty)
     }
 
-    @Test func theLatestIsOfferedOnlyWhileItIsOnDisk() throws {
+    /// A day folder that cannot be listed is counted, never taken for an empty one (#29 review).
+    @Test func dayFoldersThatCannotBeListedAreSaid() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try touch(root.appendingPathComponent("2026-11-16/100000-b.json"))
+        try touch(root.appendingPathComponent("2026-11-15/090000-a.json"))
+        try touch(root.appendingPathComponent("2026-11-14/080000-c.json"))
+        let unreadable: Set<String> = ["2026-11-16", "2026-11-14"]
+        let scan = PastRecordings.scan(root: root, limit: 50) { folder in
+            if unreadable.contains(folder.lastPathComponent) { throw CocoaError(.fileReadNoPermission) }
+            return try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        }
+        #expect(scan.recordings.map(\.transcript.lastPathComponent) == ["090000-a.json"])
+        #expect(scan.unreadableDays == 2)
+        #expect(scan.note == "Parley couldn’t read 2 day folders of the recordings folder, so their recordings aren’t listed.")
+        // Every day unreadable: no list, and the note says why — not "no recordings yet".
+        let none = PastRecordings.scan(root: root, limit: 50) { folder in
+            if folder.lastPathComponent.hasPrefix("2026-") { throw CocoaError(.fileReadNoPermission) }
+            return try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        }
+        #expect(none.recordings.isEmpty && none.folderReadable && none.unreadableDays == 3)
+        #expect(none.note?.contains("3 day folders") == true)
+        let one = PastRecordings.Scan(recordings: [], folderReadable: true, unreadableDays: 1)
+        #expect(one.note == "Parley couldn’t read 1 day folder of the recordings folder, so its recordings aren’t listed.")
+        #expect(PastRecordings.Scan(recordings: [], folderReadable: true, unreadableDays: 0).note == nil)
+    }
+
+    @Test func theLatestIsOfferedOnlyWhileItIsOnDisk() async throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let other = try makeRoot()
         defer { try? FileManager.default.removeItem(at: other) }
         let latest = other.appendingPathComponent("2026-11-16/120000-moved.json")
-        #expect(PastRecordings.scan(root: root, limit: 50, latest: latest).recordings.isEmpty)
+        let reads = RenameReads(reads: FolderReads(label: "past-recordings-\(UUID().uuidString)"))
+        #expect(try #require(await reads.recentRecordings(root: root, latest: latest)).recordings.isEmpty)
         try touch(latest)
-        #expect(PastRecordings.scan(root: root, limit: 50, latest: latest).recordings.map(\.transcript) == [latest])
+        #expect(try #require(await reads.recentRecordings(root: root, latest: latest)).recordings.map(\.transcript) == [latest])
+    }
+
+    /// The latest transcript is checked in a read of its own, bounded (#29 review): a folder of it that hangs costs the
+    /// list nothing but that bound, and the list comes back without it.
+    @Test func aLatestThatDoesNotAnswerLeavesTheListAlone() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try touch(root.appendingPathComponent("2026-11-16/100000-b.json"))
+        let hung = HangingRead()
+        defer { hung.release() }
+        let reads = RenameReads(reads: FolderReads(label: "past-recordings-\(UUID().uuidString)", beforeEachRead: { label in
+            if label == "rename: latest transcript" { hung.hang() }
+        }))
+        let started = ContinuousClock.now
+        let result = try #require(await reads.recentRecordings(
+            root: root, latest: URL(fileURLWithPath: "/Volumes/Gone/2026-11-16/120000-x.json", isDirectory: false),
+            seconds: 5, latestSeconds: 0.3))
+        #expect(result.recordings.map(\.transcript.lastPathComponent) == ["100000-b.json"])
+        #expect(ContinuousClock.now - started < .seconds(4))
     }
 
     /// The picker's read goes through the rename reader, bounded: a recordings folder that does not answer gives no list

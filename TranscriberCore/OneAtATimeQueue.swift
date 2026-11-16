@@ -13,6 +13,9 @@ public final class OneAtATimeQueue<Item> {
         self.run = run
     }
 
+    /// Whether an item is running or waiting: a new one would not run at once.
+    public var isBusy: Bool { running || !waiting.isEmpty }
+
     public func enqueue(_ item: Item) {
         waiting.append(item)
         runNext()

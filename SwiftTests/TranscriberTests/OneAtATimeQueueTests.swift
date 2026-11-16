@@ -21,4 +21,17 @@ import Testing
         queue.enqueue(4)
         #expect(shown == [1, 2, 3, 4], "idle again: the next one runs at once")
     }
+
+    /// Whether an item is running or waiting (#29 review): a pick made then is told it opens next.
+    @Test func itSaysWhetherItIsBusy() {
+        var finish: [() -> Void] = []
+        let queue = OneAtATimeQueue<Int> { _, done in finish.append(done) }
+        #expect(!queue.isBusy)
+        queue.enqueue(1); queue.enqueue(2)
+        #expect(queue.isBusy)
+        finish[0]()
+        #expect(queue.isBusy, "the second item is running")
+        finish[1]()
+        #expect(!queue.isBusy)
+    }
 }

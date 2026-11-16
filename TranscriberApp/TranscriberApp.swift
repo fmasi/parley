@@ -209,6 +209,7 @@ struct TranscriberApp: App {
         // idle coordinator cannot see what the GUI app is still finishing, so it must offer no session rename at all.
         let renamingCoordinator = coordinator
         RenameWindowController.shared.isSessionInFlight = { renamingCoordinator.isSessionInFlight(transcript: $0) }
+        RenameWindowController.shared.isIdle = { state.isIdle }
         RenameWindowController.shared.onSessionRenamed = { renamingCoordinator.transcriptRenamed(from: $0, to: $1) }
         // A name chosen during the recording that its finish could not apply (#358): the dialog starts from it.
         RenameWindowController.shared.unappliedSessionName = { renamingCoordinator.unappliedSessionName(forTranscript: $0) }

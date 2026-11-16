@@ -15,7 +15,7 @@ final class RecordingPickerWindowController: NSObject, NSWindowDelegate {
 
     /// Show the picker over the recordings under `root`. `latest` (the menu's last transcript) is listed even when the
     /// recordings folder has changed since. `onOpen` gets the transcript chosen, from the list or Choose File….
-    func show(root: URL, latest: URL?, onOpen: @escaping @MainActor (URL) -> Void) {
+    func show(root: URL, latest: URL?, appState: AppState, onOpen: @escaping @MainActor (URL) -> Void) {
         loadTask?.cancel()
         panel?.close()
         panel = nil
@@ -32,6 +32,7 @@ final class RecordingPickerWindowController: NSObject, NSWindowDelegate {
         }
         let view = RecordingPickerView(
             model: model,
+            appState: appState,
             onOpen: { transcript in
                 close()
                 onOpen(transcript)
@@ -72,8 +73,8 @@ final class RecordingPickerWindowController: NSObject, NSWindowDelegate {
                 Logger.files.error("Recording picker: the recordings folder could not be listed")
                 model.state = .folderUnreadable
             case let scan?:
-                Logger.files.info("Recording picker: \(scan.recordings.count, privacy: .public) recording(s) listed")
-                model.state = .loaded(scan.recordings)
+                Logger.files.info("Recording picker: \(scan.recordings.count, privacy: .public) recording(s) listed, \(scan.unreadableDays, privacy: .public) day folder(s) unreadable")
+                model.state = .loaded(scan.recordings, note: scan.note)
             }
         }
     }

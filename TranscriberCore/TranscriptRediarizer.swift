@@ -678,6 +678,32 @@ public enum TranscriptRediarizer {
         return .needsSplit
     }
 
+    /// Whether the files a re-detect of `source` reads are all there — throwing what the re-detect would say — before
+    /// anything is decoded. The ONE rule for it: `decodeChannelAudio` runs it first, and the rename dialog offers Re-detect
+    /// only where it passes (`RecordingAudioAvailability`, #29). Pure: `fileExists` is the only look at the disk.
+    static func audioPrecheck(layout: AudioLayout, source: String,
+                              fileExists: (String) -> Bool) throws {
+        let wantsLocal = source == "local"
+        switch layout {
+        case .unavailable:
+            throw RediarizeError.noAudioForChannel(source)
+        case .legacyDualStream(let remote, let local):
+            guard let url = wantsLocal ? local : remote, fileExists(url.path) else { throw RediarizeError.noAudioForChannel(source) }
+        case .chunkedArchives(let chunks):
+            // No silent filtering: a missing chunk's audio would vanish from the middle of the
+            // timeline and every later chunk would slide earlier by its length. When NONE is left
+            // (the storage quota evicted the recording's audio), the recording simply has no audio.
+            let missing = chunks.indices.filter { !fileExists(chunks[$0].path) }
+            if missing.count == chunks.count { throw RediarizeError.noAudioForChannel(source) }
+            if let first = missing.first { throw RediarizeError.chunkMissing(chunk: first + 1, of: chunks.count) }
+            // A channel no chunk carries (the remote side of a mic-only recording) has no audio at
+            // all — say so before padding anything.
+            guard chunks.contains(where: { channelRole(of: $0, wantsLocal: wantsLocal) != .skip }) else {
+                throw RediarizeError.noAudioForChannel(source)
+            }
+        }
+    }
+
     /// What `decodeChannelAudio` hands back: either pre-decoded samples for the diarizer, or a
     /// path for it to decode itself.
     ///
@@ -725,15 +751,15 @@ public enum TranscriptRediarizer {
         onProgress: (@Sendable (Progress) -> Void)?
     ) async throws -> DecodedChannelAudio {
         let wantsLocal = source == "local"
+        // The files first, before any decode: the same check the rename dialog offers Re-detect by (#29).
+        try audioPrecheck(layout: layout, source: source, fileExists: { FileManager.default.fileExists(atPath: $0) })
 
         switch layout {
         case .unavailable:
             throw RediarizeError.noAudioForChannel(source)
 
         case .legacyDualStream(let remote, let local):
-            guard let url = wantsLocal ? local : remote,
-                  FileManager.default.fileExists(atPath: url.path)
-            else { throw RediarizeError.noAudioForChannel(source) }
+            guard let url = wantsLocal ? local : remote else { throw RediarizeError.noAudioForChannel(source) }
             if wantsLocal, echoCanceller != nil {
                 // Two WAVs (a CLI `--echo-cancel` transcript): not re-cancelled here.
                 Logger.transcription.error("Re-detect: a two-file transcript's mic was echo-cancelled; diarizing the raw mic")
@@ -741,17 +767,6 @@ public enum TranscriptRediarizer {
             return .path(url)
 
         case .chunkedArchives(let chunks):
-            // No silent filtering: a missing chunk's audio would vanish from the middle of the
-            // timeline and every later chunk would slide earlier by its length. When NONE is left
-            // (the storage quota evicted the recording's audio), the recording simply has no audio.
-            let missing = chunks.indices.filter { !FileManager.default.fileExists(atPath: chunks[$0].path) }
-            if missing.count == chunks.count { throw RediarizeError.noAudioForChannel(source) }
-            if let first = missing.first { throw RediarizeError.chunkMissing(chunk: first + 1, of: chunks.count) }
-            // A channel no chunk carries (the remote side of a mic-only recording) has no audio at
-            // all — say so before padding anything.
-            guard chunks.contains(where: { channelRole(of: $0, wantsLocal: wantsLocal) != .skip }) else {
-                throw RediarizeError.noAudioForChannel(source)
-            }
             // Every offset must be one this recording could have: finite, ≥ 0, and within its AUDIO —
             // the chunk files' real lengths, plus its recorded gaps, plus one chunk of slack. Not the
             // words: a recording can run long after the last one (nobody pressed Stop). A corrupted

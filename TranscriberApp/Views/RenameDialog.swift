@@ -91,7 +91,10 @@ struct RenameDialog: View {
     /// The speaker names, and the session name when it is a recording's (nil otherwise), for the transcript at the
     /// given path. The controller renames the session's files (`SessionRenamer`) before writing the names.
     let onSave: @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome
-    let onCancel: () -> Void
+    /// The dialog was cancelled; true when a re-detect rewrote the transcript meanwhile (its text files are then stale).
+    let onCancel: (_ transcriptRewritten: Bool) -> Void
+    /// A re-detect rewrote the transcript since the dialog opened.
+    @State private var transcriptRewritten = false
     /// The names a close would lose, each time they change (#359): the window asks before a close
     /// throws them away.
     let onUnsavedNamesChange: ([String]) -> Void
@@ -105,7 +108,7 @@ struct RenameDialog: View {
         initialEcho: EchoNotice.Findings = .none,
         audio: RecordingAudioAvailability = .available,
         onSave: @escaping @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome,
-        onCancel: @escaping () -> Void = {},
+        onCancel: @escaping (_ transcriptRewritten: Bool) -> Void = { _ in },
         onUnsavedNamesChange: @escaping ([String]) -> Void = { _ in }
     ) {
         self._jsonPath = State(initialValue: jsonPath)
@@ -209,7 +212,7 @@ struct RenameDialog: View {
                                 .font(.caption)
                                 // Not without the recording's audio (#29): the notice above says why.
                                 .disabled(rediarizing != nil || staleRowsChannel != nil || !audio.allowsRedetect(on: channel))
-                                .help(audio.allowsRedetect(on: channel) ? "" : audio.notice ?? "")
+                                .help(audio.redetectHelp(on: channel) ?? "")
                         }
                     }
                     if let absorbed = absorbedClusters[channel], absorbed > 0 {
@@ -389,6 +392,8 @@ struct RenameDialog: View {
                     }
                 )
                 await MainActor.run {
+                    // The transcript is rewritten from here on: a Cancel must bring its text files along (#29 review).
+                    transcriptRewritten = true
                     rediarizePhase = .rebuildingList
                     rediarizeFraction = nil
                 }
@@ -574,7 +579,7 @@ struct RenameDialog: View {
                     // Escape lands here too (`.cancelAction`). Kept names not yet saved are asked about (#359).
                     guard Self.confirmDiscard(names: unsavedNames) else { return }
                     rediarizeTask?.cancel()
-                    onCancel()
+                    onCancel(transcriptRewritten)
                 }
                     .keyboardShortcut(.cancelAction)
                     // Not while a Save renames the session's files (#357): the panel closes when it is done.

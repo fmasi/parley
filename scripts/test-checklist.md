@@ -1391,7 +1391,17 @@ Synthetic recordings only (a podcast or `say` through the speakers), at least th
       folder…", then within ~10 s "The recordings folder didn't answer"; the menu never freezes; Choose
       File… still works. A folder that does not exist: "Parley couldn't open the recordings folder".
 - [ ] **OP-09 Empty.** A recordings folder with no recordings: "No recordings in the recordings folder
-      yet."; Choose File… still works.
+      yet."; Choose File… still works. With a day folder made unreadable (`chmod 000` on a copy's day
+      folder): the picker says "Parley couldn't read 1 day folder…", never "No recordings yet".
+- [ ] **OP-10 Left open while recording.** Open the picker, leave it, start a recording from the menu:
+      Open greys out with "Parley is recording or finishing a recording…"; double-click does nothing.
+      Stop: while it transcribes, still greyed; once idle, Open works.
+- [ ] **OP-11 A pick while the dialog is up.** With a rename dialog open on recording A, pick A again:
+      the open dialog comes to the front, no second one. Pick B: an alert says it opens once the open
+      window is closed; close A and B's dialog opens. If B's auto-summary started meanwhile, B is
+      refused then ("still being finished").
+- [ ] **OP-12 Cancel leaves the text files alone.** Note the `.txt`/`.srt` modification time of an old
+      recording, open it, Cancel: unchanged. Open it, Re-detect, Cancel: they are rewritten.
 
 ## Rename the recording from the rename dialog (#357), and the Unknown row (#360) — added 2026-11-11
 
