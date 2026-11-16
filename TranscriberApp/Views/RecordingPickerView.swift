@@ -66,6 +66,8 @@ struct RecordingPickerView: View {
 
             HStack {
                 Button("Choose File…", action: onChooseFile)
+                    // Like Open: nothing opens while Parley records or finishes a recording (#29 review).
+                    .disabled(!appState.isIdle)
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)

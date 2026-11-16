@@ -49,8 +49,12 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         if item.pastPick, case .refuse(let title, let message) = PastRecordings.openDecision(
             isIdle: self.isIdle?() ?? true, isSessionInFlight: self.isSessionInFlight?(item.jsonPath) == true) {
             Logger.files.info("Rename: a past recording was not opened — Parley or the recording is not done")
-            Self.inform(title: title, message: message)
-            return done()
+            // On the next main-actor turn: this runs inside the previous panel's close, never a modal loop there.
+            Task { @MainActor in
+                Self.inform(title: title, message: message)
+                done()
+            }
+            return
         }
         self.show(jsonPath: item.jsonPath, pastPick: item.pastPick) { finalPath in
             item.onDismiss?(finalPath)
@@ -78,8 +82,20 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             queue.enqueue((jsonPath, nil, true))
         case .opensNext:
             queue.enqueue((jsonPath, nil, true))
-            Self.inform(title: "The rename window is in use", message: PastRecordings.opensNextNotice)
+            // On the panel, as a sheet: never in front of one still preparing. A panel not up yet gets it once it is.
+            if let panel { Self.informInUse(on: panel) } else { inUseNoticePending = true }
         }
+    }
+
+    /// A pick waits for a panel still preparing: told once that panel is up (`present`).
+    private var inUseNoticePending = false
+
+    private static func informInUse(on window: NSWindow) {
+        let alert = NSAlert()
+        alert.messageText = "The rename window is in use"
+        alert.informativeText = PastRecordings.opensNextNotice
+        alert.alertStyle = .informational
+        alert.beginSheetModal(for: window)
     }
 
     private static func inform(title: String, message: String) {
@@ -155,6 +171,8 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     private func endPreparing(_ request: UUID) {
         guard preparingRequest == request else { return }
         preparingRequest = nil
+        // No panel came of it (skipped, superseded): the pick that waited is next now, nothing to say.
+        if panel == nil { inUseNoticePending = false }
         NotificationCenter.default.post(name: .parleyActivityEnded, object: nil)
     }
 
@@ -245,6 +263,10 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
         self.panel = newPanel
         Logger.state.debug("Panel shown: RenameSpeakers")
+        if inUseNoticePending {
+            inUseNoticePending = false
+            Self.informInUse(on: newPanel)
+        }
     }
 
     /// The panel is gone: its dismissal runs once, with the transcript's current path.
