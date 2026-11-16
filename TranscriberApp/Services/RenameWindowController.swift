@@ -28,6 +28,9 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// window exists, and a crash-protection hand-over must not exit in that gap (L round 5).
     private var preparingRequest: UUID?
     var isPreparing: Bool { preparingRequest != nil }
+    /// Names in the panel's fields a close would lose (#359), those on a channel a re-detect rewrote. Closing the
+    /// window asks first. Reported by the dialog.
+    private var unsavedNames: [String] = []
 
     /// The app's rename panels, one at a time (L review 90): a recovery pass that salvages several recordings
     /// presents each transcript in turn, and a rename asked for from the menu waits for the one on screen —
@@ -116,6 +119,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
 
         self.onDismissCallback = onDismiss
         self.presentedPath = jsonPath
+        self.unsavedNames = []
 
         let closePanel = { [weak self] in
             Logger.state.debug("Panel closed: RenameSpeakers")
@@ -160,7 +164,8 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                 let path = self?.presentedPath ?? jsonPath
                 Task.detached { Self.generateFormatFile(jsonPath: path) }
                 closePanel()
-            }
+            },
+            onUnsavedNamesChange: { [weak self] names in self?.unsavedNames = names }
         )
 
         let hostingView = NSHostingView(rootView: dialog)
@@ -250,6 +255,12 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     }
 
     // MARK: - NSWindowDelegate
+
+    /// The window's close button: kept names not yet saved are asked about first (#359). Save and
+    /// Cancel close the panel with `close()`, which does not come through here.
+    nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
+        MainActor.assumeIsolated { RenameDialog.confirmDiscard(names: unsavedNames) }
+    }
 
     nonisolated func windowWillClose(_ notification: Notification) {
         MainActor.assumeIsolated {

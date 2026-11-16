@@ -1645,4 +1645,58 @@ struct TranscriptRediarizerEchoGuardTests {
         }
         #expect(seen == [["local"], ["local", "remote"], ["local", "remote"]])
     }
+
+    // MARK: - Names kept across a re-detect (#359)
+
+    /// The issue's call in miniature: three remote speakers re-detected as two. Anna's and Bob's
+    /// lines stay together, the unnamed third speaker goes into Anna's. The outcome carries the
+    /// speech the old and new labels share, which keeps both names.
+    @Test("a re-detect reports the speech old and new labels share: the names that kept their lines are kept")
+    func theOutcomeCarriesTheOverlapThatKeepsNames() async throws {
+        let anna = Self.lines("anna", count: 6, offset: 0, length: 5)
+        let bob = Self.lines("bob", count: 5, offset: 7, length: 5)
+        let third = Self.lines("third", count: 2, offset: 14, length: 4)
+        let mine = [Line(start: 300, end: 302, text: Self.words("mine", 3))]
+        let before = anna.map { Self.segment($0, "Anna", "remote") } + bob.map { Self.segment($0, "Bob", "remote") }
+            + third.map { Self.segment($0, "Remote Speaker 3", "remote") } + mine.map { Self.segment($0, "Fred", "local") }
+        let (t, cleanup) = try makeRecording(segments: before, metadata: ["speaker_names": ["Remote Speaker 1": "Anna", "Remote Speaker 2": "Bob"]])
+        defer { cleanup() }
+        let diarization = DiarizationResult(
+            segments: Self.turns(anna + third, "S1") + Self.turns(bob, "S2"),
+            speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]])
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "remote", speakerCount: 2, diarizer: ScriptedDiarizer(result: diarization))
+
+        let overlap = outcome.labelOverlap
+        #expect(Set(overlap.oldSpeech.keys) == ["Anna", "Bob", "Remote Speaker 3"])
+        let segments = try read(t).segments
+        let annaNow = try #require(speakers(found(anna, in: segments, source: "remote")).first)
+        let bobNow = try #require(speakers(found(bob, in: segments, source: "remote")).first)
+        #expect(annaNow != bobNow)
+        let names = SpeakerNameCarryOver.names(fields: [:], oldLabels: overlap.oldSpeech.keys)
+        let plan = SpeakerNameCarryOver.plan(overlap, names: names)
+        #expect(plan.kept == [annaNow: "Anna", bobNow: "Bob"])
+        #expect(plan.notKept.isEmpty)
+        // The other channel is not part of it.
+        #expect(overlap.oldSpeech["Fred"] == nil)
+    }
+
+    /// An echo voice is never a person on this side: its lines are left out of the new speakers the
+    /// names can go to, so no name lands on it — not even the one typed on the old echo row.
+    @Test("an echo cluster is left out of the overlap: no name can land on it")
+    func anEchoClusterTakesNoName() async throws {
+        let voices = TwoVoices()
+        let before = voices.segments(own: "Fred", bleed: "Local Speaker 2")
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: voices.diarization()))
+        #expect(outcome.echoClusters == 1)
+        #expect(Set(outcome.labelOverlap.newSpeech.keys) == ["Local Speaker 1"])
+
+        let plan = SpeakerNameCarryOver.plan(
+            outcome.labelOverlap, names: ["Fred": "Fred", "Local Speaker 2": "Bob"], uncarriable: ["Local Speaker 2"])
+        #expect(plan.kept == ["Local Speaker 1": "Fred"])
+        #expect(plan.suggestions["Local Speaker 2"] == nil)
+        #expect(plan.notKept == ["Bob"])
+    }
 }

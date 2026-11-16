@@ -8,3 +8,10 @@ rules:
         # The owner's reusable workflows track @main on purpose (R10: one place to fix).
         # Setting any policy replaces zizmor's defaults, so every other action must be SHA-pinned.
         "fmasi/*": ref-pin
+  dangerous-triggers:
+    # claude.yml listens on issue_comment so `@claude` works on PRs and issues. The reusable
+    # workflow it calls (fmasi/.github claude-mention.yml) runs only when the author is an OWNER,
+    # MEMBER or COLLABORATOR (R2), so a stranger's comment does nothing. zizmor 1.32 reports this
+    # trigger as high; CI's pinned 1.30.1 did not.
+    ignore:
+      - claude.yml

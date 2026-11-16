@@ -61,6 +61,14 @@ struct RenameDialog: View {
     /// What the last Re-detect on each channel produced, shown under its row (P5) — so a run that
     /// found fewer speakers than asked for, or relabeled nothing, says so instead of looking done.
     @State private var rediarizeOutcomes: [String: TranscriptRediarizer.Outcome] = [:]
+    /// Where the last Re-detect on each channel put the names already typed (#359): kept on a new
+    /// speaker, offered as a suggestion, or neither. Worked out by `SpeakerNameCarryOver`; shown on
+    /// the cards and under the channel's row.
+    @State private var carryOver: [String: SpeakerNameCarryOver.Plan] = [:]
+    /// The channel a re-detect rewrote whose rows then could not be reloaded (#359 review): its rows
+    /// on screen carry labels the transcript no longer has. Save and Re-detect wait for a reload —
+    /// names are never matched to the new labels by position (#202).
+    @State private var staleRowsChannel: String?
     /// What the echo check recorded in the transcript (#244): which speaker rows it judged to be the
     /// other side's voice through the loudspeakers, and with what numbers. Loaded with the rows by
     /// `RenameWindowController` (one read, off the main thread) and again after a re-detect, which
@@ -81,6 +89,9 @@ struct RenameDialog: View {
     /// given path. The controller renames the session's files (`SessionRenamer`) before writing the names.
     let onSave: @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome
     let onCancel: () -> Void
+    /// The names a close would lose, each time they change (#359): the window asks before a close
+    /// throws them away.
+    let onUnsavedNamesChange: ([String]) -> Void
 
     init(
         jsonPath: URL,
@@ -89,7 +100,8 @@ struct RenameDialog: View {
         initialChannelNames: [String: [String: String]] = [:],
         initialEcho: EchoNotice.Findings = .none,
         onSave: @escaping @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome,
-        onCancel: @escaping () -> Void = {}
+        onCancel: @escaping () -> Void = {},
+        onUnsavedNamesChange: @escaping ([String]) -> Void = { _ in }
     ) {
         self._jsonPath = State(initialValue: jsonPath)
         self.allowsSessionRename = allowsSessionRename
@@ -99,6 +111,22 @@ struct RenameDialog: View {
         self._echo = State(initialValue: initialEcho)
         self.onSave = onSave
         self.onCancel = onCancel
+        self.onUnsavedNamesChange = onUnsavedNamesChange
+    }
+
+    /// Ask before a Cancel, Escape or a window close throws away kept names not yet saved (#359).
+    /// True to go ahead. No names, no question.
+    @MainActor
+    static func confirmDiscard(names: [String]) -> Bool {
+        guard !names.isEmpty else { return true }
+        let copy = SpeakerNameCarryOver.discardConfirmation(names: names)
+        let alert = NSAlert()
+        alert.messageText = copy.title
+        alert.informativeText = copy.message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: copy.keep)
+        alert.addButton(withTitle: copy.discard)
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     /// Channels present in this recording, in display order.
@@ -172,7 +200,7 @@ struct RenameDialog: View {
                         } else {
                             Button("Re-detect") { confirmThenRediarize(channel: channel, count: count) }
                                 .font(.caption)
-                                .disabled(rediarizing != nil)
+                                .disabled(rediarizing != nil || staleRowsChannel != nil)
                         }
                     }
                     if let absorbed = absorbedClusters[channel], absorbed > 0 {
@@ -188,6 +216,12 @@ struct RenameDialog: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        if let names = carryOver[channel].flatMap(SpeakerNameCarryOver.outcome) {
+                            Text(names)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     } else if let hint = echo.redetectHint(on: channel) {
                         // Before a re-detect: why the count is one less than the rows above, and
                         // what a re-detect does with an echo voice (#244).
@@ -203,6 +237,10 @@ struct RenameDialog: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if let stale = staleRowsChannel {
+                    Button("Reload Speakers") { reloadRows(after: stale) }
+                        .font(.caption)
                 }
             }
         }
@@ -264,45 +302,44 @@ struct RenameDialog: View {
         return isLocal ? "local" : "remote"
     }
 
-    /// Names a re-detect on this channel would destroy: those already written to the transcript,
-    /// plus any typed into a field but not yet saved. Both are lost, so both have to count.
-    private func hasNamesToLose(on channel: String) -> Bool {
-        let unsaved = speakers.contains { speaker in
-            guard self.channel(of: speaker) == channel else { return false }
-            let typed = speaker.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !typed.isEmpty && typed != speaker.id
-        }
-        if unsaved { return true }
-        // From the cache loaded once when the dialog appeared, not a fresh read of the transcript
-        // (#207) — `recording_directory` can be network- or iCloud-backed, and a synchronous read
-        // on every button press blocks the main thread for as long as the mount takes to answer.
-        return !(cachedChannelNames[channel] ?? [:]).isEmpty
+    /// The names on this channel's rows a re-detect has to place again: those already written to the
+    /// transcript (the row's label is then the name) and those typed into a field but not yet saved.
+    /// Both count (#359). In row order.
+    private func names(on channel: String) -> [String] {
+        let rows = speakers.filter { self.channel(of: $0) == channel }
+        let fields = Dictionary(rows.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+        let typed = SpeakerNameCarryOver.names(fields: fields, oldLabels: [])
+        var names: [String] = []
+        for row in rows { if let name = typed[row.id], !names.contains(name) { names.append(name) } }
+        return names
     }
 
-    /// Ask before clearing names (#202).
+    /// Whether a re-detect on this channel has names to place: on its rows, or saved for a speaker
+    /// too quiet for a row. The saved ones come from the cache loaded once when the dialog appeared,
+    /// not a fresh read of the transcript (#207) — `recording_directory` can be network- or
+    /// iCloud-backed, and a synchronous read on every button press blocks the main thread for as
+    /// long as the mount takes to answer.
+    private func hasNames(on channel: String) -> Bool {
+        !names(on: channel).isEmpty || !(cachedChannelNames[channel] ?? [:]).isEmpty
+    }
+
+    /// Ask before re-detecting a channel that has names (#202, #359).
     ///
-    /// Re-detecting produces a new set of clusters, and the names on this channel are dropped
-    /// rather than carried over — carrying them re-points a name at whatever cluster the new run
-    /// emits first, which can be a different person. That trade is defensible but it is not
-    /// guessable, so it is stated in plain words before anything is written. Cancel touches
-    /// nothing: the transcript is only rewritten inside `rediarize`.
+    /// Re-detecting produces a new set of clusters, numbered afresh, so a name cannot follow its
+    /// label. After the re-detect each name goes where the SPEECH it was typed on went
+    /// (`SpeakerNameCarryOver`): kept where the voice clearly matches, otherwise offered as a
+    /// suggestion, never filled in. Which name lands where is only known once the voices are worked
+    /// out again, so this states the rule, and the cards and the channel's row say the result.
+    /// Cancel touches nothing: the transcript is only rewritten inside `rediarize`.
     private func confirmThenRediarize(channel: String, count: Int) {
-        guard hasNamesToLose(on: channel) else {
+        guard hasNames(on: channel) else {
             rediarize(channel: channel, count: count)
             return
         }
-        let side = channel == "local" ? "this side" : "the other side"
+        let copy = SpeakerNameCarryOver.confirmation(channel: channel, names: names(on: channel))
         let alert = NSAlert()
-        alert.messageText = "Re-detecting will clear the names on \(side)"
-        alert.informativeText =
-            "Working out the speakers again produces a new set of voices, and Parley will not guess "
-            + "which new speaker each existing name belongs to — guessing wrong would put the wrong "
-            + "name on the wrong words. You can name them again straight afterwards, and the old "
-            // Name the OPPOSITE channel explicitly: when the channel being re-detected is the remote
-            // one, `side` above is already "the other side", and a fixed "the other side" here
-            // contradicted the title in the one sentence meant to reassure — at the exact moment
-            // the user is deciding whether to discard naming work.
-            + "names are kept in the transcript's metadata. Names on \(channel == "local" ? "the other side" : "this side") are unaffected."
+        alert.messageText = copy.title
+        alert.informativeText = copy.message
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Re-detect")
         alert.addButton(withTitle: "Cancel")
@@ -314,6 +351,8 @@ struct RenameDialog: View {
         rediarizing = channel
         rediarizeError = nil
         rediarizeOutcomes[channel] = nil
+        // `carryOver[channel]` stays until this run succeeds: a failed or cancelled run leaves the
+        // rows, and their suggestions, as they were (#359 review).
         rediarizePhase = nil
         rediarizeFraction = nil
         rediarizeStartedAt = Date()
@@ -369,9 +408,40 @@ struct RenameDialog: View {
                         // The transcript HAS been rewritten at this point. Silently keeping the old
                         // rows would show a stale speaker list under a dialog that looked like it
                         // succeeded — worse than saying nothing happened.
-                        rediarizeError = "Re-detection finished but the speaker list could not be reloaded."
+                        rediarizeError = "Re-detection finished but the speaker list could not be reloaded. "
+                            + "Names typed on \(channel == "local" ? "this side" : "the other side") were not carried over."
+                        // The rows on screen carry labels the transcript no longer has: no name is
+                        // carried, and none is matched to the new labels by position (#202). The
+                        // channel's fields go back to their labels; Save and Re-detect wait for a
+                        // reload.
+                        carryOver[channel] = nil
+                        speakers = speakers.map { row in
+                            guard self.channel(of: row) == channel else { return row }
+                            var row = row
+                            row.displayName = row.id
+                            return row
+                        }
+                        staleRowsChannel = channel
                     } else {
-                        speakers = refreshed
+                        // The names go where their speech went (#359), from the fields as they are
+                        // NOW — typed during the re-detect included — and the echo findings from
+                        // before it: a name typed on an echo row is never carried. An earlier
+                        // re-detect's suggestions nobody took are reported again, not dropped.
+                        let plan = SpeakerNameCarryOver.plan(
+                            outcome.labelOverlap, fields: fields(on: channel), echo: echo, channel: channel,
+                            previous: carryOver[channel])
+                        carryOver[channel] = plan
+                        let fields = SpeakerNameCarryOver.fields(
+                            rows: refreshed.map { ($0.id, self.channel(of: $0)) },
+                            previous: Dictionary(speakers.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first }),
+                            redetected: channel, plan: plan)
+                        speakers = refreshed.map { row in
+                            var row = row
+                            row.displayName = fields[row.id] ?? row.id
+                            return row
+                        }
+                        Logger.state.info(
+                            "Re-detect kept \(plan.kept.count, privacy: .public) name(s) on \(channel, privacy: .public); \(plan.notKept.count, privacy: .public) not kept, \(plan.suggestions.count, privacy: .public) speaker(s) with a suggestion")
                     }
                     cachedChannelNames = namesNow
                     // Only from a transcript that was read: an unreadable one answers "no echo",
@@ -417,6 +487,51 @@ struct RenameDialog: View {
         }
     }
 
+    /// The names a Cancel or a close would lose (#359): what the fields hold on each channel a
+    /// re-detect rewrote. Watched, so the window's close button asks too.
+    private var unsavedNames: [String] {
+        SpeakerNameCarryOver.unsavedNames(
+            fields: Dictionary(uniqueKeysWithValues: carryOver.keys.map { ($0, fields(on: $0)) }), plans: carryOver)
+    }
+
+    /// The name fields of a channel's rows, by row label.
+    private func fields(on channel: String) -> [String: String] {
+        let rows = speakers.filter { self.channel(of: $0) == channel }
+        return Dictionary(rows.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Read the rows again after a re-detect whose reload failed (#359 review). The re-detected
+    /// channel's rows come back with their labels in the fields — no carry-over; the other
+    /// channel's fields keep what was typed.
+    private func reloadRows(after channel: String) {
+        let path = jsonPath
+        rediarizeError = nil
+        Task {
+            let (refreshed, namesNow, echoNow) = await Task.detached(priority: .userInitiated) {
+                RenameWindowController.parseSpeakersAndChannelNames(from: path, minSegments: 1)
+            }.value
+            await MainActor.run {
+                guard !refreshed.isEmpty else {
+                    rediarizeError = "The speaker list could not be reloaded."
+                    return
+                }
+                let fields = SpeakerNameCarryOver.fields(
+                    rows: refreshed.map { ($0.id, self.channel(of: $0)) },
+                    previous: Dictionary(speakers.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first }),
+                    redetected: channel, plan: .none)
+                speakers = refreshed.map { row in
+                    var row = row
+                    row.displayName = fields[row.id] ?? row.id
+                    return row
+                }
+                cachedChannelNames = namesNow
+                echo = echoNow
+                sampleIndices = [:]
+                staleRowsChannel = nil
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
@@ -438,7 +553,12 @@ struct RenameDialog: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { rediarizeTask?.cancel(); onCancel() }
+                Button("Cancel") {
+                    // Escape lands here too (`.cancelAction`). Kept names not yet saved are asked about (#359).
+                    guard Self.confirmDiscard(names: unsavedNames) else { return }
+                    rediarizeTask?.cancel()
+                    onCancel()
+                }
                     .keyboardShortcut(.cancelAction)
                     // Not while a Save renames the session's files (#357): the panel closes when it is done.
                     .disabled(saving)
@@ -472,12 +592,15 @@ struct RenameDialog: View {
                 // Saving mid-re-detect is a lost-work race: onSave writes the speaker names, the
                 // dialog closes, and a re-diarization already past its last cancellation check then
                 // rewrites the whole transcript — wiping the names that were just applied.
-                .disabled(rediarizing != nil || saving)
+                .disabled(rediarizing != nil || saving || staleRowsChannel != nil)
             }
         }
         .padding(20)
         .frame(width: 400)
         .modifier(GlassBackgroundModifier(cornerRadius: 12))
+        .onChange(of: unsavedNames) { _, names in
+            onUnsavedNamesChange(names)
+        }
         .task {
             // Off the main actor: a long meeting's transcript is several hundred KB.
             let path = jsonPath
@@ -616,10 +739,35 @@ struct RenameDialog: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // What a re-detect did with the names typed before it (#359): a kept name says so, and a
+            // name that was not kept is offered, never filled in.
+            let plan = channel(of: speaker.wrappedValue).flatMap { carryOver[$0] }
+            if let plan, let note = SpeakerNameCarryOver.cardNote(
+                forRow: speakerId, field: speaker.wrappedValue.displayName, plan: plan) {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             TextField("Name", text: speaker.displayName)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit { stopPlayback() }
                 .onChange(of: speaker.wrappedValue.displayName) { _, _ in stopPlayback() }
+
+            if let suggested = plan?.suggestions[speakerId], !suggested.isEmpty {
+                HStack(spacing: 6) {
+                    Text("Suggested:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(suggested, id: \.self) { name in
+                        Button(name) { speaker.wrappedValue.displayName = name }
+                            .font(.caption)
+                            .controlSize(.small)
+                            .help("Use this name")
+                    }
+                }
+            }
 
             if let sample {
                 Text("“\(sample.text)”")
