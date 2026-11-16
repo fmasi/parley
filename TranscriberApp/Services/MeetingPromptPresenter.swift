@@ -195,7 +195,7 @@ final class MeetingPromptPresenter {
             presentStopOffer(app)
         case .withdrawStop:
             appState.detectedMeeting = nil
-            // The call came back, or "Keep recording": the recording island returns, compact (#358).
+            // Nothing comes back after it: the recording island it may have replaced is gone for good (#358).
             islandEvent(.stopOfferWithdrawn)
         case .watch(let bundleIDs):
             sensor.setWatched(bundleIDs: bundleIDs)
@@ -348,24 +348,33 @@ final class MeetingPromptPresenter {
         for effect in result.effects {
             switch effect {
             case .hide: island.hide()
-            case .showRecording(let expanded): showRecordingIsland(expanded: expanded)
-            case .refreshRecording: showRecordingIsland(expanded: island.isExpanded)
+            case .showRecording: showRecordingIsland()
+            case .updateRecordingSubtitle: if let line = recordingIslandSubtitle() { island.update(subtitle: line) }
             }
         }
     }
 
-    private func showRecordingIsland(expanded: Bool) {
-        guard let recording = islandState.recording, let name = coordinator.recordingSessionName else { return }
+    /// The recording island, for its ~20 s after a one-click start: the island view's own collapse delay
+    /// (`MeetingIslandCollapse`, held while the pointer rests on it) then withdraws it for good — the menu's name row
+    /// carries the name for the rest of the call (owner decision).
+    private func showRecordingIsland() {
+        guard let subtitle = recordingIslandSubtitle(), let name = coordinator.recordingSessionName else { return }
         island.show(MeetingIslandOffer(
             title: MeetingOfferText.recordingTitle,
-            subtitle: MeetingOfferText.recordingSubtitle(
-                name: name, fromCalendar: recording.fromCalendar, pending: coordinator.recordingSessionNameIsPending),
+            subtitle: subtitle,
             primaryTitle: "Rename…",
             primary: { [weak self] in self?.editRecordingName() },
             menu: [("Hide", { [weak self] in self?.islandEvent(.hideChosen) })],
             compactLabel: MeetingOfferText.recordingLabel(name: name),
-            primaryIsProminent: false
-        ), expanded: expanded)
+            primaryIsProminent: false,
+            onCollapse: { [weak self] in self?.islandEvent(.recordingIslandExpired) }
+        ), expanded: true)
+    }
+
+    private func recordingIslandSubtitle() -> String? {
+        guard let recording = islandState.recording, let name = coordinator.recordingSessionName else { return nil }
+        return MeetingOfferText.recordingSubtitle(
+            name: name, fromCalendar: recording.fromCalendar, pending: coordinator.recordingSessionNameIsPending)
     }
 
     /// The recording is over (stopped, or failed): its island and its name panel go — the rename dialog that follows

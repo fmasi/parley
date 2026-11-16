@@ -6,7 +6,12 @@ import Foundation
 ///
 /// Three contents share the one island: the start offer, the stop offer, and — after a one-click start — the recording
 /// itself (its name, Rename…, Hide). A withdrawal takes down only its own content: the recording island that replaced a
-/// start offer survives that offer's withdrawal, and comes back, compact, when a stop offer it gave way to is withdrawn.
+/// start offer survives that offer's withdrawal.
+///
+/// The recording island is a confirmation, not a fixture (owner decision): it withdraws once its collapse delay
+/// (`MeetingIslandCollapse`, about 20 s, longer while the pointer rests on it) runs out, and never comes back for that
+/// recording — not for a late calendar title, a rename, or a stop offer's withdrawal. The menu's name row carries the name
+/// for the rest of the call.
 public enum MeetingIslandContent: Equatable, Sendable {
     case startOffer, stopOffer, recording
 }
@@ -16,7 +21,8 @@ public struct RecordingIslandState: Equatable, Sendable {
     public let sessionKey: String
     /// Its name came from the calendar — at the start, or a title that arrived after it.
     public var fromCalendar: Bool
-    /// The user chose Hide, or turned meeting sensing off: not shown again for this recording.
+    /// Gone for this recording: its delay ran out, a stop offer replaced it, the user chose Hide, or meeting sensing went
+    /// off. Never shown again for it.
     public var hidden: Bool
 
     public init(sessionKey: String, fromCalendar: Bool, hidden: Bool = false) {
@@ -52,6 +58,8 @@ public enum MeetingIslandEvent: Equatable, Sendable {
     case renamedByUser
     /// Hide, from the recording island's menu.
     case hideChosen
+    /// The recording island's collapse delay ran out (`MeetingIslandCollapse`, the island view's own timer).
+    case recordingIslandExpired
     /// The phase left `.recording`.
     case recordingEnded
     /// `meeting_sensing` went off: no island at all.
@@ -60,10 +68,10 @@ public enum MeetingIslandEvent: Equatable, Sendable {
 
 public enum MeetingIslandEffect: Equatable, Sendable {
     case hide
-    /// Show the recording island (expanded, or compact).
-    case showRecording(expanded: Bool)
-    /// Show it again with its current name, expanded or compact as the user left it.
-    case refreshRecording
+    /// Show the recording island, expanded.
+    case showRecording
+    /// Its name changed while it is up: update its line in place, never restarting its delay.
+    case updateRecordingSubtitle
 }
 
 public enum MeetingIslandReducer {
@@ -74,44 +82,44 @@ public enum MeetingIslandReducer {
         var s = state
         var effects: [MeetingIslandEffect] = []
 
-        /// The recording island may be on screen: its recording is the one recording, the user has not hidden it, sensing
-        /// is on, and no stop offer holds the island.
+        /// The recording island may be on screen: its recording is the one recording, it has not gone for good, and
+        /// sensing is on.
         func recordingMayShow() -> Bool {
-            guard let recording = s.recording, !recording.hidden, sensingOn,
-                  recording.sessionKey == recordingSessionKey else { return false }
-            return s.showing != .stopOffer
+            guard let recording = s.recording, !recording.hidden, sensingOn else { return false }
+            return recording.sessionKey == recordingSessionKey
         }
         func hide() {
             if s.showing != nil { effects.append(.hide) }
             s.showing = nil
         }
-        func showRecording(expanded: Bool) {
-            guard recordingMayShow() else { return }
-            effects.append(.showRecording(expanded: expanded))
-            s.showing = .recording
-        }
         func refresh() {
-            if s.showing == .recording, recordingMayShow() { effects.append(.refreshRecording) }
+            if s.showing == .recording, recordingMayShow() { effects.append(.updateRecordingSubtitle) }
+        }
+        /// The recording island goes for good, hidden now if it is the one on screen.
+        func withdrawRecording() {
+            s.recording?.hidden = true
+            if s.showing == .recording { hide() }
         }
 
         switch event {
         case .startOfferShown:
             s.showing = .startOffer
         case .stopOfferShown:
+            // It replaces the recording island for good: nothing is restored after it.
+            if s.showing == .recording { s.recording?.hidden = true }
             s.showing = .stopOffer
         case .startOfferWithdrawn:
             if s.showing == .startOffer { hide() }
         case .stopOfferWithdrawn:
-            // The call came back, or "Keep recording": the recording island returns, compact.
-            if s.showing == .stopOffer {
-                hide()
-                showRecording(expanded: false)
-            }
+            if s.showing == .stopOffer { hide() }
         case .offerAnswered:
             hide()
         case .recordingStarted(let key, let fromCalendar):
             s.recording = RecordingIslandState(sessionKey: key, fromCalendar: fromCalendar)
-            showRecording(expanded: true)
+            if recordingMayShow() {
+                effects.append(.showRecording)
+                s.showing = .recording
+            }
         case .calendarTitleAdopted(let key):
             guard s.recording?.sessionKey == key else { break }
             s.recording?.fromCalendar = true
@@ -121,8 +129,10 @@ public enum MeetingIslandReducer {
             s.recording?.fromCalendar = false
             refresh()
         case .hideChosen, .sensingTurnedOff:
-            s.recording?.hidden = true
-            if s.showing == .recording { hide() }
+            withdrawRecording()
+        case .recordingIslandExpired:
+            // A stale expiry (a stop offer already holds the island, or nothing does) changes nothing.
+            if s.showing == .recording { withdrawRecording() }
         case .recordingEnded:
             s.recording = nil
             // A stop offer still up goes with the engine's own withdrawal.

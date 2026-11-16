@@ -10,11 +10,14 @@ struct MeetingIslandOffer {
     let primary: @MainActor () -> Void
     /// Secondary choices behind the chevron: ("Name it first…", …), ("Not now", …), …
     let menu: [(title: String, action: @MainActor () -> Void)]
-    /// Compact state text: the app name ("Zoom"), or the recording's name while one runs (#358).
+    /// Compact state text: the app name ("Zoom"). The recording island (#358) never collapses to it: it withdraws.
     let compactLabel: String
     /// The red, prominent button of a start or stop offer. Off for the recording island's "Rename…" (#358): editing a
     /// name is not the destructive, record-or-stop answer the red button stands for.
     var primaryIsProminent = true
+    /// What the collapse delay running out does instead of collapsing to the compact pill: the recording island withdraws
+    /// (owner decision, #358). nil = collapse, as the offers do.
+    var onCollapse: (@MainActor () -> Void)? = nil
 }
 
 /// What restarts the collapse countdown. `generation` is what makes a *re-show* count: a stop offer
@@ -65,7 +68,9 @@ struct MeetingIslandView: View {
                 await MeetingIslandCollapse.run(
                     sleep: { try? await Task.sleep(for: .seconds(MeetingIslandCollapse.delaySeconds)) },
                     isHovering: { model.isHovering },
-                    collapse: { model.isExpanded = false }
+                    collapse: {
+                        if let withdraw = model.offer.onCollapse { withdraw() } else { model.isExpanded = false }
+                    }
                 )
             }
     }
@@ -126,8 +131,7 @@ struct MeetingIslandView: View {
     private var compact: some View {
         HStack(spacing: 8) {
             // The design system's dot. Not pulsing: a start offer is not a recording, and the same pill
-            // serves both offers — a pulse here would claim Parley is already capturing. Nor on the recording
-            // island (#358): a pulse there would redraw for the whole call.
+            // serves both offers — a pulse here would claim Parley is already capturing.
             StatusDot(color: .red)
             Text(model.offer.compactLabel).font(.caption.weight(.medium)).lineLimit(1)
         }
