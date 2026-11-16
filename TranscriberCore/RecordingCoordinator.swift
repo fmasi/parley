@@ -173,6 +173,8 @@ public final class RecordingCoordinator {
     var unappliedSessionNames: [String: String] = [:]
     /// What the finish's session rename runs on (#358). Tests make one hang.
     var sessionRenameFileSystem: any SessionRenameFileSystem = LiveSessionRenameFileSystem()
+    /// The clock the finish's session-rename bounds run on: awake time. Tests move it by hand.
+    var sessionRenameClock: any Clock<Duration> = SuspendingClock()
     /// Where the Stop kept apart is written and read: a serial queue of its own (L review 236). Tests inject one.
     var stopRequestIO = SentinelIO(label: "eu.fmasi.parley.stop-request")
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or

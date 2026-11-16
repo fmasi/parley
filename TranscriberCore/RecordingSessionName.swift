@@ -40,7 +40,8 @@ public struct PendingSessionName: Equatable, Sendable {
 
     /// The name part of a session key (`…/093000-weekly sync` → `weekly sync`; `…/093000` → empty): what the files carry.
     public static func name(ofSessionKey key: String) -> String {
-        let id = URL(fileURLWithPath: key).lastPathComponent
+        // Lexical: read by the menu's body, on the main actor (a file URL built without `isDirectory` stats the path).
+        let id = (key as NSString).lastPathComponent
         return String(id.dropFirst(SessionRenamer.timestampLength).dropFirst())
     }
 
@@ -106,15 +107,17 @@ extension RecordingCoordinator {
     /// this session's, and nothing else will apply it.
     private func takePendingName(for transcript: URL) -> PendingSessionName? {
         guard let pending = pendingSessionName, let id = SessionRenamer.sessionId(ofTranscript: transcript),
-              Self.lexicallySameSession(Self.sessionKey(of: (transcript.deletingLastPathComponent(), id)), pending.sessionKey)
+              Self.lexicallySameSession((transcript.deletingLastPathComponent().path as NSString).appendingPathComponent(id),
+                                        pending.sessionKey)
         else { return nil }
         pendingSessionName = nil
         return pending
     }
 
-    /// Lexical, never a file-system call: this runs on the main actor (`standardizedFileURL` removes `.` and `..` only).
+    /// Lexical, never a file-system call: this runs on the main actor. `isDirectory: false` — without it the URL stats the
+    /// path to learn whether it is a directory — and `standardized` removes `.` and `..` only (as `FolderReads.normalised`).
     nonisolated static func lexicallySameSession(_ a: String, _ b: String) -> Bool {
-        URL(fileURLWithPath: a).standardizedFileURL.path == URL(fileURLWithPath: b).standardizedFileURL.path
+        URL(fileURLWithPath: a, isDirectory: false).standardized.path == URL(fileURLWithPath: b, isDirectory: false).standardized.path
     }
 
     /// A transcript of the recording with a pending name was written by something other than its Stop's finish — a salvage
@@ -138,7 +141,8 @@ extension RecordingCoordinator {
     ///
     /// The rename is ABANDONABLE: on a folder that stops answering, one that has not started by its bound never runs —
     /// landing after the app showed the old path, it would break the notice, the dialog, the auto-summary and its stamp.
-    /// One already under way runs on; the transcript is shown where it is then.
+    /// One already under way is waited for one more bound, for its own answer (the `AbandonableStep` rule); still running
+    /// after that, it runs on and the transcript is shown where it is then. The bounds run on `sessionRenameClock`.
     func applyPendingSessionName(to result: TranscriptionResult, recoveryFileGone: Bool = true) async -> TranscriptionResult {
         guard pendingSessionName != nil else { return result }
         let transcript = result.jsonPath, folder = transcript.deletingLastPathComponent()
@@ -168,37 +172,81 @@ extension RecordingCoordinator {
         }) != nil
         guard flushed else { return handOver("the live diagnostic log's delete had not run", result) }
 
-        let claim = OnceFlag(), fileSystem = sessionRenameFileSystem
-        let outcome = await folderReads.read("finish: session rename", folder: folder.path, seconds: Self.seconds(folderWriteDeadline)) {
-            // Claimed before anything moves: a finish whose bound ran out first has claimed it, and this never runs.
-            guard claim.claim() else { return Result<URL, Error>.failure(SessionRenamer.RenameError.failedAndRolledBack) }
-            return Result { try SessionRenamer.rename(transcript: transcript, toName: name, fileSystem: fileSystem) }
+        let claim = OnceFlag(), fileSystem = sessionRenameFileSystem, answer = RenameAnswer()
+        let reads = folderReads, clock = sessionRenameClock, writeBound = Self.seconds(folderWriteDeadline)
+        // On the folder's queue, as every read and write of it; the bound is this finish's, below, on its own clock.
+        Task.detached {
+            let outcome = await reads.read("finish: session rename", folder: folder.path, seconds: 86_400) {
+                // Claimed before anything moves: a finish whose bound ran out first has claimed it, and this never runs.
+                guard claim.claim() else { return Result<URL, Error>.failure(SessionRenamer.RenameError.failedAndRolledBack) }
+                return Result { try SessionRenamer.rename(transcript: transcript, toName: name, fileSystem: fileSystem) }
+            }
+            answer.deliver(outcome ?? .failure(SessionRenamer.RenameError.cannotTell))
         }
-        switch outcome {
-        case .success(let renamed)?:
+        func waitForTheAnswer() async -> Result<URL, Error>? {
+            let got: Result<Result<URL, Error>, Error> = await boundedReply("session rename", seconds: writeBound, clock: clock) { done in
+                answer.whenAnswered { done(.success($0)) }
+            }
+            return try? got.get()
+        }
+        func applied(_ renamed: URL) -> TranscriptionResult {
             Logger.state.notice("The name chosen while recording was applied (\(pending.origin.rawValue, privacy: .public))")
             return TranscriptionResult(jsonPath: renamed, removedRecordings: result.removedRecordings, quotaPass: result.quotaPass)
-        case .failure(let error)?:
+        }
+        func failed(_ error: Error) -> TranscriptionResult {
             // Nothing was renamed (or all of it was put back).
             Logger.state.error("Session rename at the finish: \(error, privacy: .private)")
             return handOver("the rename was refused or failed", result)
-        case nil:
-            if claim.claim() {
-                return handOver("the recording folder did not answer before the rename could start (it never will)", result)
-            }
-            // Under way when the bound ran out: it runs on. Show the transcript where it is now — looked at off the main
-            // actor, bounded; unanswered, where it was.
-            let newTranscript = folder.appendingPathComponent("\(SessionRenamer.newSessionId(oldId: oldId, name: name)).json")
-            let moved = (try? await withDeadline(seconds: bound, label: "where the transcript is") {
-                FileManager.default.fileExists(atPath: newTranscript.path)
-            }) ?? false
-            Logger.state.error("""
-                The session rename did not finish within \(Self.seconds(self.folderWriteDeadline), privacy: .public) s — it runs on; \
-                the transcript is shown \(moved ? "under the new name" : "where it was", privacy: .public)
-                """)
-            return moved
-                ? TranscriptionResult(jsonPath: newTranscript, removedRecordings: result.removedRecordings, quotaPass: result.quotaPass)
-                : result
         }
+
+        if let first = await waitForTheAnswer() {
+            switch first { case .success(let renamed): return applied(renamed); case .failure(let error): return failed(error) }
+        }
+        if claim.claim() {
+            return handOver("the recording folder did not answer before the rename could start (it never will)", result)
+        }
+        // Under way when its bound ran out: one more bound for its own answer (the `AbandonableStep` rule).
+        if let second = await waitForTheAnswer() {
+            switch second { case .success(let renamed): return applied(renamed); case .failure(let error): return failed(error) }
+        }
+        // Still running: it runs on. Show the transcript where it is now — looked at on a dispatch queue, never the
+        // cooperative pool, bounded; unanswered, where it was.
+        let newTranscript = folder.appendingPathComponent("\(SessionRenamer.newSessionId(oldId: oldId, name: name)).json", isDirectory: false)
+        let looked: Result<Bool, Error> = await boundedReply("where the transcript is", seconds: bound, clock: clock) { done in
+            DispatchQueue.global(qos: .userInitiated).async { done(.success(FileManager.default.fileExists(atPath: newTranscript.path))) }
+        }
+        let moved = (try? looked.get()) ?? false
+        Logger.state.error("""
+            The session rename did not finish within two bounds of \(writeBound, privacy: .public) s — it runs on; \
+            the transcript is shown \(moved ? "under the new name" : "where it was", privacy: .public)
+            """)
+        return moved
+            ? TranscriptionResult(jsonPath: newTranscript, removedRecordings: result.removedRecordings, quotaPass: result.quotaPass)
+            : result
+    }
+}
+
+/// The finish's session rename's own answer (#358), whenever it comes: what the finish waits for within its bounds.
+final class RenameAnswer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Result<URL, Error>?
+    private var waiters: [@Sendable (Result<URL, Error>) -> Void] = []
+
+    func deliver(_ result: Result<URL, Error>) {
+        let waiting = lock.withLock { () -> [@Sendable (Result<URL, Error>) -> Void] in
+            value = result
+            defer { waiters = [] }
+            return waiters
+        }
+        waiting.forEach { $0(result) }
+    }
+
+    func whenAnswered(_ waiter: @escaping @Sendable (Result<URL, Error>) -> Void) {
+        let now = lock.withLock { () -> Result<URL, Error>? in
+            if let value { return value }
+            waiters.append(waiter)
+            return nil
+        }
+        if let now { waiter(now) }
     }
 }
