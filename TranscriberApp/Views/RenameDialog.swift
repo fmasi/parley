@@ -96,6 +96,7 @@ struct RenameDialog: View {
     init(
         jsonPath: URL,
         allowsSessionRename: Bool = true,
+        initialSessionName: String? = nil,
         speakers: [SpeakerEntry],
         initialChannelNames: [String: [String: String]] = [:],
         initialEcho: EchoNotice.Findings = .none,
@@ -105,7 +106,8 @@ struct RenameDialog: View {
     ) {
         self._jsonPath = State(initialValue: jsonPath)
         self.allowsSessionRename = allowsSessionRename
-        self._sessionName = State(initialValue: SessionRenamer.sessionName(ofTranscript: jsonPath) ?? "")
+        // A name chosen while it recorded that the finish could not apply (#358) is the field's start: a Save applies it.
+        self._sessionName = State(initialValue: initialSessionName ?? SessionRenamer.sessionName(ofTranscript: jsonPath) ?? "")
         self._speakers = State(initialValue: speakers)
         self._cachedChannelNames = State(initialValue: initialChannelNames)
         self._echo = State(initialValue: initialEcho)

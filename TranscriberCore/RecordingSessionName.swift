@@ -72,7 +72,7 @@ extension RecordingCoordinator {
     /// Whether `recordingSessionName` is still to be applied (the files carry another name until the recording finishes).
     public var recordingSessionNameIsPending: Bool {
         guard let key = recordingSessionKey, let pending = pendingSessionName else { return false }
-        return pending.sessionKey == key
+        return pending.sessionKey == key && pending.name != PendingSessionName.name(ofSessionKey: key)
     }
 
     /// The user named the recording in progress (#358): applied once its transcript is written. False when nothing is

@@ -130,6 +130,19 @@ struct MenuView: View {
 
             recordButton
 
+            // The recording's name while it records (#358): seen, and changed, before the files are named at the finish.
+            if let name = coordinator.recordingSessionName {
+                MenuActionRow(
+                    icon: "pencil",
+                    title: MeetingOfferText.recordingLabel(name: name),
+                    subtitle: coordinator.recordingSessionNameIsPending
+                        ? "Recording name · applied when it finishes" : "Recording name"
+                ) {
+                    dismissPanel()
+                    presenter.editRecordingName()
+                }
+            }
+
             MenuActionRow(icon: "mic", title: activeMicName, subtitle: "Microphone") {
                 dismissPanel()
                 openMicPicker()

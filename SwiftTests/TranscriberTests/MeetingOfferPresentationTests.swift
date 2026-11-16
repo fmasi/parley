@@ -29,6 +29,20 @@ struct MeetingOfferTextTests {
             == "Weekly sync · Zoom")
     }
 
+    @Test("While recording, the island names the recording and says where the name came from (#358)")
+    func recordingIsland() {
+        #expect(MeetingOfferText.recordingTitle == "Recording")
+        #expect(MeetingOfferText.recordingSubtitle(name: "Weekly sync", fromCalendar: true, pending: false)
+                == "Weekly sync · from your calendar")
+        #expect(MeetingOfferText.recordingSubtitle(name: "Zoom call", fromCalendar: false, pending: false) == "Zoom call")
+        #expect(MeetingOfferText.recordingSubtitle(name: "Mine", fromCalendar: false, pending: true)
+                == "Mine · applied when it finishes")
+        #expect(MeetingOfferText.recordingSubtitle(name: " ", fromCalendar: false, pending: true)
+                == "Untitled recording · applied when it finishes")
+        #expect(MeetingOfferText.recordingLabel(name: "") == "Untitled recording")
+        #expect(MeetingOfferText.recordingLabel(name: "Weekly sync") == "Weekly sync")
+    }
+
     @Test("The stop offer names the app and the session being recorded")
     func stopSubtitle() {
         #expect(MeetingOfferText.stopSubtitle(app: zoom, sessionName: "Weekly sync")

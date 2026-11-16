@@ -51,6 +51,9 @@ final class MeetingIslandController {
         model?.offer.subtitle = subtitle
     }
 
+    /// Whether the pill is expanded now: a re-show that only renames (#358) keeps the state the user left it in.
+    var isExpanded: Bool { model?.isExpanded ?? false }
+
     func hide() {
         guard let panel, !isFadingOut else { return }
         isFadingOut = true

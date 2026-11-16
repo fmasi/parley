@@ -10,8 +10,11 @@ struct MeetingIslandOffer {
     let primary: @MainActor () -> Void
     /// Secondary choices behind the chevron: ("Name it first…", …), ("Not now", …), …
     let menu: [(title: String, action: @MainActor () -> Void)]
-    /// Compact state text: the app name ("Zoom").
+    /// Compact state text: the app name ("Zoom"), or the recording's name while one runs (#358).
     let compactLabel: String
+    /// The red, prominent button of a start or stop offer. Off for the recording island's "Rename…" (#358): editing a
+    /// name is not the destructive, record-or-stop answer the red button stands for.
+    var primaryIsProminent = true
 }
 
 /// What restarts the collapse countdown. `generation` is what makes a *re-show* count: a stop offer
@@ -93,10 +96,16 @@ struct MeetingIslandView: View {
             // becomes key, so the shortcut could only ever fire from somewhere else in the app — a
             // stray Return starting a recording is not a trade worth making for a shortcut that
             // cannot work here anyway.
-            Button(model.offer.primaryTitle) { model.offer.primary() }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .controlSize(.regular)
+            if model.offer.primaryIsProminent {
+                Button(model.offer.primaryTitle) { model.offer.primary() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.regular)
+            } else {
+                Button(model.offer.primaryTitle) { model.offer.primary() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+            }
             Menu {
                 ForEach(Array(model.offer.menu.enumerated()), id: \.offset) { _, item in
                     Button(item.title) { item.action() }
@@ -117,7 +126,8 @@ struct MeetingIslandView: View {
     private var compact: some View {
         HStack(spacing: 8) {
             // The design system's dot. Not pulsing: a start offer is not a recording, and the same pill
-            // serves both offers — a pulse here would claim Parley is already capturing.
+            // serves both offers — a pulse here would claim Parley is already capturing. Nor on the recording
+            // island (#358): a pulse there would redraw for the whole call.
             StatusDot(color: .red)
             Text(model.offer.compactLabel).font(.caption.weight(.medium)).lineLimit(1)
         }

@@ -64,6 +64,8 @@ import Testing
         #expect(h.coordinator.renameRecordingInProgress(to: " Weekly\nsync "))
         #expect(h.coordinator.recordingSessionName == "Weekly sync")
         #expect(h.coordinator.recordingSessionNameIsPending)
+        #expect(h.coordinator.renameRecordingInProgress(to: "Zoom call"))
+        #expect(!h.coordinator.recordingSessionNameIsPending, "back to the name the files already carry")
     }
 
     /// The point of #358: a name changed mid-recording is what the finished files carry — the transcript, its archive,

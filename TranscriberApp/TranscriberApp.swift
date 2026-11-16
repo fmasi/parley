@@ -210,6 +210,8 @@ struct TranscriberApp: App {
         let renamingCoordinator = coordinator
         RenameWindowController.shared.isSessionInFlight = { renamingCoordinator.isSessionInFlight(transcript: $0) }
         RenameWindowController.shared.onSessionRenamed = { renamingCoordinator.transcriptRenamed(from: $0, to: $1) }
+        // A name chosen during the recording that its finish could not apply (#358): the dialog starts from it.
+        RenameWindowController.shared.unappliedSessionName = { renamingCoordinator.unappliedSessionName(forTranscript: $0) }
 
         // Single-instance guard (#109): the crash-recovery LaunchAgent can make launchd spawn a
         // duplicate GUI copy while a user-launched instance is already running. Keep only the oldest
