@@ -164,6 +164,13 @@ public final class RecordingCoordinator {
     /// The recording's session key (L review 266): set by its start, a resume and a re-attach — so a Stop always knows what to
     /// keep apart, even when the recovery file does not answer and no pipeline is running.
     var currentSessionKey: String?
+    /// A name chosen for the recording in progress (#358) — typed by the user, or a calendar title that arrived after a
+    /// one-click start — applied with `SessionRenamer` once its transcript is written (`applyPendingSessionName`). The
+    /// capture never sees it: the helper and the chunk files keep the name the recording started with. In memory only, by
+    /// choice (`PendingSessionName`).
+    var pendingSessionName: PendingSessionName?
+    /// Names a finish could not apply, by transcript path (#358): the rename dialog starts from one, so its Save applies it.
+    var unappliedSessionNames: [String: String] = [:]
     /// Where the Stop kept apart is written and read: a serial queue of its own (L review 236). Tests inject one.
     var stopRequestIO = SentinelIO(label: "eu.fmasi.parley.stop-request")
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
@@ -599,6 +606,7 @@ public final class RecordingCoordinator {
             try await slotWriteOffMain(sentinel, "start: write", seconds: Self.seconds(until: startBy))
             startedSentinel = sentinel
             currentSessionKey = sentinel.sessionKey   // L review 266
+            pendingSessionName = nil   // a name chosen for an earlier recording is never this one's (#358)
 
             // Before the helper opens the mic, so no meter opens it meanwhile (#192).
             setHelperMic(microphoneDeviceId)
@@ -942,7 +950,8 @@ public final class RecordingCoordinator {
                 )
                 // Only now, the transcript on disk, does the live log go (L review 97).
                 captureClient.commitSessionDiagnostics(sessionId: sessionState.sessionId, directory: outputDir)
-                await presentCompletedTranscription(result)
+                // A name chosen while it recorded (#358): applied now the transcript exists, before anything is told of it.
+                await presentCompletedTranscription(await applyPendingSessionName(to: result))
             } else {
                 // Fallback: no live chunked pipeline in this process (e.g. the app relaunched and
                 // re-attached to a still-recording XPC service — Flow A never calls
@@ -1024,7 +1033,7 @@ public final class RecordingCoordinator {
                 }
 
                 if let result {
-                    await presentCompletedTranscription(result)
+                    await presentCompletedTranscription(await applyPendingSessionName(to: result))
                 } else {
                     // Chunked recovery found nothing to salvage (e.g. session.json existed but had
                     // no chunks and no orphan WAVs) — nothing to notify or rename.
