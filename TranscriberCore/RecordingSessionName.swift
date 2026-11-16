@@ -102,59 +102,103 @@ extension RecordingCoordinator {
         unappliedSessionNames.removeValue(forKey: transcript.standardizedFileURL.path)
     }
 
+    /// The pending name of the session whose transcript is `transcript`, if any, taken off the coordinator (#358): it is
+    /// this session's, and nothing else will apply it.
+    private func takePendingName(for transcript: URL) -> PendingSessionName? {
+        guard let pending = pendingSessionName, let id = SessionRenamer.sessionId(ofTranscript: transcript),
+              Self.lexicallySameSession(Self.sessionKey(of: (transcript.deletingLastPathComponent(), id)), pending.sessionKey)
+        else { return nil }
+        pendingSessionName = nil
+        return pending
+    }
+
+    /// Lexical, never a file-system call: this runs on the main actor (`standardizedFileURL` removes `.` and `..` only).
+    nonisolated static func lexicallySameSession(_ a: String, _ b: String) -> Bool {
+        URL(fileURLWithPath: a).standardizedFileURL.path == URL(fileURLWithPath: b).standardizedFileURL.path
+    }
+
+    /// A transcript of the recording with a pending name was written by something other than its Stop's finish — a salvage
+    /// of a stop that failed, a recovery (#358): never renamed there (a salvage runs under the recovery gate), never dropped.
+    /// The name goes to the rename dialog, whose Save applies it.
+    func handPendingNameToDialog(transcript: URL) {
+        guard let pending = takePendingName(for: transcript) else { return }
+        unappliedSessionNames[transcript.standardizedFileURL.path] = pending.name
+        Logger.state.notice("A recording with a name chosen while it recorded was finished by a salvage — the rename dialog offers the name")
+    }
+
     /// Rename the just-written session to the name chosen while it recorded, if any (#358). Returns the result with the
     /// transcript's new path; as it was when there is nothing to apply, or when the rename did not happen — then the name
     /// goes to the rename dialog (`unappliedSessionName`), which starts from it.
     ///
-    /// Runs inside the Stop, after the transcript is written: the session state is gone, the capture is over and nothing
-    /// else holds the session — but two queued steps of the finish still name its files by their old names. The storage
-    /// quota's pass protects the session's archives by name, and the live diagnostic log's delete is queued by session id.
-    /// Both are waited for first, bounded; one that has not finished leaves the files as they are.
-    func applyPendingSessionName(to result: TranscriptionResult) async -> TranscriptionResult {
-        guard let pending = pendingSessionName else { return result }
-        pendingSessionName = nil
+    /// Runs at the end of the Stop: the transcript is written, the stopping recovery file is deleted (`recoveryFileGone`; a
+    /// recovery file left behind would send the next launch after the old names), the session state is gone and the capture
+    /// is over. Two queued steps of the finish still name the files by their old names: the storage quota's pass protects
+    /// the session's archives by name, and the live diagnostic log's delete is queued by session id. Both are waited for
+    /// first, bounded; one that has not finished leaves the files as they are.
+    ///
+    /// The rename is ABANDONABLE: on a folder that stops answering, one that has not started by its bound never runs —
+    /// landing after the app showed the old path, it would break the notice, the dialog, the auto-summary and its stamp.
+    /// One already under way runs on; the transcript is shown where it is then.
+    func applyPendingSessionName(to result: TranscriptionResult, recoveryFileGone: Bool = true) async -> TranscriptionResult {
+        guard pendingSessionName != nil else { return result }
         let transcript = result.jsonPath, folder = transcript.deletingLastPathComponent()
-        func canonical(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path }
-        guard let oldId = SessionRenamer.sessionId(ofTranscript: transcript),
-              canonical(Self.sessionKey(of: (folder, oldId))) == canonical(pending.sessionKey)
-        else {
+        guard let pending = takePendingName(for: transcript) else {
+            pendingSessionName = nil
             Logger.state.error("A name chosen while recording belongs to another session — not applied")
             return result
         }
-        guard SessionRenamer.newSessionId(oldId: oldId, name: pending.name) != oldId else { return result }
-        let bound = Self.seconds(folderReadDeadline)
-        var quotaDone = true
-        if let pass = result.quotaPass { quotaDone = await pass.removedRecordings(within: bound) != nil }
-        let client = captureClient
-        let evidenceFlushed = (try? await withDeadline(seconds: bound, label: "evidence before a session rename") {
-            await client.flushEvidence()
-        }) != nil
-        guard quotaDone, evidenceFlushed else {
-            Logger.state.error("""
-                The name chosen while recording was not applied — the finish's queued steps had not ended \
-                (quota: \(quotaDone, privacy: .public), live log: \(evidenceFlushed, privacy: .public)); the rename dialog offers it
-                """)
-            unappliedSessionNames[transcript.standardizedFileURL.path] = pending.name
+        guard let oldId = SessionRenamer.sessionId(ofTranscript: transcript),
+              SessionRenamer.newSessionId(oldId: oldId, name: pending.name) != oldId else { return result }
+        let name = pending.name
+        func handOver(_ why: String, _ result: TranscriptionResult) -> TranscriptionResult {
+            Logger.state.error("The name chosen while recording was not applied — \(why, privacy: .public); the rename dialog offers it")
+            unappliedSessionNames[transcript.standardizedFileURL.path] = name
             return result
         }
-        let name = pending.name
+        guard recoveryFileGone else { return handOver("the recovery file's delete did not answer", result) }
+        let bound = Self.seconds(folderReadDeadline)
+        if let pass = result.quotaPass, await pass.removedRecordings(within: bound) == nil {
+            // Waited for once: the completion notice does not wait for it again.
+            return handOver("the storage quota pass had not finished",
+                            TranscriptionResult(jsonPath: transcript, removedRecordings: result.removedRecordings, quotaPass: nil))
+        }
+        let client = captureClient
+        let flushed = (try? await withDeadline(seconds: bound, label: "evidence before a session rename") {
+            await client.flushEvidence()
+        }) != nil
+        guard flushed else { return handOver("the live diagnostic log's delete had not run", result) }
+
+        let claim = OnceFlag(), fileSystem = sessionRenameFileSystem
         let outcome = await folderReads.read("finish: session rename", folder: folder.path, seconds: Self.seconds(folderWriteDeadline)) {
-            Result { try SessionRenamer.rename(transcript: transcript, toName: name) }
+            // Claimed before anything moves: a finish whose bound ran out first has claimed it, and this never runs.
+            guard claim.claim() else { return Result<URL, Error>.failure(SessionRenamer.RenameError.failedAndRolledBack) }
+            return Result { try SessionRenamer.rename(transcript: transcript, toName: name, fileSystem: fileSystem) }
         }
         switch outcome {
         case .success(let renamed)?:
             Logger.state.notice("The name chosen while recording was applied (\(pending.origin.rawValue, privacy: .public))")
             return TranscriptionResult(jsonPath: renamed, removedRecordings: result.removedRecordings, quotaPass: result.quotaPass)
         case .failure(let error)?:
-            // Nothing was renamed (or all of it was put back): the dialog offers the name again.
-            Logger.state.error("The name chosen while recording was not applied: \(error, privacy: .private) — the rename dialog offers it")
-            unappliedSessionNames[transcript.standardizedFileURL.path] = name
-            return result
+            // Nothing was renamed (or all of it was put back).
+            Logger.state.error("Session rename at the finish: \(error, privacy: .private)")
+            return handOver("the rename was refused or failed", result)
         case nil:
-            // The folder stopped answering under the rename. It may still land; `SessionRenamer` is all or nothing either way,
-            // and the dialog — reading the transcript where it was — says so if it moved.
-            Logger.state.error("The session rename did not answer within \(Self.seconds(self.folderWriteDeadline), privacy: .public) s — the transcript is presented under its old name")
-            return result
+            if claim.claim() {
+                return handOver("the recording folder did not answer before the rename could start (it never will)", result)
+            }
+            // Under way when the bound ran out: it runs on. Show the transcript where it is now — looked at off the main
+            // actor, bounded; unanswered, where it was.
+            let newTranscript = folder.appendingPathComponent("\(SessionRenamer.newSessionId(oldId: oldId, name: name)).json")
+            let moved = (try? await withDeadline(seconds: bound, label: "where the transcript is") {
+                FileManager.default.fileExists(atPath: newTranscript.path)
+            }) ?? false
+            Logger.state.error("""
+                The session rename did not finish within \(Self.seconds(self.folderWriteDeadline), privacy: .public) s — it runs on; \
+                the transcript is shown \(moved ? "under the new name" : "where it was", privacy: .public)
+                """)
+            return moved
+                ? TranscriptionResult(jsonPath: newTranscript, removedRecordings: result.removedRecordings, quotaPass: result.quotaPass)
+                : result
         }
     }
 }

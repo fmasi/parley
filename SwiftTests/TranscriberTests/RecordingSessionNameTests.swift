@@ -232,8 +232,10 @@ import Testing
         let (folder, transcript) = try finished(h)
         let fs = HangingReplaceFileSystem()
         h.coordinator.sessionRenameFileSystem = fs
-        h.coordinator.folderWriteDeadline = .milliseconds(200)
+        // Long enough for the rename to START on a loaded machine (then it hangs): the bound must find it under way.
+        h.coordinator.folderWriteDeadline = .milliseconds(1500)
         let result = await h.coordinator.applyPendingSessionName(to: TranscriptionResult(jsonPath: transcript))
+        #expect(fs.reachedReplace, "the rename was under way when its bound ran out")
         #expect(result.jsonPath == folder.appendingPathComponent("101500-weekly sync.json"), "the files had moved: the new path")
         #expect(h.coordinator.unappliedSessionName(forTranscript: transcript) == nil)
         fs.release()
@@ -268,7 +270,7 @@ import Testing
         await h.coordinator.stopRecording()
         let transcripts = names(in: folder).filter { $0.hasSuffix(".json") && SessionRenamer.sessionId(ofTranscript: URL(fileURLWithPath: $0)) != nil }
         let written = try #require(transcripts.first, "the salvage wrote a transcript: \(names(in: folder))")
-        #expect(written.hasSuffix("-zoom call.json"), "never renamed by the salvage")
+        #expect(written.hasSuffix("-Zoom call.json"), "never renamed by the salvage")
         #expect(h.coordinator.unappliedSessionName(forTranscript: folder.appendingPathComponent(written)) == "weekly sync")
         #expect(h.coordinator.pendingSessionName == nil)
     }
@@ -290,6 +292,9 @@ import Testing
 final class HangingReplaceFileSystem: SessionRenameFileSystem, @unchecked Sendable {
     private let live = LiveSessionRenameFileSystem()
     private let gate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var reached = false
+    var reachedReplace: Bool { lock.withLock { reached } }
     func release() { gate.signal() }
     func list(_ folder: URL) -> [String]? { live.list(folder) }
     func sessionIdsWithState(in folder: URL) -> Set<String>? { live.sessionIdsWithState(in: folder) }
@@ -298,6 +303,7 @@ final class HangingReplaceFileSystem: SessionRenameFileSystem, @unchecked Sendab
     func read(_ url: URL) -> Data? { live.read(url) }
     func move(_ from: URL, to: URL, sameFile: Bool) throws { try live.move(from, to: to, sameFile: sameFile) }
     func replace(_ url: URL, with data: Data) throws {
+        lock.withLock { reached = true }
         gate.wait()
         gate.signal()   // open from now on: only the first rewrite hangs
         try live.replace(url, with: data)
