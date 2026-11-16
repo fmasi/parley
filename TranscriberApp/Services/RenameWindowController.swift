@@ -51,6 +51,25 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         queue.enqueue((jsonPath, onDismiss))
     }
 
+    /// Open a past recording chosen in the menu's picker (#29), any recording, not only the latest. It is
+    /// refused while still being recorded, finished or summarized (`RecordingCoordinator.isSessionInFlight`), since its
+    /// transcript can still be rewritten under the dialog. Nothing runs when its panel closes: no auto-summary, and the menu's
+    /// last transcript is not touched. Only the newest recording's own flow (`presentTranscript`) does either.
+    func openPastRecording(_ jsonPath: URL) {
+        switch PastRecordings.openDecision(isSessionInFlight: isSessionInFlight?(jsonPath) == true) {
+        case .open:
+            enqueue(jsonPath: jsonPath)
+        case .refuse(let title, let message):
+            Logger.files.info("Rename: a recording still in flight was not opened")
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = message
+            alert.alertStyle = .informational
+            NSApp.activate()
+            alert.runModal()
+        }
+    }
+
     func show(jsonPath: URL, onDismiss: ((URL) -> Void)? = nil) {
         // Supersede any in-flight show: cancel its task and close its panel, so two rapid calls
         // cannot both reach present() and orphan a window.
@@ -74,12 +93,14 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         // queue moves on.
         showTask = Task { @MainActor in
             defer { self.endPreparing(request) }
-            let parsed = await RenameReads.shared.read(transcript: jsonPath) { Self.parseSpeakersAndChannelNames(from: $0) }
+            // Whether its audio is still there comes from the same read (#29): an old recording's may have been removed by
+            // the storage limit, and Play and Re-detect need it.
+            let parsed = await RenameReads.shared.read(transcript: jsonPath) { Self.parseForPanel(from: $0) }
             guard !Task.isCancelled else {
                 onDismiss?(jsonPath)
                 return
             }
-            guard let (speakers, channelNames, echo) = parsed else {
+            guard let (speakers, channelNames, echo, audio) = parsed else {
                 Logger.files.error("Rename: the transcript could not be read in time — its panel is skipped")
                 let alert = NSAlert()
                 alert.messageText = "Speaker names can be set later"
@@ -103,7 +124,8 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
                 onDismiss?(jsonPath)
                 return
             }
-            self.present(jsonPath: jsonPath, speakers: speakers, channelNames: channelNames, echo: echo, onDismiss: onDismiss)
+            self.present(jsonPath: jsonPath, speakers: speakers, channelNames: channelNames, echo: echo, audio: audio,
+                         onDismiss: onDismiss)
         }
     }
 
@@ -117,7 +139,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     /// Build and show the panel. Main actor; assumes `speakers` is non-empty.
     private func present(
         jsonPath: URL, speakers: [SpeakerEntry], channelNames: [String: [String: String]],
-        echo: EchoNotice.Findings, onDismiss: ((URL) -> Void)?
+        echo: EchoNotice.Findings, audio: RecordingAudioAvailability, onDismiss: ((URL) -> Void)?
     ) {
 
         self.onDismissCallback = onDismiss
@@ -138,6 +160,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
             speakers: speakers,
             initialChannelNames: channelNames,
             initialEcho: echo,
+            audio: audio,
             onSave: { [weak self] mapping, sessionName, path in
                 // The session's files first (#357): a refusal leaves everything as it was, the panel open.
                 var path = path
@@ -341,14 +364,30 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     nonisolated static func parseSpeakersAndChannelNames(
         from jsonPath: URL, minSegments: Int = 5
     ) -> (speakers: [SpeakerEntry], channelNames: [String: [String: String]], echo: EchoNotice.Findings) {
+        guard let json = readTranscript(jsonPath) else { return ([], [:], .none) }
+        return (parseSpeakers(json: json, minSegments: minSegments), loadChannelNames(json: json),
+                EchoNotice.Findings(json: json))
+    }
+
+    /// What the panel opens with: `parseSpeakersAndChannelNames`, and whether the recording's audio is still on disk for
+    /// Play and Re-detect (#29), from the same single read. Off the main thread: it looks for every audio file.
+    nonisolated static func parseForPanel(from jsonPath: URL) -> (
+        speakers: [SpeakerEntry], channelNames: [String: [String: String]], echo: EchoNotice.Findings,
+        audio: RecordingAudioAvailability
+    ) {
+        guard let json = readTranscript(jsonPath) else { return ([], [:], .none, .notListed) }
+        return (parseSpeakers(json: json), loadChannelNames(json: json), EchoNotice.Findings(json: json),
+                RecordingAudioAvailability.of(json: json))
+    }
+
+    private nonisolated static func readTranscript(_ jsonPath: URL) -> [String: Any]? {
         guard let data = try? Data(contentsOf: jsonPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             Logger.files.error("Rename: cannot read \(jsonPath.lastPathComponent, privacy: .sensitive)")
-            return ([], [:], .none)
+            return nil
         }
-        return (parseSpeakers(json: json, minSegments: minSegments), loadChannelNames(json: json),
-                EchoNotice.Findings(json: json))
+        return json
     }
 
     // MARK: - Generate Format File
