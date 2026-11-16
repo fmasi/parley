@@ -132,6 +132,26 @@ import Testing
         #expect(h.coordinator.unappliedSessionName(forTranscript: presented) == nil, "handed over once")
     }
 
+    /// #29: the same recording opened later from the menu's picker gets the name handed over too — the picker's URL for
+    /// it (recordings folder, day folder, file name) is the hand-over's key.
+    @Test func aNameHandedOverIsFoundFromThePickersURLForTheRecording() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let folder = try await start(h)
+        let stamp = String(try #require(h.client.startCalls.first).baseName.prefix(6))
+        try Data("{}".utf8).write(to: folder.appendingPathComponent("\(stamp)-Weekly sync.json"))   // the name is taken
+        #expect(h.coordinator.renameRecordingInProgress(to: "Weekly sync"))
+
+        await h.coordinator.stopRecording()
+
+        let presented = try #require(h.presented.value.first)
+        let root = URL(fileURLWithPath: folder.deletingLastPathComponent().path, isDirectory: true)
+        let picked = try #require(PastRecordings.scan(root: root, limit: 50).recordings
+            .first { $0.transcript.lastPathComponent == presented.lastPathComponent })
+        #expect(h.coordinator.unappliedSessionName(forTranscript: picked.transcript) == "Weekly sync")
+        #expect(h.coordinator.unappliedSessionName(forTranscript: presented) == nil, "handed over once, whichever way it opened")
+    }
+
     /// A name typed for one recording never reaches the next.
     @Test func aNewRecordingStartsWithoutTheLastOnesName() async throws {
         let h = try Harness()
