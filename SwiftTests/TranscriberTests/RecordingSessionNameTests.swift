@@ -268,8 +268,11 @@ import Testing
         #expect(result.jsonPath == folder.appendingPathComponent("101500-weekly sync.json"), "the files had moved: the new path")
         #expect(h.coordinator.unappliedSessionName(forTranscript: transcript) == nil)
         fs.release()
-        await Harness.until { self.names(in: folder) == ["101500-weekly sync.json", "101500-weekly sync-0.m4a"] }
-        #expect(names(in: folder) == ["101500-weekly sync.json", "101500-weekly sync-0.m4a"])
+        // By the rename's own end (its rewrite done), never by the names: the files reach their new names before the
+        // transcript's rewrite (a temporary beside it) has finished.
+        await Harness.until(within: 10) { fs.rewritesDone == 1 }
+        #expect(fs.rewritesDone == 1)
+        #expect(names(in: folder) == ["101500-weekly sync.json", "101500-weekly sync-0.m4a"], "\(names(in: folder))")
     }
 
     /// The recovery file's delete did not answer: renamed then, a death would send the next launch after the old names. Not
@@ -335,7 +338,10 @@ final class HangingReplaceFileSystem: SessionRenameFileSystem, @unchecked Sendab
     private let gate = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var reached = false
+    private var done = 0
     var reachedReplace: Bool { lock.withLock { reached } }
+    /// Rewrites that have returned: the rename's last steps.
+    var rewritesDone: Int { lock.withLock { done } }
     func release() { gate.signal() }
     func list(_ folder: URL) -> [String]? { live.list(folder) }
     func sessionIdsWithState(in folder: URL) -> Set<String>? { live.sessionIdsWithState(in: folder) }
@@ -347,6 +353,7 @@ final class HangingReplaceFileSystem: SessionRenameFileSystem, @unchecked Sendab
         lock.withLock { reached = true }
         gate.wait()
         gate.signal()   // open from now on: only the first rewrite hangs
+        defer { lock.withLock { done += 1 } }
         try live.replace(url, with: data)
     }
 }
