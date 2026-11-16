@@ -225,22 +225,63 @@ import Testing
         #expect(names(in: folder) == ["101500-zoom call.json", "101500-zoom call-0.m4a"], "never renamed late")
     }
 
-    /// The rename had started when its bound ran out: it runs on, and the finish shows the transcript where it is now.
-    @Test func aRenameAlreadyUnderWayAtItsBoundShowsTheTranscriptWhereItIs() async throws {
+    /// A rename under way when its bound runs out — the bound held open, on a clock the test moves, until the rename is
+    /// inside its first rewrite: never a race with wall time. Returns the pending finish, the hung file system and the clock.
+    private func renameUnderWayPastItsBound(_ h: Harness) async throws
+        -> (folder: URL, transcript: URL, finish: Task<TranscriptionResult, Never>, fs: HangingReplaceFileSystem, clock: ManualTestClock) {
+        let (folder, transcript) = try finished(h)
+        let fs = HangingReplaceFileSystem(), clock = ManualTestClock()
+        h.coordinator.sessionRenameFileSystem = fs
+        h.coordinator.sessionRenameClock = clock
+        let coordinator = h.coordinator
+        let finish = Task { await coordinator.applyPendingSessionName(to: TranscriptionResult(jsonPath: transcript)) }
+        await Harness.until(within: 30) { fs.reachedReplace && clock.pendingSleeps == 1 }
+        #expect(fs.reachedReplace, "the rename is under way")
+        clock.advance(by: .seconds(Self.writeBound))   // its bound runs out
+        await Harness.until(within: 30) { clock.pendingSleeps == 1 }   // and the finish waits one more bound for its answer
+        return (folder, transcript, finish, fs, clock)
+    }
+
+    private static let writeBound: Int64 = 30
+
+    /// The rename had started when its bound ran out: the finish waits one more bound for the rename's own answer (as
+    /// `AbandonableStep` does), and the rename that answers within it is applied.
+    @Test func aRenameUnderWayAtItsBoundIsWaitedForOnceMore() async throws {
         let h = try Harness()
         defer { tearDown(h) }
-        let (folder, transcript) = try finished(h)
-        let fs = HangingReplaceFileSystem()
-        h.coordinator.sessionRenameFileSystem = fs
-        // Long enough for the rename to START on a loaded machine (then it hangs): the bound must find it under way.
-        h.coordinator.folderWriteDeadline = .milliseconds(1500)
-        let result = await h.coordinator.applyPendingSessionName(to: TranscriptionResult(jsonPath: transcript))
-        #expect(fs.reachedReplace, "the rename was under way when its bound ran out")
+        let (folder, transcript, finish, fs, _) = try await renameUnderWayPastItsBound(h)
+        fs.release()   // it answers within the second bound
+        let result = await finish.value
+        #expect(result.jsonPath == folder.appendingPathComponent("101500-weekly sync.json"))
+        #expect(h.coordinator.unappliedSessionName(forTranscript: transcript) == nil)
+        #expect(names(in: folder) == ["101500-weekly sync.json", "101500-weekly sync-0.m4a"])
+    }
+
+    /// Still running after the second bound: the transcript is shown where it is then (its JSON had moved), looked at off
+    /// the cooperative pool.
+    @Test func aRenameStillRunningAfterTwoBoundsShowsTheTranscriptWhereItIs() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let (folder, transcript, finish, fs, clock) = try await renameUnderWayPastItsBound(h)
+        clock.advance(by: .seconds(Self.writeBound))   // the second bound runs out too
+        let result = await finish.value
         #expect(result.jsonPath == folder.appendingPathComponent("101500-weekly sync.json"), "the files had moved: the new path")
         #expect(h.coordinator.unappliedSessionName(forTranscript: transcript) == nil)
         fs.release()
         await Harness.until { self.names(in: folder) == ["101500-weekly sync.json", "101500-weekly sync-0.m4a"] }
         #expect(names(in: folder) == ["101500-weekly sync.json", "101500-weekly sync-0.m4a"])
+    }
+
+    /// The recovery file's delete did not answer: renamed then, a death would send the next launch after the old names. Not
+    /// renamed; the dialog offers the name.
+    @Test func aRecoveryFileStillThereKeepsTheFilesAndHandsTheNameOver() async throws {
+        let h = try Harness()
+        defer { tearDown(h) }
+        let (folder, transcript) = try finished(h)
+        let result = await h.coordinator.applyPendingSessionName(to: TranscriptionResult(jsonPath: transcript), recoveryFileGone: false)
+        #expect(result.jsonPath == transcript)
+        #expect(names(in: folder) == ["101500-zoom call.json", "101500-zoom call-0.m4a"])
+        #expect(h.coordinator.unappliedSessionName(forTranscript: transcript) == "weekly sync")
     }
 
     /// Renamed only once the stopping recovery file is gone: a death between the two would otherwise send the next launch
