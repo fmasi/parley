@@ -1400,3 +1400,74 @@ your own lowercase test names. `ls -la` the day folder before and after each ste
 - [ ] **U-01 Unknown is not a person (#360).** Open a transcript with a "Remote Unknown" (or
       "Local Unknown") row and two speaker rows on that side: the "Other side" stepper pre-fills **2**,
       not 3.
+
+## The recording's name on the island and in the menu, editable while it records (#358) — added 2026-11-16
+
+Synthetic calls only (a podcast or `say` through the speakers, a test meeting with yourself), with
+lowercase test event titles. Keep `log stream --predicate 'subsystem == "eu.fmasi.parley"' --level debug`
+running; each calendar lookup also leaves one line in `log show` (it is `.notice`):
+`log show --last 1h --style compact --predicate 'subsystem == "eu.fmasi.parley" AND eventMessage CONTAINS "Calendar lookup"'`.
+The title shows as `<private>` there; the counts and the path ("island offer", "after a one-click
+start", "naming panel") are in the clear.
+
+- [ ] **SN-01 Start from the island on a calendar event.** Make a calendar event `name test` from 2 min
+      ago to 30 min from now. Join a test call (Zoom / Teams / Meet), wait for the island, click
+      Record. The island turns into "Recording", subtitle `name test · from your calendar`, a
+      "Rename…" button (grey, not red) and a chevron with "Hide". About 20 s later (longer while the
+      pointer rests on it) it fades out completely: no dot, no pill for the rest of the call. The menu
+      shows a pencil row `name test` / "Recording name" for the whole recording. The log line says
+      `chose 1 of 1 events in progress`.
+- [ ] **SN-02 Edit it mid-call, finished files carry the edited name.** Within the island's 20 s, its
+      Rename… opens a small "Recording Name" panel that takes the keyboard; type `edited test`, Save. The
+      island (if still up) and the menu now say `edited test · applied when it finishes`; the island still
+      fades at its usual time. Later in the call, rename again from the menu's pencil row: the island does
+      not come back. `ls` the day folder: the chunk files still
+      carry `name test`. Stop. The completion notification names `HHMMSS-edited test.json`; the rename
+      dialog's "Recording name" field shows `edited test`; in the folder every file (`.json`,
+      `-0.m4a`/merged `.m4a`, `.srt`/`.txt`, `.HHMMSS-edited test.finalized`, `.diag.jsonl` if any) is
+      `HHMMSS-edited test…`, none `name test`. Save the dialog without touching the name: nothing is
+      renamed a second time; the summary is `HHMMSS-edited test-summary.md`.
+- [ ] **SN-03 From the menu.** A recording started from the menu's naming panel: the pencil row shows
+      its name; Rename… from there works the same (SN-02's checks). The island does not appear.
+- [ ] **SN-04 No calendar event.** No event around now: Record from the island names it `Zoom call`
+      (or the app); the island shows `Zoom call`; the log has two lookups, "island offer" and "after a
+      one-click start", each `no event in the window` or `none current: …`.
+- [ ] **SN-05 The event arrives late.** Click Record the instant the island appears, before its subtitle
+      shows the event. The recording starts as `Zoom call`; within seconds the island (if still up) says
+      `name test · from your calendar`, the menu's pencil row says `name test`, and the finished files are
+      `HHMMSS-name test…`. A title that lands after the island has faded updates the menu row only: the
+      island does not come back. Also: join the
+      test call 15 min before an event starts (outside the 10 min lookahead), wait until it has
+      started, then click Record: named after the event (the lookup after the start finds it).
+- [ ] **SN-06 The user's name wins.** As SN-05, but Rename… to `mine test` before the late title lands:
+      the files end as `mine test`.
+- [ ] **SN-07 Overlapping events.** Two events containing now (`long block` from 1 h ago to 2 h ahead,
+      `short meeting` from 5 min ago): the name is `short meeting` (the one that started last); the log
+      says `chose 1 of 2 events in progress (the one that started last)`.
+- [ ] **SN-08 An overrun.** An event that ended 5 min ago, nothing else: named `Zoom call`; the log says
+      `none current: … 1 ended (the latest 5 min ago) …` — the expected miss for a call that overran.
+- [ ] **SN-09 No calendar access.** System Settings → Privacy → Calendars → Parley off. Record from the
+      island: named `Zoom call`; the log says `no calendar access (denied)`. Turn it back on.
+- [ ] **SN-10 Stop offer.** During an island recording, rename it, then leave the call: the stop offer
+      appears as before #358 and names the edited name; "Keep recording" (or rejoining) takes it down and
+      nothing comes back in its place. Within the island's first 20 s the stop offer replaces it for good.
+- [ ] **SN-11 Hide.** Within the 20 s, chevron → Hide: the island goes at once and does not come back
+      after a stop offer is withdrawn; the menu row stays. Turning meeting detection off in Settings while
+      recording also takes it down.
+- [ ] **SN-12 The panel closes with the recording.** Open Rename… and leave it open; Stop from the menu:
+      the panel closes, the rename dialog opens with the recording's (unchanged) name.
+- [ ] **SN-13 A name that cannot be applied.** Rename to `taken`, and before Stop make a file
+      `HHMMSS-taken.json` (the recording's timestamp) in the day folder. Stop: the files keep the start's
+      name, nothing is half-renamed, and the rename dialog's field already shows `taken` (Save would
+      then raise the "already in this folder" alert). Delete the copy.
+- [ ] **SN-14 A crash keeps the start's name.** Rename mid-recording, then `kill -9` Parley. After the
+      relaunch the recording resumes or is salvaged under the start's name; the menu's pencil row (if it
+      resumed) shows the start's name. The rename dialog after the salvage can rename it.
+- [ ] **SN-15 Focus.** While the island shows the recording (its first 20 s), keep typing in the call app's chat: the
+      island never takes the keyboard; only the Rename… panel does, and only once clicked.
+- [ ] **SN-16 Screen sharing.** The calendar title is on the island only during the first ~20 s after a
+      one-click start. Share your whole screen in a test call (Zoom, Teams, Meet; and a ScreenCaptureKit
+      recorder such as QuickTime's screen recording) from before you click Record: does the island appear in
+      the share or the recording in those 20 s (`sharingType = .none`, unverified on macOS 15+)? Record
+      which apps show it. After it fades, nothing of it may appear. If any app shows it, Hide is the
+      workaround to note in the PR.

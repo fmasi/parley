@@ -164,6 +164,17 @@ public final class RecordingCoordinator {
     /// The recording's session key (L review 266): set by its start, a resume and a re-attach — so a Stop always knows what to
     /// keep apart, even when the recovery file does not answer and no pipeline is running.
     var currentSessionKey: String?
+    /// A name chosen for the recording in progress (#358) — typed by the user, or a calendar title that arrived after a
+    /// one-click start — applied with `SessionRenamer` once its transcript is written (`applyPendingSessionName`). The
+    /// capture never sees it: the helper and the chunk files keep the name the recording started with. In memory only, by
+    /// choice (`PendingSessionName`).
+    var pendingSessionName: PendingSessionName?
+    /// Names a finish could not apply, by transcript path (#358): the rename dialog starts from one, so its Save applies it.
+    var unappliedSessionNames: [String: String] = [:]
+    /// What the finish's session rename runs on (#358). Tests make one hang.
+    var sessionRenameFileSystem: any SessionRenameFileSystem = LiveSessionRenameFileSystem()
+    /// The clock the finish's session-rename bounds run on: awake time. Tests move it by hand.
+    var sessionRenameClock: any Clock<Duration> = SuspendingClock()
     /// Where the Stop kept apart is written and read: a serial queue of its own (L review 236). Tests inject one.
     var stopRequestIO = SentinelIO(label: "eu.fmasi.parley.stop-request")
     /// The termination preparation running, if any: a second request (`willPowerOff` and the quit event, or
@@ -599,6 +610,7 @@ public final class RecordingCoordinator {
             try await slotWriteOffMain(sentinel, "start: write", seconds: Self.seconds(until: startBy))
             startedSentinel = sentinel
             currentSessionKey = sentinel.sessionKey   // L review 266
+            pendingSessionName = nil   // a name chosen for an earlier recording is never this one's (#358)
 
             // Before the helper opens the mic, so no meter opens it meanwhile (#192).
             setHelperMic(microphoneDeviceId)
@@ -896,6 +908,8 @@ public final class RecordingCoordinator {
         let rotationBound = transcriptionRunner.chunkRotator?.rotationBoundSeconds ?? ChunkRotator.rotateCallSeconds
         _ = try? await withDeadline(seconds: rotationBound, label: "rotation before stop") { await self.awaitRotationInFlight() }
         var stoppedPaths: AudioPaths?
+        /// The transcript this Stop wrote: presented once its recovery file is gone (#358).
+        var finished: TranscriptionResult?
         // The recording this Stop's attempt marks not let go (L review 269): the one key its hold, if any, also clears.
         let attemptKey = sentinel?.sessionKey ?? transcriptionRunner.chunkRotator.map { Self.sessionKey(of: $0.sessionLocation) } ?? currentSessionKey
         do {
@@ -942,7 +956,7 @@ public final class RecordingCoordinator {
                 )
                 // Only now, the transcript on disk, does the live log go (L review 97).
                 captureClient.commitSessionDiagnostics(sessionId: sessionState.sessionId, directory: outputDir)
-                await presentCompletedTranscription(result)
+                finished = result
             } else {
                 // Fallback: no live chunked pipeline in this process (e.g. the app relaunched and
                 // re-attached to a still-recording XPC service — Flow A never calls
@@ -1024,7 +1038,7 @@ public final class RecordingCoordinator {
                 }
 
                 if let result {
-                    await presentCompletedTranscription(result)
+                    finished = result
                 } else {
                     // Chunked recovery found nothing to salvage (e.g. session.json existed but had
                     // no chunks and no orphan WAVs) — nothing to notify or rename.
@@ -1035,8 +1049,15 @@ public final class RecordingCoordinator {
             // Only now: the transcript exists (or there was nothing to write). The stop kept apart goes with the recovery file —
             // only once its delete answered (L review 236).
             // Whatever kept it apart — this Stop's mark, or a Stop deferred during a crash restart (L reviews 266, 267).
-            if await slotDeleteOffMain("stop: delete"), let key = sentinel?.sessionKey ?? stopKeptApart?.sessionKey ?? currentSessionKey {
+            let recoveryFileGone = await slotDeleteOffMain("stop: delete")
+            if recoveryFileGone, let key = sentinel?.sessionKey ?? stopKeptApart?.sessionKey ?? currentSessionKey {
                 dropStopKeptApart(for: key)
+            }
+            if let finished {
+                // A name chosen while it recorded (#358): applied now, the transcript written and the recovery file gone — a
+                // death between a rename and that delete would send the next launch after the old names — and before
+                // anything is told of it.
+                await presentCompletedTranscription(await applyPendingSessionName(to: finished, recoveryFileGone: recoveryFileGone))
             }
             transcriptionRunner.teardownChunkedPipeline()
             // Idle LAST (#321): after the transcript was presented and the recovery file's delete answered, with no await
@@ -3736,6 +3757,8 @@ public final class RecordingCoordinator {
         }
         let sessionState = await processor.getSessionState()
         let outcome = await salvageAbandonedSession(sessionState: sessionState, outputDir: outputDir)
+        // A name chosen while it recorded (#358): never applied by a salvage, never dropped — the rename dialog offers it.
+        if case .transcriptWritten(let transcript) = outcome.kind { handPendingNameToDialog(transcript: transcript) }
         switch outcome.kind {
         case .nothingToSalvage:
             // Nothing transcribed, yet audio may be on disk (a chunk that could not be processed):
@@ -3820,6 +3843,9 @@ public final class RecordingCoordinator {
     /// never returns, nor a Start get in, while the session is still being finished. Internal for tests.
     /// `ours`: false when the caller does not own the phase — the notice is still posted, the rename dialog never opened.
     func presentCompletedTranscription(_ result: TranscriptionResult, ours: Bool = true) async {
+        // A recovery's transcript of the recording with a pending name (#358): the dialog offers the name. The Stop's own
+        // finish has applied or handed it over already.
+        handPendingNameToDialog(transcript: result.jsonPath)
         appState.lastJsonPath = result.jsonPath.path
         appState.lastTranscriptPath = result.jsonPath.path
         // Say so when the capture layer flagged something. This used to be an unconditional

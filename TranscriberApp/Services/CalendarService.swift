@@ -1,5 +1,6 @@
 @preconcurrency import EventKit
 import TranscriberCore
+import os
 
 /// Deliberately NOT main-actor: `events(matching:)` is a synchronous EventKit query over a
 /// 12-hour, all-calendars predicate, and can take seconds with Exchange/Google accounts (#197).
@@ -9,9 +10,17 @@ import TranscriberCore
 /// the caller merely suspended, same pattern as `LaunchAgentManager.runLaunchctl`) so a caller on
 /// the main actor — e.g. the naming panel opening on Start Recording — is never blocked on it.
 final class CalendarService {
+    /// Which path asked (#358), logged `.public` beside the outcome: the next real call then says which lookup named it.
+    enum Purpose: String {
+        case islandOffer = "island offer"
+        case afterQuickStart = "after a one-click start"
+        case namingPanel = "naming panel"
+    }
+
     func currentEventTitle(
         lookaheadMinutes: Int = 10,
-        from calendars: [EKCalendar]? = nil
+        from calendars: [EKCalendar]? = nil,
+        purpose: Purpose = .namingPanel
     ) async -> String? {
         // EKCalendar's thread-safety is unspecified by Apple, so don't hand the objects themselves
         // across the queue hop — capture just their (Sendable) identifiers and re-resolve against
@@ -27,6 +36,14 @@ final class CalendarService {
                 // TODO: if Exchange/LDAP accounts regress (Apple's docs also discourage creating
                 // multiple EKEventStore instances at all, not just sharing one across threads),
                 // replace this with a dedicated actor holding one retained store instead.
+                // Without full access EventKit answers with no events at all — read as "no meeting" before #358, so a
+                // missing permission and an empty calendar looked the same.
+                let status = EKEventStore.authorizationStatus(for: .event)
+                guard CalendarEventPicker.canRead(status) else {
+                    Self.log(CalendarEventPicker.noAccess(status), purpose: purpose)
+                    continuation.resume(returning: nil)
+                    return
+                }
                 let store = EKEventStore()
                 let calendars = calendarIDs.map { ids in ids.compactMap { store.calendar(withIdentifier: $0) } }
                 let now = Date()
@@ -35,7 +52,7 @@ final class CalendarService {
                 // surface events that started earlier in the day.
                 let lookahead = max(lookaheadMinutes, 0)
                 let predicate = store.predicateForEvents(
-                    withStart: now.addingTimeInterval(-12 * 3600),
+                    withStart: now.addingTimeInterval(-TimeInterval(CalendarEventPicker.lookbackHours) * 3600),
                     end: now.addingTimeInterval(TimeInterval(lookahead) * 60 + 60),
                     calendars: calendars
                 )
@@ -49,13 +66,28 @@ final class CalendarService {
                     return me.participantStatus != .declined
                 }
 
-                let title = CalendarEventPicker.pickEvent(
+                let pick = CalendarEventPicker.pick(
                     from: notDeclined,
+                    declinedCount: events.count - notDeclined.count,
                     now: now,
                     lookaheadMinutes: lookahead
-                )?.title
-                continuation.resume(returning: title)
+                )
+                Self.log(pick, purpose: purpose)
+                continuation.resume(returning: pick.event?.title)
             }
+        }
+    }
+
+    /// One line per lookup (#358): whether an event was found and why not, in counts (`.public`); the title `.private`.
+    /// `.notice`, not `.info`: info lines are not kept in the log store, and this one is read after the call.
+    private static func log(_ pick: CalendarEventPicker.Pick, purpose: Purpose) {
+        if let title = pick.event?.title {
+            Logger.state.notice("""
+                Calendar lookup (\(purpose.rawValue, privacy: .public)): \(pick.summary, privacy: .public) — \
+                “\(title, privacy: .private)”
+                """)
+        } else {
+            Logger.state.notice("Calendar lookup (\(purpose.rawValue, privacy: .public)): \(pick.summary, privacy: .public)")
         }
     }
 }

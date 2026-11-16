@@ -65,9 +65,9 @@ final class RecordingLauncher {
     }
 
     /// One click from "call started" to "recording": no panel. Name = the calendar title when the
-    /// presenter already found one, else "<App> call"; mic = last used (the helper falls back to the
-    /// default device if it is gone — `MicCaptureSession.buildAndStart`). Rename after transcription is
-    /// unchanged. Returns whether the coordinator started (false = not idle / start in flight).
+    /// presenter already found one, else "<App> call" — shown on the island and in the menu, and editable while it
+    /// records (#358); mic = last used (the helper falls back to the
+    /// default device if it is gone — `MicCaptureSession.buildAndStart`). Returns whether the coordinator started (false = not idle / start in flight).
     func quickStart(app: MeetingApp, calendarTitle: String?) async -> Bool {
         let name = calendarTitle ?? "\(app.displayName) call"
         // Logged after the outcome so a refusal can never leave a "Quick start" line with no counter-entry.

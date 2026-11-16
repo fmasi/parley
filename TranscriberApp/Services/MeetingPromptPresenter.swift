@@ -48,6 +48,9 @@ final class MeetingPromptPresenter {
     /// still capturing then.
     private var queuedStart: MeetingApp?
     private var calendarTitle: String?
+    /// What the island shows and which content may replace or bring back which (#358): decided by
+    /// `MeetingIslandReducer` (Core, tested); this presenter builds the offers and carries out its effects.
+    private var islandState = MeetingIslandState()
 
     init(appState: AppState, configManager: ConfigManager, coordinator: RecordingCoordinator,
          launcher: RecordingLauncher, calendarService: CalendarService) {
@@ -82,6 +85,7 @@ final class MeetingPromptPresenter {
             guard let self, let phase else { return }
             self.feed(.phaseChanged(Self.sensePhase(of: phase)))
             self.fireQueuedStartIfIdle()
+            if !self.appState.isRecording { self.recordingEnded() }
         }
     }
 
@@ -89,7 +93,7 @@ final class MeetingPromptPresenter {
 
     func record(_ app: MeetingApp) {
         if appState.isTranscribing {
-            island.hide()
+            islandEvent(.offerAnswered)
             queuedStart = app
             appState.detectedMeeting = DetectedMeeting(app: app, kind: .queued)
             return
@@ -102,21 +106,22 @@ final class MeetingPromptPresenter {
             Logger.state.info("Record chosen while neither idle nor transcribing, or a start is in flight — ignoring")
             return
         }
-        island.hide()
+        islandEvent(.offerAnswered)
         let title = calendarTitle
         // In flight from THIS turn: a crash-protection hand-over must never see the gap before the Task runs
         // (L round 7). `startRecording` takes it over.
         coordinator.announceStart()
-        Task { [launcher] in
+        Task { [weak self, launcher] in
             let started = await launcher.quickStart(app: app, calendarTitle: title)
             // The only refusal left is the narrow window where a start is in flight with the phase
             // still idle; the phase flip that immediately follows withdraws this offer anyway.
             if !started { Logger.state.warning("Quick start refused (not idle / start in flight)") }
+            if started { self?.startedFromIsland(calendarTitle: title) }
         }
     }
 
     func nameFirst() {
-        island.hide()   // the banner stays until the recording starts
+        islandEvent(.offerAnswered)   // the banner stays until the recording starts
         // The warmed title, read here exactly as the Record path reads it above: the naming dialog has
         // to be seeded with the title the island was showing, not with whatever a second lookup
         // returns. nil (the warm call found nothing, or has not landed yet) falls through to the
@@ -142,7 +147,7 @@ final class MeetingPromptPresenter {
             Logger.state.info("Stop offer answered while not recording — ignoring")
             return
         }
-        island.hide()
+        islandEvent(.offerAnswered)
         Task { [coordinator] in await coordinator.stopRecording() }
     }
 
@@ -168,6 +173,8 @@ final class MeetingPromptPresenter {
             // restart cannot re-arm them from stale bundle IDs.
             sensor.setWatched(bundleIDs: [])
             sensor.stop()
+            // The recording island belongs to sensing too: off means no island at all (#358).
+            islandEvent(.sensingTurnedOff)
             // An empty snapshot, so the engine forgets what was capturing and (via its `mode == .off`
             // tail) withdraws whatever is on screen.
             feed(.snapshot(CaptureSnapshot(capturingBundleIDs: [])))
@@ -180,15 +187,16 @@ final class MeetingPromptPresenter {
         case .offerStart(let app, let expand):
             showStartOffer(app, expand: expand)
         case .withdrawStart:
-            island.hide()
+            islandEvent(.startOfferWithdrawn)
             appState.detectedMeeting = nil
             queuedStart = nil
             calendarTitle = nil
         case .offerStop(let app):
             presentStopOffer(app)
         case .withdrawStop:
-            island.hide()
             appState.detectedMeeting = nil
+            // Nothing comes back after it: the recording island it may have replaced is gone for good (#358).
+            islandEvent(.stopOfferWithdrawn)
         case .watch(let bundleIDs):
             sensor.setWatched(bundleIDs: bundleIDs)
         case .scheduleScan(let after):
@@ -211,6 +219,7 @@ final class MeetingPromptPresenter {
             ],
             compactLabel: app.displayName
         ), expanded: expand)
+        islandEvent(.startOfferShown)
         appState.detectedMeeting = DetectedMeeting(app: app, kind: .start)
         warmCalendar(for: app, decorateSubtitle: !firstEver)
     }
@@ -223,12 +232,13 @@ final class MeetingPromptPresenter {
         Task { [weak self] in
             guard let self else { return }
             let title = await self.calendarService.currentEventTitle(
-                lookaheadMinutes: self.configManager.config.calendarLookaheadMinutes
+                lookaheadMinutes: self.configManager.config.calendarLookaheadMinutes, purpose: .islandOffer
             )
-            // The offer may have been answered or withdrawn while the query ran.
+            // The offer may have been answered or withdrawn while the query ran. A Record clicked before this landed
+            // named the recording "<App> call": its own lookup after the start covers it (#358).
             guard let title, !title.isEmpty, self.state.pendingStart == app else { return }
             self.calendarTitle = title
-            if decorateSubtitle {
+            if decorateSubtitle, self.islandState.showing == .startOffer {
                 self.island.update(subtitle: MeetingOfferText.startSubtitle(calendarTitle: title, app: app))
             }
         }
@@ -253,7 +263,9 @@ final class MeetingPromptPresenter {
     }
 
     private func showStopOffer(_ app: MeetingApp, sessionName: String?) {
-        let session = sessionName ?? "this recording"
+        // The name the recording will carry — one chosen while it records included (#358) — else the recovery file's.
+        let session = coordinator.recordingSessionName.map { MeetingOfferText.recordingLabel(name: $0) }
+            ?? sessionName ?? "this recording"
         island.show(MeetingIslandOffer(
             title: MeetingOfferText.stopTitle,
             subtitle: MeetingOfferText.stopSubtitle(app: app, sessionName: session),
@@ -262,6 +274,7 @@ final class MeetingPromptPresenter {
             menu: [("Keep recording", { [weak self] in self?.keepRecording() })],
             compactLabel: app.displayName
         ), expanded: true)
+        islandEvent(.stopOfferShown)
         appState.detectedMeeting = DetectedMeeting(app: app, kind: .stop)
     }
 
@@ -283,9 +296,12 @@ final class MeetingPromptPresenter {
             queuedStart = nil
             let title = calendarTitle
             coordinator.announceStart()
-            Task { [launcher, appState] in
+            Task { [weak self, launcher, appState] in
                 let started = await launcher.quickStart(app: app, calendarTitle: title)
-                guard !started else { return }
+                guard !started else {
+                    self?.startedFromIsland(calendarTitle: title)
+                    return
+                }
                 Logger.state.warning("Queued start refused (not idle / start in flight)")
                 // Nothing else would clear it: no phase flip follows a refusal, so the engine emits no
                 // withdrawal and the `.queued` banner would sit there with a dead button until the call
@@ -293,6 +309,79 @@ final class MeetingPromptPresenter {
                 appState.detectedMeeting = nil
             }
         }
+    }
+
+    // MARK: - The recording's name (#358)
+
+    /// Change the name of the recording in progress: the menu's name row and the island's "Rename…". A small panel, never
+    /// a field on the island (`RecordingNameWindowController` says why). The files take the name when it finishes.
+    func editRecordingName() {
+        guard let current = coordinator.recordingSessionName else { return }
+        RecordingNameWindowController.shared.show(currentName: current) { [weak self] name in
+            guard let self, self.coordinator.renameRecordingInProgress(to: name) else { return }
+            self.islandEvent(.renamedByUser)
+        }
+    }
+
+    /// A one-click start is up: the island turns into the recording's name, so a wrong one can be fixed during the call.
+    /// Named "<App> call" (no calendar title had landed): one more lookup, now — the offer's may have lost the race with
+    /// the click, or found nothing because the offer appeared before the meeting's lookahead window opened.
+    private func startedFromIsland(calendarTitle: String?) {
+        guard let key = coordinator.recordingSessionKey else { return }
+        islandEvent(.recordingStarted(sessionKey: key, fromCalendar: calendarTitle != nil))
+        guard calendarTitle == nil else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let title = await self.calendarService.currentEventTitle(
+                lookaheadMinutes: self.configManager.config.calendarLookaheadMinutes, purpose: .afterQuickStart
+            )
+            guard let title, self.coordinator.adoptLateCalendarTitle(title, forSession: key) else { return }
+            self.islandEvent(.calendarTitleAdopted(sessionKey: key))
+        }
+    }
+
+    /// Feed the island's reducer and carry out what it decides.
+    private func islandEvent(_ event: MeetingIslandEvent) {
+        let result = MeetingIslandReducer.reduce(islandState, event, recordingSessionKey: coordinator.recordingSessionKey,
+                                                 sensingOn: mode == .prompt)
+        islandState = result.state
+        for effect in result.effects {
+            switch effect {
+            case .hide: island.hide()
+            case .showRecording: showRecordingIsland()
+            case .updateRecordingSubtitle: if let line = recordingIslandSubtitle() { island.update(subtitle: line) }
+            }
+        }
+    }
+
+    /// The recording island, for its ~20 s after a one-click start: the island view's own collapse delay
+    /// (`MeetingIslandCollapse`, held while the pointer rests on it) then withdraws it for good — the menu's name row
+    /// carries the name for the rest of the call (owner decision).
+    private func showRecordingIsland() {
+        guard let subtitle = recordingIslandSubtitle(), let name = coordinator.recordingSessionName else { return }
+        island.show(MeetingIslandOffer(
+            title: MeetingOfferText.recordingTitle,
+            subtitle: subtitle,
+            primaryTitle: "Rename…",
+            primary: { [weak self] in self?.editRecordingName() },
+            menu: [("Hide", { [weak self] in self?.islandEvent(.hideChosen) })],
+            compactLabel: MeetingOfferText.recordingLabel(name: name),
+            primaryIsProminent: false,
+            onCollapse: { [weak self] in self?.islandEvent(.recordingIslandExpired) }
+        ), expanded: true)
+    }
+
+    private func recordingIslandSubtitle() -> String? {
+        guard let recording = islandState.recording, let name = coordinator.recordingSessionName else { return nil }
+        return MeetingOfferText.recordingSubtitle(
+            name: name, fromCalendar: recording.fromCalendar, pending: coordinator.recordingSessionNameIsPending)
+    }
+
+    /// The recording is over (stopped, or failed): its island and its name panel go — the rename dialog that follows
+    /// is where the name is changed now.
+    private func recordingEnded() {
+        RecordingNameWindowController.shared.close()   // opened from the menu too
+        islandEvent(.recordingEnded)
     }
 
     private static func sensePhase(of phase: AppState.Phase) -> MeetingSensePhase {

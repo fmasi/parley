@@ -23,6 +23,23 @@ public enum MeetingOfferText {
     public static func stopSubtitle(app: MeetingApp, sessionName: String) -> String {
         "\(app.displayName) released the microphone · \(sessionName)"
     }
+
+    /// The island while a one-click recording runs (#358): what it is called, so a wrong name can be fixed during the call.
+    public static let recordingTitle = "Recording"
+
+    /// The recording's name, and where it came from: the calendar (said, since several events can overlap), or a change
+    /// the files take only when the recording finishes.
+    public static func recordingSubtitle(name: String, fromCalendar: Bool, pending: Bool) -> String {
+        let label = recordingLabel(name: name)
+        if fromCalendar { return "\(label) · from your calendar" }
+        return pending ? "\(label) · applied when it finishes" : label
+    }
+
+    /// The name as shown: an empty one (a recording started unnamed) reads as such.
+    public static func recordingLabel(name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Untitled recording" : trimmed
+    }
 }
 
 /// Store for a one-shot UI flag. `UserDefaults` already has exactly this shape, so it conforms as-is;

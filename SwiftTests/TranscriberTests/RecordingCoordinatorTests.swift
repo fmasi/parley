@@ -4818,9 +4818,11 @@ private actor Latch {
     }
 
     /// #321: a Stop goes idle only once its transcript is presented and its recovery file is gone. The recovery file's
-    /// delete — the Stop's last step — hangs until released, and the order is asserted while it hangs: never a stopwatch.
-    /// Idle earlier let a Quit return with the recovery file on disk, and a Start open the finished recording's rename
-    /// panel over a live one.
+    /// delete hangs until released, and the order is asserted while it hangs: never a stopwatch. Idle earlier let a Quit
+    /// return with the recovery file on disk, and a Start open the finished recording's rename panel over a live one.
+    /// Since #358 the transcript is presented AFTER that delete (a name chosen while recording is applied between the two:
+    /// renamed with the recovery file still there, a death would send the next launch after the old names), still before
+    /// idle.
     @Test func aStopIsIdleOnlyOnceItsTranscriptIsPresentedAndItsRecoveryFileIsGone() async throws {
         let h = try Harness()
         defer { tearDown(h) }
@@ -4841,7 +4843,7 @@ private actor Latch {
         let stopping = Task { await coordinator.stopRecording() }
         await Harness.until(within: 20) { delete.reached }
         #expect(delete.isHanging, "the Stop reached its recovery file's delete")
-        #expect(idleWhenPresented.value == false, "the transcript was presented while the Stop was still finishing")
+        #expect(idleWhenPresented.value == nil, "presented only once the recovery file is gone (#358)")
         #expect(!h.appState.isIdle, "not idle while the recovery file is still on disk")
         #expect(RecordingSentinel.read(directory: h.tmp) != nil)
         // A Start now is refused: the Stop is still finishing.
@@ -4849,6 +4851,7 @@ private actor Latch {
         #expect(h.client.startCalls.count == 1 && !h.appState.isRecording, "no Start while the Stop is still finishing")
         delete.release()
         await stopping.value
+        #expect(idleWhenPresented.value == false, "presented while the Stop was still finishing, never after idle")
         #expect(h.appState.isIdle && h.presented.value.count == 1 && RecordingSentinel.read(directory: h.tmp) == nil)
     }
 

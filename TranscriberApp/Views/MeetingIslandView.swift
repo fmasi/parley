@@ -10,8 +10,14 @@ struct MeetingIslandOffer {
     let primary: @MainActor () -> Void
     /// Secondary choices behind the chevron: ("Name it first…", …), ("Not now", …), …
     let menu: [(title: String, action: @MainActor () -> Void)]
-    /// Compact state text: the app name ("Zoom").
+    /// Compact state text: the app name ("Zoom"). The recording island (#358) never collapses to it: it withdraws.
     let compactLabel: String
+    /// The red, prominent button of a start or stop offer. Off for the recording island's "Rename…" (#358): editing a
+    /// name is not the destructive, record-or-stop answer the red button stands for.
+    var primaryIsProminent = true
+    /// What the collapse delay running out does instead of collapsing to the compact pill: the recording island withdraws
+    /// (owner decision, #358). nil = collapse, as the offers do.
+    var onCollapse: (@MainActor () -> Void)? = nil
 }
 
 /// What restarts the collapse countdown. `generation` is what makes a *re-show* count: a stop offer
@@ -62,7 +68,9 @@ struct MeetingIslandView: View {
                 await MeetingIslandCollapse.run(
                     sleep: { try? await Task.sleep(for: .seconds(MeetingIslandCollapse.delaySeconds)) },
                     isHovering: { model.isHovering },
-                    collapse: { model.isExpanded = false }
+                    collapse: {
+                        if let withdraw = model.offer.onCollapse { withdraw() } else { model.isExpanded = false }
+                    }
                 )
             }
     }
@@ -93,10 +101,16 @@ struct MeetingIslandView: View {
             // becomes key, so the shortcut could only ever fire from somewhere else in the app — a
             // stray Return starting a recording is not a trade worth making for a shortcut that
             // cannot work here anyway.
-            Button(model.offer.primaryTitle) { model.offer.primary() }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .controlSize(.regular)
+            if model.offer.primaryIsProminent {
+                Button(model.offer.primaryTitle) { model.offer.primary() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.regular)
+            } else {
+                Button(model.offer.primaryTitle) { model.offer.primary() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+            }
             Menu {
                 ForEach(Array(model.offer.menu.enumerated()), id: \.offset) { _, item in
                     Button(item.title) { item.action() }

@@ -21,6 +21,9 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
     var isSessionInFlight: ((URL) -> Bool)?
     /// A session was renamed (#357): the app's "last transcript" follows it (`RecordingCoordinator.transcriptRenamed`).
     var onSessionRenamed: ((_ old: URL, _ new: URL) -> Void)?
+    /// A name chosen while the recording ran that its finish could not apply (#358,
+    /// `RecordingCoordinator.unappliedSessionName`): the dialog's name field starts from it. Unset in the CLI.
+    var unappliedSessionName: ((URL) -> String?)?
     /// The in-flight parse+present task. A second `show()` cancels the first, so two rapid calls
     /// cannot both reach `present()` and leave an orphaned panel on screen.
     private var showTask: Task<Void, Never>?
@@ -131,6 +134,7 @@ final class RenameWindowController: NSObject, NSWindowDelegate {
         let dialog = RenameDialog(
             jsonPath: jsonPath,
             allowsSessionRename: isSessionInFlight != nil,
+            initialSessionName: isSessionInFlight != nil ? unappliedSessionName?(jsonPath) : nil,
             speakers: speakers,
             initialChannelNames: channelNames,
             initialEcho: echo,
