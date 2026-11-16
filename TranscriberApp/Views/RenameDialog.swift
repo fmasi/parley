@@ -208,8 +208,8 @@ struct RenameDialog: View {
                             Button("Re-detect") { confirmThenRediarize(channel: channel, count: count) }
                                 .font(.caption)
                                 // Not without the recording's audio (#29): the notice above says why.
-                                .disabled(rediarizing != nil || staleRowsChannel != nil || !audio.allowsRedetect)
-                                .help(audio.notice ?? "")
+                                .disabled(rediarizing != nil || staleRowsChannel != nil || !audio.allowsRedetect(on: channel))
+                                .help(audio.allowsRedetect(on: channel) ? "" : audio.notice ?? "")
                         }
                     }
                     if let absorbed = absorbedClusters[channel], absorbed > 0 {
