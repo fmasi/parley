@@ -27,31 +27,54 @@ lines were deleted rather than flagged, so the lines it judged are no longer in 
 
 ## Results
 
+After the review fixes (scores never below the plain reading, the 3-word rule on the fewer count, rule (b)
+on the speech a line overlaps plus the edge words it shares with its neighbours):
+
 | | before | after |
 |---|---|---|
-| Local lines flagged `echo` | 912 | 893 |
+| Local lines flagged `echo` | 912 | 894 |
 | Newly flagged | | 8 |
-| No longer flagged | | 27 |
+| No longer flagged | | 26 |
 
-The 35 lines that changed:
+The 34 lines that changed:
 
 | Change | Lines | Judged | Effect |
 |---|---|---|---|
 | Newly flagged, numbers written two ways (#363) | 7 | echo | 7 false negatives removed |
 | Newly flagged, short user line inside a 74 s remote line | 1 | probably the user's own | 1 false positive added (uncertain) |
 | No longer flagged, headphone chunks (a), lift ≤ 6.7 dB | 13 | the user's own (no acoustic path) | 13 false positives removed, the 2 lines of #365 among them |
-| No longer flagged, timing or length (b) | 6 | the user's own (5), probably the user's own (1) | 6 false positives removed (one line counted twice: two transcript files of the same call) |
+| No longer flagged, timing, length or the 3-word rule | 5 | the user's own | 5 false positives removed (one line counted twice: two transcript files of the same call) |
 | No longer flagged, timing or length (b) | 8 | echo | 8 false negatives added |
 
-The 8 false negatives added are all in one loudspeaker recording made without echo cancellation, whose
-mic recogniser cut lines differently from the system one: the echo line carried words of a remote line
-that ended more than 0.3 s before it, or added a word ("like", a repeated phrase). The same recording keeps
-62 lines flagged. A missed echo line is visible in the transcript; a wrong flag hides the user's words.
+The 8 false negatives added are all in one loudspeaker recording made without echo cancellation. The review
+widened what a line may carry (remote lines that ended up to 0.8 s before it, flagged remote speech
+included); it did not bring any of them back, because none is within that reach:
+
+- 5 start with words of a remote line that ended 1.3 s or more before them, or whose source the remote side
+  never transcribed nearby: the two recognisers placed the same speech seconds apart, more than any echo
+  delay.
+- 2 hold a word or phrase the mic's recogniser added, and so are longer than the remote speech.
+- 1 starts 0.34 s before its source, 0.04 s outside the 0.3 s tolerance.
+
+The same recording keeps 62 lines flagged. A missed echo line is visible in the transcript; a wrong flag
+hides the user's words.
+
+## Measuring the lift without echo cancellation
+
+Rule (a) needs `far_end_lift_db`, which only echo cancellation records today (off by default). The lift
+needs no canceller: `EchoReduction.farEndLift` reads levels only. Measured on a synthetic 30-minute chunk
+pair (48 kHz Int16 WAVs, read at 16 kHz a block at a time, RMS per 100 ms frame), a debug build took
+1.8 s for both files; the memory is two arrays of 18,000 frame levels plus one 4-second block per file.
+On the replay, the lift computed from the archives alone matched the canceller's own record where the
+issues quote it: 2.5 dB on the headphone call of #365, 31 dB on that day's loudspeaker call. Not
+implemented here; a follow-up.
 
 ## Variants rejected on this replay
 
 - **(b) judged against the best-matching remote line only**: 32 echo lines lost in that same recording.
-  Replaced by judging a line against every remote segment within 0.3 s of it.
+  Replaced by the speech the line overlaps plus the edge words it shares with its neighbours.
+- **(b) judged against every remote segment within 0.3 s of the line** (the first fix): a far end that
+  spoke again right after a repetition made the repetition "short enough" to be a copy (found in review).
 - **English contractions expanded** ("she's" → "she is"): short lines of the user's became "contained"
   in long remote lines through the added common words (new false positives).
 - **Contractions and their long forms joined into one token** (`she_is`): 4 echo lines dropped under the
@@ -65,3 +88,7 @@ that ended more than 0.3 s before it, or added a word ("like", a repeated phrase
 - Judged by reading, not by listening; "probably" marks the lines a reading could not settle.
 - English numbers only; the other languages in the corpus (French, Portuguese) are covered by the
   per-line safeguards, not by normalisation.
+- 15 dB sits in a gap nobody measured: no window fell between 6.7 and 20 dB. A quiet loudspeaker in a
+  noisy room could measure there (7-15 dB), and its single echo lines would then not be flagged.
+- Rule (b) holds back a copy of a whole line that starts more than 0.8 s after its source. On an output
+  slower than that (AirPlay, about 2 s) such echo copies are held back too; only an echo cluster flags them.
