@@ -471,7 +471,8 @@ public final class ChunkProcessor {
                 localSpeakerDatabase: micResult.speakerDatabase,
                 remoteSpeakerDatabase: systemResult.speakerDatabase,
                 temporalThreshold: config.echoTemporalThreshold,
-                textThreshold: config.echoTextThreshold
+                textThreshold: config.echoTextThreshold,
+                coupling: .chunk(echo.record)
             )
             allSegments = dedupResult.segments
             echoFlagged = dedupResult.flaggedCount

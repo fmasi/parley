@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AVFoundation
 @testable import TranscriberCore
 
 /// The per-line echo decision (#363, #365). Synthetic lines only, nothing from a recording.
@@ -46,5 +47,228 @@ struct EchoLineMatchingTests {
         ]
         let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
         #expect(result.flaggedCount == 0)
+    }
+
+    // MARK: - #365 (a): no acoustic coupling, no per-line flag
+
+    private func record(lift: Double?) -> MicEchoCancelRecord {
+        MicEchoCancelRecord(engine: "e", modelSHA256: "a", framesReverted: 0, seconds: 600, delaySamples: 384,
+                            erleDB: lift.map { $0 > 15 ? 45 : 0 }, farEndLiftDB: lift)
+    }
+
+    /// The user's own lines on a headphone call, plus one short phrase that repeats the far end's word for
+    /// word at the same moment: what the per-line rule cannot tell from an echo by time and text alone.
+    private func headphoneChunk() -> [LabeledSegment] {
+        var segments: [LabeledSegment] = []
+        for i in 0..<10 {
+            let start = Double(i) * 12
+            segments.append(local(start, start + 5, "own\(i) words of the user number \(i) here"))
+            segments.append(remote(start + 6, start + 11, "far\(i) words of the other side \(i) there"))
+        }
+        segments.append(remote(130, 131.4, "Not possible to wait."))
+        segments.append(local(130.2, 131.6, "Not possible to wait."))
+        return segments
+    }
+
+    /// The issue's test: echo cancellation measured the far end 2.5 dB above the mic's floor (a headphone
+    /// call; a loudspeaker call that day measured 31 dB), so a phrase the user repeats stays theirs.
+    @Test func aRepeatedPhraseOnAHeadphoneChunkIsNotFlagged() {
+        let result = EchoDeduplicator.deduplicate(
+            segments: headphoneChunk(), localSpeakerDatabase: [:], remoteSpeakerDatabase: [:],
+            coupling: .chunk(record(lift: 2.5)))
+        #expect(result.flaggedCount == 0)
+        #expect(result.clusters.first?.matchedSegments == 1, "it still matches, and the verdict says so")
+    }
+
+    /// The same line where the canceller measured the far end in the mic: a loudspeaker echo copy.
+    @Test func aLoudspeakerEchoCopyIsStillFlagged() {
+        let result = EchoDeduplicator.deduplicate(
+            segments: headphoneChunk(), localSpeakerDatabase: [:], remoteSpeakerDatabase: [:],
+            coupling: .chunk(record(lift: 31)))
+        #expect(flagged(result) == ["Not possible to wait."])
+    }
+
+    /// No record (cancellation off), or a lift too little far-end speech was there to measure: unknown,
+    /// and the per-line rule applies as before.
+    @Test func withoutAMeasureThePerLineRuleApplies() {
+        for coupling in [EchoDeduplicator.AcousticCoupling.unknown, .chunk(nil), .chunk(record(lift: nil))] {
+            let result = EchoDeduplicator.deduplicate(
+                segments: headphoneChunk(), localSpeakerDatabase: [:], remoteSpeakerDatabase: [:], coupling: coupling)
+            #expect(flagged(result) == ["Not possible to wait."])
+        }
+    }
+
+    /// The threshold is the canceller's own line for "the mic heard the far end".
+    @Test func theCouplingThresholdIsTheAudibleEchoLift() {
+        #expect(EchoDeduplicator.AcousticCoupling.uncoupledBelowLiftDB == EchoReduction.audibleEchoLiftDB)
+        #expect(EchoDeduplicator.AcousticCoupling.chunk(record(lift: 14.9)).isUncoupled(start: 0, end: 1))
+        #expect(!EchoDeduplicator.AcousticCoupling.chunk(record(lift: 15)).isUncoupled(start: 0, end: 1))
+    }
+
+    /// An echo CLUSTER is judged as before: (a) holds back only the lines outside one.
+    @Test func anEchoClusterIsFlaggedWhateverTheCoupling() {
+        var segments: [LabeledSegment] = []
+        for i in 0..<10 {
+            let start = Double(i) * 6
+            let text = "far\(i) words of the other side \(i) there"
+            segments.append(remote(start, start + 5, text))
+            segments.append(LabeledSegment(start: start + 0.2, end: start + 5.2, speaker: "Local Speaker 2", text: text, source: "local"))
+        }
+        let result = EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:], coupling: .chunk(record(lift: 2.5)))
+        #expect(result.flaggedCount == 10)
+        #expect(result.clusters.first?.verdict == .echo)
+    }
+
+    /// Over a whole transcript (re-detect) the measure is per chunk: a line in a chunk without coupling is
+    /// held back, the same line in a chunk with coupling is flagged.
+    @Test func overATranscriptTheMeasureAppliesToItsOwnChunk() {
+        let coupling = EchoDeduplicator.AcousticCoupling(spans: [
+            .init(start: 0, end: 600, farEndLiftDB: 2.5),
+            .init(start: 600, end: 1200, farEndLiftDB: 31),
+        ])
+        let segments = [
+            remote(100, 101.4, "Not possible to wait."), local(100.2, 101.6, "Not possible to wait."),
+            remote(700, 701.4, "Okay then thank you."), local(700.2, 701.6, "Okay then thank you."),
+        ]
+        let result = EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:], coupling: coupling)
+        #expect(flagged(result) == ["Okay then thank you."])
+        // A line across the boundary touches the uncoupled chunk: held back.
+        #expect(coupling.isUncoupled(start: 599, end: 601))
+        #expect(!coupling.isUncoupled(start: 601, end: 602))
+        #expect(!coupling.isUncoupled(start: 1300, end: 1301), "past every measured chunk: unknown")
+    }
+
+    // MARK: - #365 (a): the record reaches the transcript and re-detect
+
+    @Test func theTranscriptKeepsEachChunksMeasureAndPlace() throws {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let chunks = [
+            ProcessedChunk(index: 0, startTime: start, audioPath: "a.m4a", segments: [], speakerDatabase: [:],
+                           micEchoCancel: record(lift: 2.5)),
+            ProcessedChunk(index: 1, startTime: start.addingTimeInterval(610), audioPath: "b.m4a", segments: [], speakerDatabase: [:],
+                           micEchoCancel: record(lift: nil)),
+            ProcessedChunk(index: 2, startTime: start.addingTimeInterval(1220), audioPath: "c.m4a", segments: [], speakerDatabase: [:]),
+        ]
+        let d = try #require(TranscriptionRunner.micEchoCancelDictionary(chunks: chunks, meetingStart: start))
+        let entries = try #require(d["per_chunk"] as? [[String: Any]])
+        #expect(entries.count == 2, "only the chunks cancellation ran on")
+        #expect(entries[0]["chunk"] as? Int == 0 && entries[0]["start"] as? Double == 0 && entries[0]["seconds"] as? Double == 600)
+        #expect(entries[0]["far_end_lift_db"] as? Double == 2.5 && entries[0]["erle_db"] as? Double == 0)
+        #expect(entries[1]["chunk"] as? Int == 1 && entries[1]["start"] as? Double == 610 && entries[1]["far_end_lift_db"] == nil)
+
+        let coupling = EchoDeduplicator.AcousticCoupling(transcriptMetadata: ["mic_echo_cancel": d])
+        #expect(coupling.isUncoupled(start: 100, end: 101))
+        #expect(!coupling.isUncoupled(start: 700, end: 701), "no measure there")
+        #expect(TranscriptionRunner.micEchoCancelDictionary(chunks: chunks)?["per_chunk"] == nil, "no meeting start, no places")
+    }
+
+    @Test func aTranscriptWithoutTheMeasureIsUnknown() {
+        #expect(EchoDeduplicator.AcousticCoupling(transcriptMetadata: [:]) == .unknown)
+        #expect(EchoDeduplicator.AcousticCoupling(transcriptMetadata: ["mic_echo_cancel": ["chunks": 2]]) == .unknown)
+        let odd: [String: Any] = ["mic_echo_cancel": ["per_chunk": [
+            ["start": "x", "seconds": 1, "far_end_lift_db": 1], ["start": 0, "seconds": -5, "far_end_lift_db": 1],
+            ["start": Double.nan, "seconds": 5, "far_end_lift_db": 1], ["start": 0, "seconds": 5],
+        ]]]
+        #expect(EchoDeduplicator.AcousticCoupling(transcriptMetadata: odd).isUncoupled(start: 1, end: 2) == false)
+    }
+
+    /// Re-detect runs the same rules, with the chunks' measure read from the transcript.
+    @Test func reDetectHoldsBackARepeatedPhraseOnAnUncoupledChunk() async throws {
+        for (lift, expected) in [(2.5, 0), (31.0, 1)] {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("echo-line-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+            let files = [dir.appendingPathComponent("call-0_mic.wav"), dir.appendingPathComponent("call-1.wav")]
+            for file in files {
+                let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16000)!
+                buffer.frameLength = 16000
+                try AVAudioFile(forWriting: file, settings: format.settings).write(from: buffer)
+            }
+            let segments: [[String: Any]] = headphoneChunk().map {
+                ["start": $0.start, "end": $0.end, "speaker": $0.speaker, "source": $0.source, "text": $0.text, "confidence": 0.9]
+            }
+            let metadata: [String: Any] = [
+                "audio_paths": files.map(\.path), "chunk_durations": [1.0, 1.0],
+                "mic_echo_cancel": ["chunks": 1, "chunks_failed": 0,
+                                    "per_chunk": [["chunk": 0, "start": 0.0, "seconds": 600.0, "far_end_lift_db": lift]]],
+            ]
+            let transcript = dir.appendingPathComponent("t.json")
+            try JSONSerialization.data(withJSONObject: ["metadata": metadata, "segments": segments]).write(to: transcript)
+            let locals = headphoneChunk().filter { $0.source == "local" }
+            let diarization = DiarizationResult(
+                segments: locals.map { DiarizedSegment(start: $0.start, end: $0.end, speaker: "S1", qualityScore: 0.9) },
+                speakerDatabase: ["S1": [1, 0, 0]])
+            let outcome = try await TranscriptRediarizer.rediarize(
+                transcript: transcript, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: diarization),
+                echoCanceller: nil, rawLabeling: TranscriptRediarizer.label)
+            #expect(outcome.echoFlagged == expected, "lift \(lift)")
+        }
+    }
+
+    struct ScriptedDiarizer: DiarizationProvider {
+        let result: DiarizationResult
+        func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult { result }
+        func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult { result }
+    }
+
+    // MARK: - #365 (b): an echo copy's timing and length
+
+    /// A repetition adds words: "No, not possible to wait." after "Not possible to wait." matches on time
+    /// and on 4 of its 5 words, and is not flagged. No coupling measure needed.
+    @Test func aRepetitionThatAddsWordsIsNotFlagged() {
+        let result = EchoDeduplicator.deduplicate(
+            segments: [remote(10, 11.5, "Not possible to wait."), local(10.6, 11.9, "No, not possible to wait.")],
+            localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.clusters.first?.matchedSegments == 1)
+        #expect(result.flaggedCount == 0)
+    }
+
+    /// A repetition of the whole line starts after the far end said it: later than any echo delay
+    /// (`maximumEchoDelaySeconds` plus `echoTimingToleranceSeconds`) after the remote line began.
+    @Test func aFullRepetitionThatStartsLateIsNotFlagged() {
+        let late = EchoDeduplicator.maximumEchoDelaySeconds + EchoDeduplicator.echoTimingToleranceSeconds + 0.1
+        let result = EchoDeduplicator.deduplicate(
+            segments: [remote(10, 12, "We cannot wait any longer."), local(10 + late, 12.4, "We can not wait any longer.")],
+            localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.clusters.first?.matchedSegments == 1)
+        #expect(result.flaggedCount == 0)
+    }
+
+    /// An echo never precedes its source: a line that starts before the remote one (beyond the timing
+    /// tolerance) is the user's, said with or ahead of the far end.
+    @Test func aLineThatStartsBeforeTheRemoteOneIsNotFlagged() {
+        let early = EchoDeduplicator.echoTimingToleranceSeconds + 0.1
+        let result = EchoDeduplicator.deduplicate(
+            segments: [remote(10, 12, "Let us meet on Friday then."), local(10 - early, 11.8, "Let's meet on Friday then.")],
+            localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.clusters.first?.matchedSegments == 1)
+        #expect(result.flaggedCount == 0)
+    }
+
+    /// The true loudspeaker echo copies (b) must keep: the same words a little later, at the edges of the
+    /// window, with the numbers written the other way; a dropped word; an excerpt of a long remote line
+    /// that starts mid-way through it; one local line over two remote ones.
+    @Test func trueEchoCopiesAreStillFlagged() {
+        let tolerance = EchoDeduplicator.echoTimingToleranceSeconds
+        let latest = EchoDeduplicator.maximumEchoDelaySeconds + tolerance
+        let segments = [
+            remote(10, 13, "The quarterly number was 7,500 in total."),
+            local(10 + latest - 0.01, 13.4, "The quarterly number was seven thousand five hundred in total."),
+            remote(20, 23, "We should ship it on Monday morning."),
+            local(20 - tolerance + 0.01, 23, "We should ship it on Monday morning."),
+            remote(30, 33, "Please send the contract to legal today."),
+            local(30.1, 33.1, "Please send the contract to legal."),
+            remote(40, 55, "So the plan is to finish the draft this week and then review it together with the whole team next week"),
+            local(48, 54.5, "and then review it together with the whole team"),
+            remote(60, 63, "First we open the account"),
+            remote(63, 66, "then we move the money"),
+            local(60.2, 66.2, "First we open the account then we move the money"),
+        ]
+        let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.flaggedCount == 5)
+        #expect(result.segments.filter { $0.source == "local" }.allSatisfy { $0.echo })
     }
 }

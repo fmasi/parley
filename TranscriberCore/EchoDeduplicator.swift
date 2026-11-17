@@ -105,6 +105,90 @@ public enum EchoDeduplicator {
     /// on both sides at once matches on time and text and is not an echo.
     public static let minimumWordsOutsideEchoCluster = 3
 
+    // MARK: - Per-line safeguards (#365, constants, not config keys)
+
+    /// The longest loudspeaker-to-mic delay an echo copy can have: the canceller's own bound
+    /// (`LocalVQEEchoCanceller.maxDelaySamples`, 500 ms; Bluetooth output is about 200-300 ms).
+    public static let maximumEchoDelaySeconds =
+        Double(LocalVQEEchoCanceller.maxDelaySamples) / Double(LocalVQEEchoCanceller.sampleRate)
+    /// How far apart the two channels' recognisers may place the same sound: each decodes its own channel
+    /// and places a line's start to within a frame or two (Parakeet's frames are 80 ms), on capture
+    /// timelines aligned to the wall clock. The physical minimum echo delay (buffers and air, tens of
+    /// milliseconds) is below this resolution, so it is folded in here as 0.
+    public static let echoTimingToleranceSeconds = 0.3
+
+    /// What echo cancellation measured about the acoustic path from the loudspeaker to the mic (#365):
+    /// per measured span of the segments' timeline, how far the raw mic rose above its own floor while the
+    /// far end talked (`MicEchoCancelRecord.farEndLiftDB`). Where the canceller found no coupling — a
+    /// headphone call measured 2.5 dB, a loudspeaker call 31 — there was no echo for the mic to pick up,
+    /// and a line that repeats the far end is the user repeating it.
+    public struct AcousticCoupling: Equatable, Sendable {
+        public struct Span: Equatable, Sendable {
+            public let start: Double
+            public let end: Double
+            /// nil: too little far-end speech to measure (`EchoReduction.farEndLift`).
+            public let farEndLiftDB: Double?
+
+            public init(start: Double, end: Double, farEndLiftDB: Double?) {
+                self.start = start
+                self.end = end
+                self.farEndLiftDB = farEndLiftDB
+            }
+        }
+
+        /// Below this lift the mic did not hear the far end: the canceller's own line for "there was an echo
+        /// to remove" (`EchoReduction.audibleEchoLiftDB`, 15 dB), so the record never says both "no echo to
+        /// remove" and "echo lines flagged one by one". Measured: about 0-3 dB on headphones, 27-32 dB on
+        /// loudspeakers; the 6 dB the issue suggested would also separate those, and 15 dB holds back more
+        /// lines where the measure is unsure, which is the side a wrong call should fall on.
+        public static let uncoupledBelowLiftDB = EchoReduction.audibleEchoLiftDB
+
+        public let spans: [Span]
+
+        /// Nothing measured: the per-line rule applies everywhere.
+        public static let unknown = AcousticCoupling(spans: [])
+
+        public init(spans: [Span]) {
+            // A span with no extent, or a NaN, holds no line.
+            self.spans = spans.filter { $0.end > $0.start }
+        }
+
+        /// One chunk's record, over the whole chunk whatever its timeline; unknown without a record.
+        public static func chunk(_ record: MicEchoCancelRecord?) -> AcousticCoupling {
+            guard let record else { return .unknown }
+            return AcousticCoupling(spans: [Span(start: -.infinity, end: .infinity, farEndLiftDB: record.farEndLiftDB)])
+        }
+
+        /// The chunks' measures a transcript keeps in `metadata.mic_echo_cancel.per_chunk` (on the
+        /// transcript's timeline); unknown for a transcript written before #365 or without cancellation.
+        public init(transcriptMetadata metadata: [String: Any]) {
+            let entries = (metadata["mic_echo_cancel"] as? [String: Any])?["per_chunk"] as? [[String: Any]] ?? []
+            self.init(spans: entries.compactMap { entry in
+                guard let start = (entry["start"] as? NSNumber)?.doubleValue,
+                      let seconds = (entry["seconds"] as? NSNumber)?.doubleValue,
+                      start.isFinite, seconds.isFinite, seconds > 0 else { return nil }
+                return Span(start: start, end: start + seconds, farEndLiftDB: (entry["far_end_lift_db"] as? NSNumber)?.doubleValue)
+            })
+        }
+
+        /// One `per_chunk` entry: where the chunk sits on the transcript's timeline and what was measured.
+        public static func metadataEntry(chunk: Int, start: Double, record: MicEchoCancelRecord) -> [String: Any] {
+            var entry: [String: Any] = ["chunk": chunk, "start": (start * 1000).rounded() / 1000, "seconds": record.seconds]
+            if let lift = record.farEndLiftDB { entry["far_end_lift_db"] = lift }
+            if let erle = record.erleDB { entry["erle_db"] = erle }
+            return entry
+        }
+
+        /// Whether a line from `start` to `end` touches a span measured without coupling. A line across a
+        /// chunk boundary counts as uncoupled when either chunk is: in doubt, not flagged.
+        public func isUncoupled(start: Double, end: Double) -> Bool {
+            spans.contains { span in
+                guard let lift = span.farEndLiftDB, lift < Self.uncoupledBelowLiftDB else { return false }
+                return start <= span.end && end >= span.start
+            }
+        }
+    }
+
     /// Whitespace-separated words that hold at least one letter or digit ("It's okay." is 2).
     public static func wordCount(_ text: String) -> Int {
         text.split(whereSeparator: \.isWhitespace).filter { $0.contains { $0.isLetter || $0.isNumber } }.count
@@ -248,10 +332,22 @@ public enum EchoDeduplicator {
     /// far-field mic changes a voice enough to fail any fixed threshold (0.68 on the call behind
     /// #242), and bleed absorbed into the user's own cluster carries the user's embedding.
     ///
+    /// Outside an echo cluster a matched segment is also flagged only when it can be an echo copy (#365):
+    /// - (a) the mic heard the far end where it was said: not where echo cancellation measured no
+    ///   coupling (`coupling`, `AcousticCoupling.uncoupledBelowLiftDB`);
+    /// - (b) it is no longer than what it repeats (normalised words: a repetition adds "No, …" or
+    ///   "…, thanks"), starts no earlier than the remote speech (`echoTimingToleranceSeconds`), and, when it
+    ///   repeats the whole of it, within `maximumEchoDelaySeconds` + the tolerance of its start (a full
+    ///   repetition starts once the far end has said it). An excerpt of a longer remote line is placed
+    ///   anywhere inside it, as the recognisers cut lines differently.
+    /// Neither changes a match, a share or a cluster's verdict, and neither applies in an echo cluster.
+    ///
     /// - Parameter embeddingThreshold: DEPRECATED and ignored (`echo_embedding_threshold`). Kept for
     ///   one release so existing callers and config files keep working.
     /// - Parameter logPrefix: put before each verdict's log line, so a check whose verdicts are not
     ///   the record (the one before minority absorption, #249) does not read like the record.
+    /// - Parameter coupling: what echo cancellation measured for these segments; `.unknown` when it did
+    ///   not run.
     public static func deduplicate(
         segments: [LabeledSegment],
         localSpeakerDatabase: [String: [Float]],
@@ -260,7 +356,8 @@ public enum EchoDeduplicator {
         textThreshold: Double? = nil,
         embeddingThreshold: Double? = nil,
         embeddingDim: Int? = nil,
-        logPrefix: String = ""
+        logPrefix: String = "",
+        coupling: AcousticCoupling = .unknown
     ) -> DeduplicationResult {
         let tThresh = temporalThreshold ?? defaultTemporalThreshold
         let xThresh = textThreshold ?? defaultTextThreshold
@@ -270,7 +367,7 @@ public enum EchoDeduplicator {
         let remoteSegments = segments.filter { $0.source == "remote" && !$0.isFlagged }
 
         // 1. Per-segment match.
-        var matches: [Int: [String: Double]] = [:]   // segment index → remote label → overlap seconds
+        var matches: [Int: Match] = [:]
         var clusterIndices: [String: [Int]] = [:]
         for i in segments.indices where segments[i].source == "local" && !segments[i].isFlagged {
             clusterIndices[segments[i].speaker, default: []].append(i)
@@ -294,12 +391,17 @@ public enum EchoDeduplicator {
             let matchedWords = matched.reduce(0) { $0 + wordCount(segments[$1].text) }
             var remote: [String: Double] = [:]
             for i in matched {
-                for (remoteLabel, overlap) in matches[i] ?? [:] { remote[remoteLabel, default: 0] += overlap }
+                for (remoteLabel, overlap) in matches[i]?.overlapSeconds ?? [:] { remote[remoteLabel, default: 0] += overlap }
             }
             let share = seconds > 0 ? matchedSeconds / seconds : 0
             let isEcho = share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
-            var flagged = 0
-            for i in matched where isEcho || wordCount(segments[i].text) >= minimumWordsOutsideEchoCluster {
+            var flagged = 0, heldUncoupled = 0, heldTiming = 0
+            for i in matched {
+                if !isEcho {
+                    guard wordCount(segments[i].text) >= minimumWordsOutsideEchoCluster else { continue }
+                    if coupling.isUncoupled(start: segments[i].start, end: segments[i].end) { heldUncoupled += 1; continue }
+                    if let match = matches[i], !canBeEchoCopy(segments[i], of: match) { heldTiming += 1; continue }
+                }
                 result[i].echo = true
                 flagged += 1
             }
@@ -313,7 +415,7 @@ public enum EchoDeduplicator {
             clusters.append(verdict)
             // Numbers only are public; a label becomes a name once the user renames a speaker.
             Logger.transcription.info(
-                "\(logPrefix, privacy: .public)Echo cluster \(label, privacy: .private): verdict \(verdict.verdict.rawValue, privacy: .public), share \(share, format: .fixed(precision: 3), privacy: .public), matched \(matched.count, privacy: .public)/\(indices.count, privacy: .public) segments, \(matchedSeconds, format: .fixed(precision: 1), privacy: .public)/\(seconds, format: .fixed(precision: 1), privacy: .public) s, \(matchedWords, privacy: .public)/\(words, privacy: .public) words, flagged \(flagged, privacy: .public), remote speakers matched \(remote.count, privacy: .public), embedding similarity \(verdict.bestEmbeddingSimilarity ?? .nan, format: .fixed(precision: 3), privacy: .public) (evidence only)"
+                "\(logPrefix, privacy: .public)Echo cluster \(label, privacy: .private): verdict \(verdict.verdict.rawValue, privacy: .public), share \(share, format: .fixed(precision: 3), privacy: .public), matched \(matched.count, privacy: .public)/\(indices.count, privacy: .public) segments, \(matchedSeconds, format: .fixed(precision: 1), privacy: .public)/\(seconds, format: .fixed(precision: 1), privacy: .public) s, \(matchedWords, privacy: .public)/\(words, privacy: .public) words, flagged \(flagged, privacy: .public) (held back: \(heldUncoupled, privacy: .public) no coupling, \(heldTiming, privacy: .public) not an echo copy), remote speakers matched \(remote.count, privacy: .public), embedding similarity \(verdict.bestEmbeddingSimilarity ?? .nan, format: .fixed(precision: 3), privacy: .public) (evidence only)"
             )
         }
 
@@ -327,14 +429,40 @@ public enum EchoDeduplicator {
         return d.isFinite && d > 0 ? d : 0
     }
 
+    /// What a local segment repeats: the remote speech, as one segment or several joined.
+    private struct Match {
+        /// Per remote label, the seconds the local segment overlaps the remote speech it repeats.
+        var overlapSeconds: [String: Double]
+        /// When the repeated remote speech starts and ends.
+        var start: Double
+        var end: Double
+        /// Its normalised words (`EchoTextNormalizer`), counted with repeats.
+        var words: Int
+    }
+
+    /// #365 (b): whether `local` can be an echo copy of the speech it matched, by length and timing.
+    private static func canBeEchoCopy(_ local: LabeledSegment, of match: Match) -> Bool {
+        let words = EchoTextNormalizer.words(local.text).count
+        // A repetition adds words; an echo copy has the far end's words or fewer (a recogniser drops some).
+        guard words <= match.words else { return false }
+        // An echo never precedes its source.
+        guard local.start >= match.start - echoTimingToleranceSeconds else { return false }
+        // A copy of the whole line starts within the echo delay of it; a repetition once it has been said.
+        // An excerpt can start anywhere inside the longer line, so only "before it ends" holds for it.
+        if words == match.words {
+            return local.start <= match.start + maximumEchoDelaySeconds + echoTimingToleranceSeconds
+        }
+        return local.start < match.end
+    }
+
     /// Whether `local` repeats concurrent remote speech, from whichever remote speaker: nil when it
-    /// does not, else the seconds it overlaps the remote segment(s) it repeats, per remote label.
+    /// does not, else what it repeats.
     private static func matchedRemote(
         local: LabeledSegment,
         remoteSegments: [LabeledSegment],
         temporalThreshold: Double,
         textThreshold: Double
-    ) -> [String: Double]? {
+    ) -> Match? {
         guard duration(of: local) > 0 else { return nil }
         func overlapSeconds(_ remote: LabeledSegment) -> Double {
             max(min(local.end, remote.end) - max(local.start, remote.start), 0)
@@ -357,14 +485,20 @@ public enum EchoDeduplicator {
             let score = max(textSimilarity(local.text, remote.text), textContainment(local.text, remote.text))
             if score > textThreshold, score > (best?.score ?? 0) { best = (remote, score) }
         }
-        if let best { return [best.remote.speaker: overlapSeconds(best.remote)] }
+        if let best {
+            return Match(overlapSeconds: [best.remote.speaker: overlapSeconds(best.remote)],
+                         start: best.remote.start, end: best.remote.end,
+                         words: EchoTextNormalizer.words(best.remote.text).count)
+        }
 
         guard overlapping.count > 1 else { return nil }
         let window = overlapping.sorted { $0.start < $1.start }
-        guard textSimilarity(local.text, window.map(\.text).joined(separator: " ")) > textThreshold else { return nil }
+        let joined = window.map(\.text).joined(separator: " ")
+        guard textSimilarity(local.text, joined) > textThreshold else { return nil }
         var result: [String: Double] = [:]
         for remote in window { result[remote.speaker, default: 0] += overlapSeconds(remote) }
-        return result
+        return Match(overlapSeconds: result, start: window[0].start, end: window.map(\.end).max() ?? window[0].end,
+                     words: EchoTextNormalizer.words(joined).count)
     }
 
     /// Per local speaker key, the highest cosine similarity to any remote speaker. Evidence only.

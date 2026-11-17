@@ -369,6 +369,9 @@ public enum TranscriptRediarizer {
         let raw: DiarizationResult
         var echo: EchoCheck?
         let thresholds = (temporal: echoTemporalThreshold, text: echoTextThreshold)
+        // The chunks' echo-cancellation measures (#365): every echo check here judges by the same per-line
+        // rules as the pipeline, the wider pass and the stated count's alike.
+        let coupling = EchoDeduplicator.AcousticCoupling(transcriptMetadata: metadata)
         if source == "local" {
             // The wider pass is a try: if it fails (not a cancel), the stated count's pass — what
             // re-detect always ran — still can.
@@ -384,7 +387,8 @@ public enum TranscriptRediarizer {
                 wider = nil
             }
             if let wider,
-               let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling, thresholds: thresholds),
+               let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling,
+                                     thresholds: thresholds, coupling: coupling),
                !found.clusterIDs.isEmpty {
                 // An echo VOICE: a cluster of the diarizer's own. Unattributed speech judged echo as
                 // a group is no voice this pass separated.
@@ -401,7 +405,8 @@ public enum TranscriptRediarizer {
                 }
                 try Task.checkCancellation()
                 raw = try await diarize(speakerCount, share: 0.5...1)
-                echo = echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling, thresholds: thresholds)
+                echo = echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling,
+                                     thresholds: thresholds, coupling: coupling)
             }
         } else {
             raw = try await diarize(speakerCount, share: 0...1)
@@ -671,7 +676,7 @@ public enum TranscriptRediarizer {
     /// without it — a relabel must never lose or misplace words.
     private static func echoCheck(
         on candidates: [Candidate], raw: DiarizationResult, transcript: [[String: Any]], labeling: Labeling,
-        thresholds: (temporal: Double?, text: Double?)
+        thresholds: (temporal: Double?, text: Double?), coupling: EchoDeduplicator.AcousticCoupling
     ) -> EchoCheck? {
         var (local, speakerDatabase) = labeling(candidates.map(\.segment), raw)
         guard local.count == candidates.count else {
@@ -693,9 +698,10 @@ public enum TranscriptRediarizer {
         }
         // The raw clusters' embeddings are passed as evidence. The transcript holds none for the
         // other channel, so no voice similarity is recorded; it decides nothing either way.
+        // The chunks' echo-cancellation measures (#365): the same per-line rules as the pipeline.
         let result = EchoDeduplicator.deduplicate(
             segments: local + remote, localSpeakerDatabase: speakerDatabase, remoteSpeakerDatabase: [:],
-            temporalThreshold: thresholds.temporal, textThreshold: thresholds.text)
+            temporalThreshold: thresholds.temporal, textThreshold: thresholds.text, coupling: coupling)
         let echoLabels = Set(result.clusters.filter(\.isEcho).map(\.label))
         let clusterIDs = SpeakerAssignment.buildSpeakerMap(from: raw.segments)
             .filter { echoLabels.contains(labelPrefix(for: "local") + $0.value) }.keys
