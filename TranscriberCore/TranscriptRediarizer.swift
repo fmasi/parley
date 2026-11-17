@@ -413,7 +413,15 @@ public enum TranscriptRediarizer {
         // could not tie to a diarization turn — but never to an echo cluster, and not at all when
         // the unattributed speech was itself judged echo.
         let echoClusterLabels = echo.map { echo in Set(pool.indices.filter(echo.isInEchoCluster).map { labeled[$0].speaker }) } ?? []
-        labeled = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: speakerCount, keeping: echoClusterLabels)
+        // With an echo voice kept apart, a line no turn covers that repeats the other side at that
+        // moment is not the one person's either (#265 review): under 3 words the per-line rule leaves
+        // it unflagged ("Right." through the speakers), so the fold would have handed it to the user.
+        // It stays unattributed. Without an echo voice the fold is what it always was.
+        let sparedFromFold: Set<Int> = echo.map { echo in
+            echo.clusterIDs.isEmpty ? [] : Set(pool.indices.filter { echo.result.matchedLocal.contains($0) })
+        } ?? []
+        labeled = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: speakerCount, keeping: echoClusterLabels,
+                                                        sparing: sparedFromFold)
         for i in labeled.indices { labeled[i].source = source }
         SpeakerAssignment.tagWithSourcePrefix(&labeled)
 

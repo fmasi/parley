@@ -279,3 +279,23 @@ private struct CopyingMicCanceller: MicEchoCancelling {
         return MicEchoCancelRecord(engine: "fake", modelSHA256: String(repeating: "b", count: 64), framesReverted: 0, seconds: 1)
     }
 }
+
+/// #265 review: `DeduplicationResult.matchedLocal` names every local line that repeats the other side
+/// at that moment, flagged or not — re-detect needs the short ones the per-line rule leaves unflagged.
+@Suite("Echo dedup: the lines that matched (#265 review)")
+struct EchoDedupMatchedLinesTests {
+    @Test("matched lines are reported by index, short ones included; unmatched and remote ones are not")
+    func matchedLinesAreReported() {
+        let segments = [
+            LabeledSegment(start: 0, end: 4, speaker: "Speaker 1", text: BleedFixture.words("mine", 6), source: "local"),
+            LabeledSegment(start: 10, end: 11, speaker: "Speaker 1", text: "rightx0", source: "local"),
+            LabeledSegment(start: 20, end: 24, speaker: "Speaker 1", text: BleedFixture.words("copy", 6), source: "local"),
+            LabeledSegment(start: 10, end: 11, speaker: "Speaker 1", text: "rightx0", source: "remote"),
+            LabeledSegment(start: 20, end: 24, speaker: "Speaker 1", text: BleedFixture.words("copy", 6), source: "remote"),
+        ]
+        let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.matchedLocal == [1, 2])
+        // The short one is matched but not flagged (fewer than 3 words outside an echo cluster).
+        #expect(!result.segments[1].echo && result.segments[2].echo)
+    }
+}

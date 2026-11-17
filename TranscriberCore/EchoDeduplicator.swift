@@ -209,11 +209,15 @@ public enum EchoDeduplicator {
         public let flaggedCount: Int
         /// One verdict per local cluster that holds an unflagged segment, sorted by label.
         public let clusters: [ClusterVerdict]
+        /// The indices (into `segments`) of every local segment that matched concurrent remote speech,
+        /// flagged or not: a match of 1–2 words outside an echo cluster is matched and left unflagged.
+        public let matchedLocal: Set<Int>
 
-        public init(segments: [LabeledSegment], flaggedCount: Int, clusters: [ClusterVerdict] = []) {
+        public init(segments: [LabeledSegment], flaggedCount: Int, clusters: [ClusterVerdict] = [], matchedLocal: Set<Int> = []) {
             self.segments = segments
             self.flaggedCount = flaggedCount
             self.clusters = clusters
+            self.matchedLocal = matchedLocal
         }
 
         /// The chunk's processing issues for this result, both informational: `echo_flagged` (how
@@ -309,7 +313,8 @@ public enum EchoDeduplicator {
             )
         }
 
-        return DeduplicationResult(segments: result, flaggedCount: flaggedCount, clusters: clusters)
+        return DeduplicationResult(segments: result, flaggedCount: flaggedCount, clusters: clusters,
+                                   matchedLocal: Set(matches.keys))
     }
 
     /// A segment's length; 0 when its times are not finite or run backwards.

@@ -1934,6 +1934,47 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(seen == seen.sorted() && seen.last == 1 && seen.first ?? 1 < 1, "\(seen)")
     }
 
+    /// With the echo voice kept apart, the stated count of 1 folds the unattributed lines into the one
+    /// person — but not one that repeats the other side at that moment: under 3 words it is not
+    /// flagged ("Right." said by the far side through the speakers), and it is not the user's either.
+    @Test("at a stated count of 1, a short unattributed line repeating the other side is not folded into the person")
+    func aShortMatchedUnattributedLineIsNotFolded() async throws {
+        let answers = Answers(), voices = answers.voices
+        let right = [Line(start: 230, end: 231, text: Self.words("right", 1))]
+        let stray = [Line(start: 250, end: 251.5, text: Self.words("aside", 3))]
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+            + right.map { Self.segment($0, "Remote Speaker 1", "remote") }
+            + (right + stray).map { Self.segment($0, "Local Unknown", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: CountingDiarizer(answers.onePerson))
+
+        let segments = try read(t).segments
+        #expect(outcome.echoClusters == 1)
+        #expect(speakers(found(right, in: segments)) == ["Local Unknown"])
+        #expect(echoCount(found(right, in: segments)) == 0, "one word: the per-line rule does not flag it")
+        // Speech no turn covers that repeats nothing still goes to the one person.
+        #expect(speakers(found(stray, in: segments)) == ["Local Speaker 1"])
+        #expect(speakers(found(voices.own, in: segments)) == ["Local Speaker 1"])
+        #expect(record(segments) == record(before))
+    }
+
+    /// The same short line on a channel with no echo voice: the stated count of 1 folds it, as before.
+    @Test("without an echo voice a short unattributed line that repeats the other side still folds, as before")
+    func withoutAnEchoVoiceTheShortLineStillFolds() async throws {
+        let voices = TwoVoices()
+        let right = [Line(start: 230, end: 231, text: Self.words("right", 1))]
+        let before = voices.own.map { Self.segment($0, "Local Speaker 1", "local") }
+            + right.map { Self.segment($0, "Remote Speaker 1", "remote") }
+            + right.map { Self.segment($0, "Local Unknown", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1,
+            diarizer: CountingDiarizer([1: DiarizationResult(segments: Self.turns(voices.own, "S1"), speakerDatabase: ["S1": [1, 0, 0]])]))
+        #expect(speakers(found(right, in: try read(t).segments)) == ["Local Speaker 1"])
+    }
+
     final class Fractions: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [Double] = []
