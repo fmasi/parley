@@ -39,7 +39,7 @@ All parameters are set in `~/Library/Application Support/Parley/config.json` usi
 | Text similarity threshold | `echo_text_threshold` | `0.7` | A local segment MATCHES a remote one when their word-level Jaccard similarity (0–1) is above this. Also the containment threshold (fraction of the local words found in the remote text, for a short excerpt of a long remote segment) and the threshold for the Jaccard against all the overlapping remote segments joined. |
 | Embedding cosine threshold (**deprecated, ignored**) | `echo_embedding_threshold` | — | Still read and written back, so an existing config file keeps working; it no longer changes anything (#242). The voice similarity is recorded as evidence (`metadata.echo_clusters[].embedding_similarity`) and decides nothing. The key will be removed in a later release. |
 
-The echo check a re-detect runs from the rename dialog (#243) uses the two defaults above, whatever the config file says: it has no config in hand.
+The echo check a re-detect runs from the rename dialog (#243) uses the two thresholds above as configured: the dialog passes `echo_temporal_threshold` and `echo_text_threshold` from the config file (#265).
 
 The cluster rule has three constants. They are **not** config keys (`EchoDeduplicator`):
 
