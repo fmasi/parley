@@ -226,7 +226,9 @@ public enum EchoTextNormalizer {
                     values.append(String(sum))
                     total = 0; current = 0
                 }
-                current += n
+                let (added, overflow) = current.addingReportingOverflow(n)
+                if overflow { return nil }
+                current = added
                 lastWasSmall = true; lastWasBigScale = false
             case .scale(let k) where k == 100:
                 let (product, overflow) = (current == 0 ? 1 : current).multipliedReportingOverflow(by: 100)

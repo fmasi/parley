@@ -277,12 +277,78 @@ struct EchoLineMatchingTests {
     /// the far end's speech around it, which holds those words too.
     @Test func anEchoLineThatCarriesTheTailOfThePreviousRemoteLineIsFlagged() {
         let segments = [
-            remote(74, 76.6, "That sounds right to me."),
-            remote(77.56, 83.48, "The second draft goes to the review board on Thursday morning"),
-            remote(83.6, 85, "So anyway."),
-            local(76.78, 83.56, "to me. The second draft goes to the review board on Thursday morning so"),
+            remote(74, 76.5, "That sounds right to me."),
+            remote(77.5, 83.5, "The second draft goes to the review board on Thursday morning"),
+            remote(83.7, 85, "So anyway."),
+            local(76.8, 83.6, "to me. The second draft goes to the review board on Thursday morning so"),
         ]
         let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
         #expect(result.flaggedCount == 1)
+    }
+
+    // MARK: - Review fixes
+
+    /// A spoken number is one word once normalised: "Twenty twenty six." is ONE word against "2026", too
+    /// short to be flagged on its own outside an echo cluster (it is not flagged on main either).
+    @Test func aSpokenNumberCountsAsOneWordForTheThreeWordGate() {
+        let segments = [remote(10, 13, "So in 2026 we will do that."), local(10.2, 11.2, "Twenty twenty six.")]
+        let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.clusters.first?.matchedSegments == 1)
+        #expect(result.flaggedCount == 0)
+    }
+
+    /// The issue's pattern while the far end goes on talking 0.2 s after the user's line ends: that next
+    /// line was never in the mic's line, so it does not make the repetition "short enough" to be a copy.
+    @Test func aRepetitionStaysUnflaggedWhenTheFarEndSpeaksAgainRightAfter() {
+        let segments = [
+            remote(10, 11.5, "Not possible to wait."),
+            local(10.6, 11.9, "No, not possible to wait."),
+            remote(12.1, 14, "We need the signed papers by the morning"),
+        ]
+        let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.clusters.first?.matchedSegments == 1)
+        #expect(result.flaggedCount == 0)
+    }
+
+    /// Nor does a remote line that ended just before it, unless the local line starts with that line's
+    /// words (the tail an echo copy carries).
+    @Test func aRepetitionStaysUnflaggedWhenTheFarEndSpokeJustBefore() {
+        let segments = [
+            remote(8, 9.9, "Because otherwise things get worse."),
+            remote(10, 11.5, "Not possible to wait."),
+            local(10.6, 11.9, "No, not possible to wait."),
+        ]
+        let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.flaggedCount == 0)
+    }
+
+    /// The limit that remains: when the far end's next line, starting within 0.3 s, holds the repetition's
+    /// last word, that word counts as carried and the length test passes. Only (a) holds such a line back.
+    @Test func limitARepetitionEndingInTheFarEndsNextWordIsFlaggedWithoutCoupling() {
+        let segments = [
+            remote(10, 11.5, "Not possible to wait."),
+            local(10.6, 11.9, "No, not possible to wait."),
+            remote(12.1, 14, "Wait for the signed papers then"),
+        ]
+        let flaggedWithout = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(flaggedWithout.flaggedCount == 1)
+        let headphones = MicEchoCancelRecord(engine: "e", modelSHA256: "a", framesReverted: 0, seconds: 60, farEndLiftDB: 2.5)
+        let flaggedWith = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:],
+                                                       coupling: .chunk(headphones))
+        #expect(flaggedWith.flaggedCount == 0)
+    }
+
+    /// An echo copy can trail its source by the whole echo delay: the remote line before counts when it
+    /// ended within `maximumEchoDelaySeconds` + the tolerance (0.8 s) of the local line's start, and a
+    /// remote line already flagged (`filtered`, `duplicate`) is still the far end's sound.
+    @Test func theContextReachesBackTheWholeEchoDelayAndHoldsFlaggedRemoteSpeech() {
+        var earlier = remote(70, 76.2, "The plan is ready on Friday.")
+        let source = remote(77, 82, "The second draft goes to the review board")
+        let local = local(76.8, 82.3, "on Friday. The second draft goes to the review board")
+        #expect(EchoDeduplicator.deduplicate(segments: [earlier, source, local], localSpeakerDatabase: [:],
+                                             remoteSpeakerDatabase: [:]).flaggedCount == 1)
+        earlier.filtered = true
+        #expect(EchoDeduplicator.deduplicate(segments: [earlier, source, local], localSpeakerDatabase: [:],
+                                             remoteSpeakerDatabase: [:]).flaggedCount == 1)
     }
 }

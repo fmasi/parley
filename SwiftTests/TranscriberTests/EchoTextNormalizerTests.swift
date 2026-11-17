@@ -91,6 +91,23 @@ struct EchoTextNormalizerTests {
         #expect(words(text) == [String(repeating: "9", count: 40)], "joined as text: no integer to overflow")
     }
 
+    /// #363 only ever adds matches: number words punctuation keeps apart on one side and not on the other
+    /// compared as they did on main (each pair scored 1.0 there).
+    @Test func numberWordsSplitDifferentlyStillMatchAsOnMain() {
+        #expect(EchoDeduplicator.textSimilarity("one two three four", "one, two, three, four") == 1)
+        #expect(EchoDeduplicator.textSimilarity("twenty, twenty six", "twenty twenty six") == 1)
+        #expect(EchoDeduplicator.textContainment("one two three four", "one, two, three, four, five") == 1)
+    }
+
+    /// A long string of number words neither traps nor loses its words.
+    @Test func aLongNumberWordStringNeverTraps() {
+        let text = (["ninety nine"] + Array(repeating: "hundred", count: 12) + ["ninety nine", "thousand", "billion", "billion"])
+            .joined(separator: " ")
+        let result = words(text)
+        #expect(!result.isEmpty)
+        #expect(result.joined(separator: " ") == text, "too large: given back as words")
+    }
+
     @Test func aRunTooLargeForAnIntegerIsLeftAsWords() {
         #expect(words("nine hundred billion billion billion") == ["nine", "hundred", "billion", "billion", "billion"])
     }

@@ -22,25 +22,35 @@ public enum EchoDeduplicator {
         return min(overlap / shorter, 1.0)
     }
 
-    /// Word-level Jaccard similarity, over the words `EchoTextNormalizer` makes of each side (#363).
+    /// The words compared before #363: lower-cased, cut at anything that is not a letter or a digit.
+    static func plainWords(_ text: String) -> [String] {
+        text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+    }
+
+    /// Both ways a text is read for the comparison: as before #363, and through `EchoTextNormalizer`.
+    /// Each score is the higher of the two, so the normalisation only ever adds matches: number words
+    /// one side keeps apart with commas ("one, two, three") still match as they did.
+    private static let readings: [(String) -> [String]] = [plainWords, EchoTextNormalizer.words]
+
+    /// Word-level Jaccard similarity: the higher of the plain and the normalised reading (#363).
     public static func textSimilarity(_ a: String, _ b: String) -> Double {
-        let wordsA = Set(EchoTextNormalizer.words(a))
-        let wordsB = Set(EchoTextNormalizer.words(b))
-        guard !wordsA.isEmpty || !wordsB.isEmpty else { return 0 }
-        let intersection = wordsA.intersection(wordsB).count
-        let union = wordsA.union(wordsB).count
-        return Double(intersection) / Double(union)
+        readings.map { read in
+            let wordsA = Set(read(a)), wordsB = Set(read(b))
+            guard !wordsA.isEmpty || !wordsB.isEmpty else { return 0 }
+            return Double(wordsA.intersection(wordsB).count) / Double(wordsA.union(wordsB).count)
+        }.max() ?? 0
     }
 
     /// What fraction of words in `a` appear in `b`.
     /// Useful when `a` is a short excerpt of a longer `b` — Jaccard penalises
     /// the size mismatch, but containment captures that `a` is fully inside `b`.
+    /// The higher of the plain and the normalised reading, as `textSimilarity`.
     public static func textContainment(_ a: String, _ b: String) -> Double {
-        let wordsA = Set(EchoTextNormalizer.words(a))
-        let wordsB = Set(EchoTextNormalizer.words(b))
-        guard !wordsA.isEmpty else { return 0 }
-        let intersection = wordsA.intersection(wordsB).count
-        return Double(intersection) / Double(wordsA.count)
+        readings.map { read in
+            let wordsA = Set(read(a)), wordsB = Set(read(b))
+            guard !wordsA.isEmpty else { return 0 }
+            return Double(wordsA.intersection(wordsB).count) / Double(wordsA.count)
+        }.max() ?? 0
     }
 
     public static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
@@ -365,13 +375,15 @@ public enum EchoDeduplicator {
         // An already-flagged segment (gate-filtered noise, an abutting repeat) is neither an echo
         // candidate nor evidence for one.
         let remoteSegments = segments.filter { $0.source == "remote" && !$0.isFlagged }
+        // Flagged remote speech is still the far end's sound: it is part of what an echo line may carry.
+        let allRemote = segments.filter { $0.source == "remote" && duration(of: $0) > 0 }
 
         // 1. Per-segment match.
         var matches: [Int: Match] = [:]
         var clusterIndices: [String: [Int]] = [:]
         for i in segments.indices where segments[i].source == "local" && !segments[i].isFlagged {
             clusterIndices[segments[i].speaker, default: []].append(i)
-            if let remote = matchedRemote(local: segments[i], remoteSegments: remoteSegments,
+            if let remote = matchedRemote(local: segments[i], remoteSegments: remoteSegments, allRemote: allRemote,
                                           temporalThreshold: tThresh, textThreshold: xThresh) {
                 matches[i] = remote
             }
@@ -398,7 +410,9 @@ public enum EchoDeduplicator {
             var flagged = 0, heldUncoupled = 0, heldTiming = 0
             for i in matched {
                 if !isEcho {
-                    guard wordCount(segments[i].text) >= minimumWordsOutsideEchoCluster else { continue }
+                    // Counted both ways, the fewer wins: "Twenty twenty six." is one word against "2026".
+                    let words = min(wordCount(segments[i].text), EchoTextNormalizer.words(segments[i].text).count)
+                    guard words >= minimumWordsOutsideEchoCluster else { continue }
                     if coupling.isUncoupled(start: segments[i].start, end: segments[i].end) { heldUncoupled += 1; continue }
                     if let match = matches[i], !canBeEchoCopy(segments[i], of: match) { heldTiming += 1; continue }
                 }
@@ -429,33 +443,55 @@ public enum EchoDeduplicator {
         return d.isFinite && d > 0 ? d : 0
     }
 
-    /// What a local segment repeats, and the remote speech around it.
+    /// What a local segment repeats, and the far end's speech around it (#365 (b)).
     private struct Match {
         /// Per remote label, the seconds the local segment overlaps the remote speech it repeats.
         var overlapSeconds: [String: Double]
-        /// The far end's speech around the local line: every unflagged remote segment within
-        /// `echoTimingToleranceSeconds` of it. Not only the segment(s) it matched: the two recognisers cut
-        /// lines differently, and an echo line often carries the tail of the remote line before.
-        var contextStart: Double
-        var contextEnd: Double
-        /// The context's normalised words (`EchoTextNormalizer`), counted with repeats.
-        var contextWords: Int
+        /// Remote speech that overlaps the local line in time (any remote segment, flagged ones included).
+        var core: [LabeledSegment]
+        /// Remote lines that ended within the whole echo delay before the local line starts
+        /// (`maximumEchoDelaySeconds` + `echoTimingToleranceSeconds`): an echo line can carry their tail.
+        var lead: [LabeledSegment]
+        /// Remote lines that start within `echoTimingToleranceSeconds` after the local line ends: an echo line
+        /// can carry their first word or two, where the recognisers placed the boundary differently.
+        var trail: [LabeledSegment]
     }
 
     /// #365 (b): whether `local` can be an echo copy of the far end's speech around it, by length and timing.
+    ///
+    /// The far end's speech the line can hold is everything that overlaps it, plus the words it actually
+    /// shares with the line's edges: its first words found in the remote lines just before, its last words
+    /// found in the remote lines just after. A neighbouring line's other words are not counted: they were
+    /// never in the mic's line, and a repetition that adds a word ("No, …") must not pass for a copy because
+    /// the far end happened to speak right before or after it.
+    ///
+    /// Both readings of the words are tried (plain and normalised) and the one that fits better decides.
     private static func canBeEchoCopy(_ local: LabeledSegment, of match: Match) -> Bool {
-        let words = EchoTextNormalizer.words(local.text).count
-        // A repetition adds words ("No, …", "…, thanks"); an echo copy holds no more than the far end said
-        // around it (a recogniser drops words more often than it adds them).
-        guard words <= match.contextWords else { return false }
+        struct Fit { let excess: Int; let carried: Bool }
+        let fits = readings.map { read -> Fit in
+            let words = read(local.text)
+            let core = match.core.reduce(0) { $0 + read($1.text).count }
+            let leadWords = Set(match.lead.flatMap { read($0.text) })
+            let trailWords = Set(match.trail.flatMap { read($0.text) })
+            let lead = words.prefix { leadWords.contains($0) }.count
+            let trail = min(Array(words.reversed()).prefix { trailWords.contains($0) }.count, words.count - lead)
+            return Fit(excess: words.count - (core + lead + trail), carried: lead + trail > 0)
+        }
+        guard let fit = fits.min(by: { $0.excess < $1.excess }) else { return false }
+        // A repetition adds words; an echo copy holds no more than the far end said there (a recogniser drops
+        // words more often than it adds them).
+        guard fit.excess <= 0 else { return false }
+        // A line that starts with the tail of an earlier remote line is placed by that line, not by the core.
+        if fit.carried { return true }
+        let coreStart = match.core.map(\.start).min() ?? local.start
         // An echo never precedes its source.
-        guard local.start >= match.contextStart - echoTimingToleranceSeconds else { return false }
+        guard local.start >= coreStart - echoTimingToleranceSeconds else { return false }
         // A copy of everything the far end said there starts within the echo delay of it; a repetition only
         // once it has been said. A shorter copy can start anywhere inside it.
-        if words == match.contextWords {
-            return local.start <= match.contextStart + maximumEchoDelaySeconds + echoTimingToleranceSeconds
+        if fit.excess == 0 {
+            return local.start <= coreStart + maximumEchoDelaySeconds + echoTimingToleranceSeconds
         }
-        return local.start < match.contextEnd
+        return true
     }
 
     /// Whether `local` repeats concurrent remote speech, from whichever remote speaker: nil when it
@@ -463,6 +499,7 @@ public enum EchoDeduplicator {
     private static func matchedRemote(
         local: LabeledSegment,
         remoteSegments: [LabeledSegment],
+        allRemote: [LabeledSegment],
         temporalThreshold: Double,
         textThreshold: Double
     ) -> Match? {
@@ -500,14 +537,12 @@ public enum EchoDeduplicator {
             }
         }
         guard let matched else { return nil }
-        let context = remoteSegments.filter { remote in
-            duration(of: remote) > 0 && remote.end >= local.start - echoTimingToleranceSeconds
-                && remote.start <= local.end + echoTimingToleranceSeconds
-        }
-        return Match(overlapSeconds: matched,
-                     contextStart: context.map(\.start).min() ?? local.start,
-                     contextEnd: context.map(\.end).max() ?? local.end,
-                     contextWords: context.reduce(0) { $0 + EchoTextNormalizer.words($1.text).count })
+        let reach = maximumEchoDelaySeconds + echoTimingToleranceSeconds
+        return Match(
+            overlapSeconds: matched,
+            core: allRemote.filter { $0.end > local.start && $0.start < local.end },
+            lead: allRemote.filter { $0.end <= local.start && $0.end >= local.start - reach },
+            trail: allRemote.filter { $0.start >= local.end && $0.start <= local.end + echoTimingToleranceSeconds })
     }
 
     /// Per local speaker key, the highest cosine similarity to any remote speaker. Evidence only.
