@@ -2005,6 +2005,33 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(speakers(found(voices.own, in: try read(t).segments)) == ["Local Speaker 1"])
     }
 
+    /// The echo check of re-detect reads the same thresholds as the live pipeline's
+    /// (`echo_temporal_threshold`, `echo_text_threshold`). Here the far side's lines reach the mic
+    /// with 5 of their 8 words (Jaccard 0.45, containment 0.625): not a match at the default 0.7, a
+    /// match at 0.5.
+    @Test("re-detect's echo check uses the configured text threshold", arguments: [nil, 0.5] as [Double?])
+    func theConfiguredTextThresholdApplies(textThreshold: Double?) async throws {
+        let voices = TwoVoices()
+        func heard(_ line: Line) -> Line {
+            let words = line.text.split(separator: " ")
+            return Line(start: line.start, end: line.end, text: (words.prefix(5) + ["heardx0", "heardx1", "heardx2"]).joined(separator: " "))
+        }
+        let far = voices.far.map { Line(start: $0.start, end: $0.end, text: Self.words("far\(Int($0.start))", 8)) }
+        let bleed = far.map(heard)
+        let before = voices.own.map { Self.segment($0, "Local Speaker 1", "local") }
+            + far.map { Self.segment($0, "Remote Speaker 1", "remote") }
+            + bleed.map { Self.segment($0, "Local Speaker 1", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let two = DiarizationResult(segments: Self.turns(voices.own, "S1") + Self.turns(bleed, "S2"),
+                                    speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]])
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: ScriptedDiarizer(result: two),
+            echoTextThreshold: textThreshold)
+
+        #expect(outcome.echoClusters == (textThreshold == nil ? 0 : 1))
+    }
+
     final class Fractions: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [Double] = []

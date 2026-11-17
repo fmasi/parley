@@ -226,6 +226,10 @@ public enum TranscriptRediarizer {
     /// is exactly what it was before: a clean channel pays a second diarizer pass, never a different
     /// result.
     ///
+    /// The echo check reads `echo_temporal_threshold` / `echo_text_threshold` as the live pipeline does:
+    /// the caller passes the configured values (`echoTemporalThreshold`, `echoTextThreshold`; nil is
+    /// `EchoDeduplicator`'s default).
+    ///
     /// **A mic channel that was echo-cancelled is cancelled again (#342).** The pipeline diarized a
     /// cleaned copy of the mic; diarizing the raw one here would find the echo voice again and move
     /// the speakers. When `metadata.mic_echo_cancel` says chunks were cancelled, each archive's mic
@@ -238,10 +242,13 @@ public enum TranscriptRediarizer {
         diarizer: any DiarizationProvider,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         echoCanceller: (any MicEchoSampleCancelling)? = LocalVQEMicEchoCanceller.bundled(),
+        echoTemporalThreshold: Double? = nil,
+        echoTextThreshold: Double? = nil,
         onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> Outcome {
         try await rediarize(transcript: url, source: source, speakerCount: speakerCount, diarizer: diarizer,
                             scratchDirectory: scratchDirectory, echoCanceller: echoCanceller,
+                            echoTemporalThreshold: echoTemporalThreshold, echoTextThreshold: echoTextThreshold,
                             onProgress: onProgress, rawLabeling: label)
     }
 
@@ -259,6 +266,8 @@ public enum TranscriptRediarizer {
         diarizer: any DiarizationProvider,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         echoCanceller: (any MicEchoSampleCancelling)? = nil,
+        echoTemporalThreshold: Double? = nil,
+        echoTextThreshold: Double? = nil,
         onProgress: (@Sendable (Progress) -> Void)? = nil,
         rawLabeling: Labeling
     ) async throws -> Outcome {
@@ -359,6 +368,7 @@ public enum TranscriptRediarizer {
         let candidates = relabelCandidates(in: rawSegments, source: source)
         let raw: DiarizationResult
         var echo: EchoCheck?
+        let thresholds = (temporal: echoTemporalThreshold, text: echoTextThreshold)
         if source == "local" {
             // The wider pass is a try: if it fails (not a cancel), the stated count's pass — what
             // re-detect always ran — still can.
@@ -374,7 +384,7 @@ public enum TranscriptRediarizer {
                 wider = nil
             }
             if let wider,
-               let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling),
+               let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling, thresholds: thresholds),
                !found.clusterIDs.isEmpty {
                 // An echo VOICE: a cluster of the diarizer's own. Unattributed speech judged echo as
                 // a group is no voice this pass separated.
@@ -389,7 +399,7 @@ public enum TranscriptRediarizer {
                 }
                 try Task.checkCancellation()
                 raw = try await diarize(speakerCount, share: 0.5...1)
-                echo = echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling)
+                echo = echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling, thresholds: thresholds)
             }
         } else {
             raw = try await diarize(speakerCount, share: 0...1)
@@ -658,7 +668,8 @@ public enum TranscriptRediarizer {
     /// not be put back on the right lines, so the check stands down and the re-detect goes on
     /// without it — a relabel must never lose or misplace words.
     private static func echoCheck(
-        on candidates: [Candidate], raw: DiarizationResult, transcript: [[String: Any]], labeling: Labeling
+        on candidates: [Candidate], raw: DiarizationResult, transcript: [[String: Any]], labeling: Labeling,
+        thresholds: (temporal: Double?, text: Double?)
     ) -> EchoCheck? {
         var (local, speakerDatabase) = labeling(candidates.map(\.segment), raw)
         guard local.count == candidates.count else {
@@ -681,7 +692,8 @@ public enum TranscriptRediarizer {
         // The raw clusters' embeddings are passed as evidence. The transcript holds none for the
         // other channel, so no voice similarity is recorded; it decides nothing either way.
         let result = EchoDeduplicator.deduplicate(
-            segments: local + remote, localSpeakerDatabase: speakerDatabase, remoteSpeakerDatabase: [:])
+            segments: local + remote, localSpeakerDatabase: speakerDatabase, remoteSpeakerDatabase: [:],
+            temporalThreshold: thresholds.temporal, textThreshold: thresholds.text)
         let echoLabels = Set(result.clusters.filter(\.isEcho).map(\.label))
         let clusterIDs = SpeakerAssignment.buildSpeakerMap(from: raw.segments)
             .filter { echoLabels.contains(labelPrefix(for: "local") + $0.value) }.keys
