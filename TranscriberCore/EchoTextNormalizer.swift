@@ -9,22 +9,21 @@ import Foundation
 /// - **Case and punctuation** do not count: lower-cased, cut at anything that is not a letter or a digit,
 ///   as before. Accents are kept ("schön" is not "schon"): folding them would make different words equal.
 /// - **Digit groups**: "7,500" and "7.500" are "7500" (a separator followed by exactly three digits); any
-///   other separator between digits is a decimal point ("7,5" and "7.5" are "7.5"). "%" is the word "percent".
-/// - **English contractions** read as their long form: "n't" is "not" ("won't" is "will not", "can't" and
-///   "cannot" are "can not"), "'re" "are", "'ve" "have", "'ll" "will", "I'm" "I am", "let's" "let us", "'d"
-///   after a pronoun "would", "'s" after a pronoun or a question word "is". Any other apostrophe splits the
-///   word, as before: a possessive, French "l'homme", Italian "dell'anno", Dutch "zo'n".
+///   other separator between digits is a decimal point ("7,5" and "7.5" are "7.5").
+/// - **Apostrophes** of every form (', ’, ‘, ʼ) split a word as before, so "don’t" and "don't" agree.
+///   Contractions are not otherwise normalised (see `expanded`: both ways were measured, and both did harm).
 /// - **English number words** become digits. A run of them, unbroken by punctuation other than a hyphen, is
 ///   one number: evaluated with its scale words ("seven thousand five hundred" is 7500, "one hundred and
 ///   five" 105, "a hundred" 100), else read in pairs or digit by digit and joined ("one ninety five" is 195,
 ///   "twenty twenty six" 2026, "twenty oh five" 2005, "one two three" 123). "and", "oh" and "a" count only
 ///   beside number words; elsewhere they are words.
 ///
-/// Limits: English only for numbers and contractions (the other 24 languages' number words are left as they
+/// Limits: English only for numbers (the other 24 languages' number words are left as they
 /// are, so their comparisons are unchanged; where an English number word is also one of theirs — French
 /// "six", Polish "ten" — it maps the same way on both sides). Not handled: ordinals ("twenty fifth"),
 /// decimals read aloud ("seven point five"), times ("one fifteen" against "1:15"), currencies ("five
-/// dollars" against "$5"). A run of number words two separate numbers were said in ("one, ninety five" said
+/// dollars" against "$5"), percentages ("fifty percent" against "50%"), contractions ("it's" against "it is").
+/// A run of number words two separate numbers were said in ("one, ninety five" said
 /// without a pause) reads as one number; the other side's digits then decide whether they match.
 public enum EchoTextNormalizer {
 
@@ -79,10 +78,6 @@ public enum EchoTextNormalizer {
                 current.append("'")
             } else if c == "," || c == ".", previous?.isNumber == true, next?.isNumber == true, !current.isEmpty {
                 current.append(c)
-            } else if c == "%" {
-                emit()
-                current = "percent"
-                emit()
             } else {
                 emit()
                 if !c.isWhitespace && c != "-" && c != "\u{2010}" && c != "\u{2011}" { pendingBreak = true }
@@ -103,36 +98,18 @@ public enum EchoTextNormalizer {
         return token.replacingOccurrences(of: ",", with: ".")
     }
 
-    // MARK: - Contractions
+    // MARK: - Apostrophes
 
-    private static let pronounHostsOfIs: Set<String> = [
-        "it", "that", "there", "here", "what", "who", "where", "when", "how", "he", "she",
-    ]
-    private static let pronounHostsOfWould: Set<String> = ["i", "you", "he", "she", "it", "we", "they"]
-    private static let irregularNegatives: [String: [String]] = [
-        "won't": ["will", "not"], "can't": ["can", "not"], "shan't": ["shall", "not"], "cannot": ["can", "not"],
-    ]
-
-    /// One token's words: its contraction expanded, or split at its apostrophes as before #363.
+    /// A token's words: split at its apostrophes, as before #363 ("it's" is "it" "s", "l'homme" "l" "homme").
+    ///
+    /// English contractions are deliberately NOT normalised. Both ways were measured on real transcripts:
+    /// expanding "she's" into "she is" adds common words a long remote line nearly always holds, and short
+    /// lines of the user's then looked "contained" in it (new false flags); joining a contraction and its
+    /// long form into one token ("she_is") also joins "who is" / "who are" and the like, which lowered true
+    /// echo lines under the threshold and made "I'm back" match "you're back". Both channels are read by the
+    /// same recogniser, which writes a contraction the same way on both.
     private static func expanded(_ token: String) -> [String] {
-        if let irregular = irregularNegatives[token] { return irregular }
-        guard let apostrophe = token.lastIndex(of: "'") else { return [token] }
-        let host = String(token[..<apostrophe])
-        let suffix = String(token[token.index(after: apostrophe)...])
-        if !host.contains("'") {
-            if suffix == "t", host.hasSuffix("n"), host.count > 1 { return [String(host.dropLast()), "not"] }
-            switch suffix {
-            case "re": return [host, "are"]
-            case "ve": return [host, "have"]
-            case "ll": return [host, "will"]
-            case "m" where host == "i": return ["i", "am"]
-            case "s" where host == "let": return ["let", "us"]
-            case "s" where pronounHostsOfIs.contains(host): return [host, "is"]
-            case "d" where pronounHostsOfWould.contains(host): return [host, "would"]
-            default: break
-            }
-        }
-        return token.split(separator: "'").map(String.init)
+        token.split(separator: "'").map(String.init)
     }
 
     // MARK: - Numbers

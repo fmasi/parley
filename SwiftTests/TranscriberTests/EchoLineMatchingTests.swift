@@ -231,7 +231,7 @@ struct EchoLineMatchingTests {
     @Test func aFullRepetitionThatStartsLateIsNotFlagged() {
         let late = EchoDeduplicator.maximumEchoDelaySeconds + EchoDeduplicator.echoTimingToleranceSeconds + 0.1
         let result = EchoDeduplicator.deduplicate(
-            segments: [remote(10, 12, "We cannot wait any longer."), local(10 + late, 12.4, "We can not wait any longer.")],
+            segments: [remote(10, 12, "We cannot wait any longer."), local(10 + late, 12.4, "We cannot wait any longer.")],
             localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
         #expect(result.clusters.first?.matchedSegments == 1)
         #expect(result.flaggedCount == 0)
@@ -242,7 +242,7 @@ struct EchoLineMatchingTests {
     @Test func aLineThatStartsBeforeTheRemoteOneIsNotFlagged() {
         let early = EchoDeduplicator.echoTimingToleranceSeconds + 0.1
         let result = EchoDeduplicator.deduplicate(
-            segments: [remote(10, 12, "Let us meet on Friday then."), local(10 - early, 11.8, "Let's meet on Friday then.")],
+            segments: [remote(10, 12, "Let us meet on Friday then."), local(10 - early, 11.8, "Let us meet on Friday then.")],
             localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
         #expect(result.clusters.first?.matchedSegments == 1)
         #expect(result.flaggedCount == 0)
@@ -270,5 +270,19 @@ struct EchoLineMatchingTests {
         let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
         #expect(result.flaggedCount == 5)
         #expect(result.segments.filter { $0.source == "local" }.allSatisfy { $0.echo })
+    }
+
+    /// The two recognisers cut lines differently: an echo line often carries the tail of the remote line
+    /// before the one it matches, and so starts before it and holds more words than it. It is judged against
+    /// the far end's speech around it, which holds those words too.
+    @Test func anEchoLineThatCarriesTheTailOfThePreviousRemoteLineIsFlagged() {
+        let segments = [
+            remote(74, 76.6, "That sounds right to me."),
+            remote(77.56, 83.48, "The second draft goes to the review board on Thursday morning"),
+            remote(83.6, 85, "So anyway."),
+            local(76.78, 83.56, "to me. The second draft goes to the review board on Thursday morning so"),
+        ]
+        let result = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(result.flaggedCount == 1)
     }
 }

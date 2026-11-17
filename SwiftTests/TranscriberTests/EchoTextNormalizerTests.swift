@@ -83,7 +83,7 @@ struct EchoTextNormalizerTests {
         #expect(words("7.500") == ["7500"])
         #expect(words("7.5") == ["7.5"])
         #expect(words("7,5") == ["7.5"])
-        #expect(words("50%") == words("fifty percent"))
+        #expect(words("50%") == ["50"], "a percent sign is punctuation, as before")
     }
 
     @Test func aLongRunOfDigitsReadOneByOneIsKeptWhole() {
@@ -95,26 +95,27 @@ struct EchoTextNormalizerTests {
         #expect(words("nine hundred billion billion billion") == ["nine", "hundred", "billion", "billion", "billion"])
     }
 
-    // MARK: - Case, punctuation, contractions
+    // MARK: - Case, punctuation, apostrophes
 
     @Test func caseAndPunctuationDoNotCount() {
         #expect(words("OK, then!") == ["ok", "then"])
         #expect(words("“Really?” — yes…") == ["really", "yes"])
     }
 
-    @Test func englishContractionsMatchTheirLongForms() {
-        #expect(words("it's fine") == words("it is fine"))
-        #expect(words("don't go") == words("do not go"))
-        #expect(words("Don’t go") == words("do not go"), "a typographic apostrophe")
-        #expect(words("won't") == words("will not"))
-        #expect(words("can't") == words("can not"))
-        #expect(words("cannot") == words("can not"))
-        #expect(words("I'm here") == words("I am here"))
-        #expect(words("we're late") == words("we are late"))
-        #expect(words("they've left") == words("they have left"))
-        #expect(words("you'll see") == words("you will see"))
-        #expect(words("let's start") == words("let us start"))
-        #expect(words("I'd say") == words("I would say"))
+    @Test func everyApostropheSplitsAsBefore() {
+        #expect(words("Don’t go") == words("don't go"), "a typographic apostrophe")
+        #expect(words("don't go") == ["don", "t", "go"])
+        #expect(words("it's fine") == ["it", "s", "fine"])
+    }
+
+    /// Contractions are not expanded nor joined: either way, measured on real transcripts, made short lines
+    /// of the user's match long remote lines ("she's" bringing an "is"), or lowered true echo under the
+    /// threshold. These two lines of the user's must not match the remote line beside them.
+    @Test func contractionsAddNoCommonWords() {
+        #expect(EchoDeduplicator.textContainment("Is he ready now?", "No, he's not ready yet, why?") < 0.7)
+        #expect(EchoDeduplicator.textContainment("So my view is quite simple.",
+                                                 "So in my view, that's a simple question for the board.") < 0.7)
+        #expect(EchoDeduplicator.textContainment("I'm at the office.", "Are you, you're at the office?") < 0.7)
     }
 
     @Test func aPossessiveIsNotAContraction() {
