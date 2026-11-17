@@ -249,6 +249,8 @@ public enum EchoDeduplicator {
     ///
     /// - Parameter embeddingThreshold: DEPRECATED and ignored (`echo_embedding_threshold`). Kept for
     ///   one release so existing callers and config files keep working.
+    /// - Parameter logPrefix: put before each verdict's log line, so a check whose verdicts are not
+    ///   the record (the one before minority absorption, #249) does not read like the record.
     public static func deduplicate(
         segments: [LabeledSegment],
         localSpeakerDatabase: [String: [Float]],
@@ -256,7 +258,8 @@ public enum EchoDeduplicator {
         temporalThreshold: Double? = nil,
         textThreshold: Double? = nil,
         embeddingThreshold: Double? = nil,
-        embeddingDim: Int? = nil
+        embeddingDim: Int? = nil,
+        logPrefix: String = ""
     ) -> DeduplicationResult {
         let tThresh = temporalThreshold ?? defaultTemporalThreshold
         let xThresh = textThreshold ?? defaultTextThreshold
@@ -309,7 +312,7 @@ public enum EchoDeduplicator {
             clusters.append(verdict)
             // Numbers only are public; a label becomes a name once the user renames a speaker.
             Logger.transcription.info(
-                "Echo cluster \(label, privacy: .private): verdict \(verdict.verdict.rawValue, privacy: .public), share \(share, format: .fixed(precision: 3), privacy: .public), matched \(matched.count, privacy: .public)/\(indices.count, privacy: .public) segments, \(matchedSeconds, format: .fixed(precision: 1), privacy: .public)/\(seconds, format: .fixed(precision: 1), privacy: .public) s, \(matchedWords, privacy: .public)/\(words, privacy: .public) words, flagged \(flagged, privacy: .public), remote speakers matched \(remote.count, privacy: .public), embedding similarity \(verdict.bestEmbeddingSimilarity ?? .nan, format: .fixed(precision: 3), privacy: .public) (evidence only)"
+                "\(logPrefix, privacy: .public)Echo cluster \(label, privacy: .private): verdict \(verdict.verdict.rawValue, privacy: .public), share \(share, format: .fixed(precision: 3), privacy: .public), matched \(matched.count, privacy: .public)/\(indices.count, privacy: .public) segments, \(matchedSeconds, format: .fixed(precision: 1), privacy: .public)/\(seconds, format: .fixed(precision: 1), privacy: .public) s, \(matchedWords, privacy: .public)/\(words, privacy: .public) words, flagged \(flagged, privacy: .public), remote speakers matched \(remote.count, privacy: .public), embedding similarity \(verdict.bestEmbeddingSimilarity ?? .nan, format: .fixed(precision: 3), privacy: .public) (evidence only)"
             )
         }
 

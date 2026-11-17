@@ -109,7 +109,8 @@ enum StreamLabeling {
             localSpeakerDatabase: [:],
             remoteSpeakerDatabase: [:],
             temporalThreshold: reference.temporalThreshold,
-            textThreshold: reference.textThreshold
+            textThreshold: reference.textThreshold,
+            logPrefix: "Pre-absorption check (not the record): "
         ).clusters
         let echoLabels = Set(verdicts.filter(\.isEcho).map(\.label))
         // "Unknown" (speech no turn covers) can be judged echo too; it is no cluster to keep.
