@@ -191,18 +191,21 @@ public enum EchoNotice {
         return text
     }
 
-    /// Under a channel's re-detect row, before it is pressed: why the count is one less than the
-    /// rows, and what a re-detect does with an echo voice. nil without one.
+    /// Under a channel's re-detect row, before it is pressed: what the count asks for, and what a
+    /// re-detect does with an echo voice. nil without one.
     ///
-    /// "Checks again", not a promise: a re-detect runs the echo check on what the diarizer returns
-    /// this time, and a diarizer that blends the echo into one cluster leaves nothing to keep apart.
+    /// The count is the people on this side (#265): re-detect leaves the diarizer room for one more
+    /// voice and looks for the echo voice itself, so the hint no longer asks the user to count around
+    /// it. "Looks for", not a promise: a diarizer that blends the echo voice into a person even with
+    /// that room leaves nothing to keep apart, and only the lines that repeat the other side's words
+    /// are marked.
     public static func redetectHint(echoVoices: Int) -> String? {
         guard echoVoices > 0 else { return nil }
         return echoVoices == 1
-            ? "The count is people only, not the echo voice. Re-detect checks for echo again and keeps "
-                + "an echo voice separate; its matched lines stay marked as echo."
-            : "The count is people only, not the echo voices. Re-detect checks for echo again and keeps "
-                + "echo voices separate; their matched lines stay marked as echo."
+            ? "Set the number of people on this side. Re-detect looks for the echo voice on its own and "
+                + "keeps it apart when it finds it; its matched lines stay marked as echo."
+            : "Set the number of people on this side. Re-detect looks for the echo voices on their own and "
+                + "keeps them apart when it finds them; their matched lines stay marked as echo."
     }
 
     /// Under a channel's re-detect row, after it ran: the people found, the echo voices kept out of
