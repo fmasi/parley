@@ -153,7 +153,7 @@ Notes:
 
 **Failure is never a missing local transcript.** If the cancel throws, or the build has no model, the raw mic is used and the chunk gets `echo_cancel_failed` (informational, not content-affecting). Frames the guard restored are counted in `echo_cancel_reverted` (`count` = frames, `track` = `local`).
 
-**Record:** per chunk, a `mic_echo_cancel` entry in `session.json` (`engine`, `model_sha256`, `frames_reverted`, `seconds`, and since #361 `delay_samples`, `erle_db`, `far_end_lift_db`, each absent when unknown); in the transcript, `metadata.mic_echo_cancel` = `{chunks, chunks_failed, chunks_ineffective, seconds, frames_reverted, engine, model_sha256}`, absent when it never ran.
+**Record:** per chunk, a `mic_echo_cancel` entry in `session.json` (`engine`, `model_sha256`, `frames_reverted`, `seconds`, and since #361 `delay_samples`, `erle_db`, `far_end_lift_db`, each absent when unknown); in the transcript, `metadata.mic_echo_cancel` = `{chunks, chunks_failed, chunks_ineffective, seconds, frames_reverted, engine, model_sha256, per_chunk}`, absent when it never ran. `per_chunk` (#365) lists each cancelled chunk's place and measure (`chunk`, `start` on the transcript's timeline, `seconds`, `far_end_lift_db`, `erle_db`), so a re-detect's echo check knows where the mic heard the far end.
 
 **Re-detect:** `TranscriptRediarizer` on the mic channel of a transcript that has `metadata.mic_echo_cancel` cancels each archive's mic side again, with its system side as reference, before diarizing. With the whole-chunk delay estimate this re-cancels a chunk recorded before #361 whose echo was left in; the re-detect records no new `mic_echo_cancel` figures.
 
@@ -284,7 +284,7 @@ In `session.json` the same stamp is persisted under `provenance`, with the per-s
 - `processing_issues` codes `echo_flagged` (`count` = segments) and `echo_cluster` (`count` = local clusters judged echo in that chunk), both informational.
 
 **Mic echo cancellation** (#342, Stage 3a):
-- `metadata.mic_echo_cancel` — `{chunks, chunks_failed, chunks_ineffective, seconds, frames_reverted, engine, model_sha256}`: chunks cancelled, chunks that fell back to the raw mic, chunks cancelled that removed next to nothing (#361, also counted in `chunks`), seconds of mic audio cleaned, frames `NearEndGuard` restored. Absent when `mic_echo_cancel` was off or never ran.
+- `metadata.mic_echo_cancel` — `{chunks, chunks_failed, chunks_ineffective, seconds, frames_reverted, engine, model_sha256, per_chunk}`: chunks cancelled, chunks that fell back to the raw mic, chunks cancelled that removed next to nothing (#361, also counted in `chunks`), seconds of mic audio cleaned, frames `NearEndGuard` restored; `per_chunk` (#365): per cancelled chunk `{chunk, start, seconds, far_end_lift_db, erle_db}` (`start` in seconds on the transcript's timeline; each dB value absent when too little far-end speech was there to measure). Absent when `mic_echo_cancel` was off or never ran; `per_chunk` is absent from transcripts written before #365, which a re-detect then treats as unmeasured.
 - `processing_issues` codes `echo_cancel_failed` (`track` = `local`, `detail` = why), `echo_cancel_ineffective` (`detail` = reduction, lift and delay, #361) and `echo_cancel_reverted` (`count` = frames), all informational: none counts in `processing_issue_count`. The first two make the completion notice say "echo not removed".
 
 **Re-detect** (the rename dialog's per-channel speaker count; Section 4, "Re-detect at a stated speaker count"):
@@ -349,6 +349,8 @@ The decision uses time and text only, and is made in three steps (`EchoDeduplica
 - overlaps it in time by more than 50% of the shorter segment's duration (`echo_temporal_threshold`), and
 - repeats its words: word-level Jaccard similarity above 0.7 (`echo_text_threshold`), or one of the two fallbacks below.
 
+The words are compared after `EchoTextNormalizer` puts both sides in one form (#363): the two channels' recognisers write the same speech differently ("one ninety five" on the mic, "195" on the system side), and word overlap fell to 40–67% on echo lines. See "Word normalisation" below.
+
 A segment already flagged `filtered` or `duplicate` is neither a candidate nor evidence.
 
 **Step 2 — cluster verdict.** The unflagged local segments are grouped by speaker label (one group per diarized local cluster). `share = matched seconds / total seconds`. The cluster is **echo** when `share >= 0.5` and it holds at least 30 s; otherwise it is **kept**.
@@ -357,8 +359,13 @@ A segment already flagged `filtered` or `duplicate` is neither a candidate nor e
 
 - In an echo cluster, every matched segment is flagged `echo`, whatever its length. Its unmatched segments stay unflagged under the cluster's label: there is no per-segment voice evidence to move them anywhere.
 - In a kept cluster, a matched segment is flagged only when it has 3 words or more. This is what keeps "Yes." said on both sides at the same moment from being flagged, and still catches bleed that diarization folded into the user's own cluster.
+- And only when it can be an echo copy (#365). On a headphone call the user repeated, a fraction of a second later, a short phrase the far end had just said ("Not possible to wait." / "No, not possible to wait."); both lines matched and were hidden. A matched segment in a kept cluster is now held back (matched, counted, not flagged) when:
+  - **(a) echo cancellation measured no coupling** where it was said: the chunk's `far_end_lift_db` is below 15 dB (`AcousticCoupling.uncoupledBelowLiftDB`, the canceller's own line for "the mic heard the far end", `EchoReduction.audibleEchoLiftDB`). Measured: about 0–3 dB on headphones, 27–32 dB on loudspeakers. No record (cancellation off or failed), or a lift too little far-end speech was there to measure, is unknown and holds nothing back. Over a whole transcript (re-detect, single-file path) each chunk's measure applies to its own span; a line that touches an uncoupled chunk is held back.
+  - **(b) it is not shaped like an echo copy**, whatever the coupling. Its "context" is the far end's speech around it: every unflagged remote segment within 0.3 s of it (`echoTimingToleranceSeconds`; the two recognisers cut lines differently, and an echo line often carries the tail of the remote line before the one it matched). It is held back when it has more normalised words than the context (a repetition adds "No, …" or "…, thanks"), when it starts more than 0.3 s before the context (an echo never precedes its source), or, when it has as many words as all of the context, when it starts more than 0.5 s + 0.3 s after it (`maximumEchoDelaySeconds`, the canceller's 500 ms bound: a full repetition starts once the far end has said it). A copy with fewer words can start anywhere before the context ends.
 
-The three numbers (0.5, 30 s, 3 words) are constants, not config keys.
+  Neither changes a match, a share or a cluster's verdict, and neither applies in an echo cluster. The log line per verdict counts the lines held back for each reason.
+
+The cluster numbers (0.5, 30 s, 3 words) and the per-line ones (15 dB, 0.3 s, 0.5 s) are constants, not config keys.
 
 **The voice similarity is evidence, not a gate.** Until #242 a third gate required the local cluster's speaker embedding to score above 0.8 against a remote speaker. That gate was all-or-nothing per cluster: on a real speaker-mode call the bleed cluster scored 0.68 (speaker playback into a far-field mic changes a voice), so none of its 146 segments were flagged, although 91% of its duration matched concurrent remote speech; the user's own cluster never exceeded 5% on the same measure. Bleed that minority absorption folds into the user's cluster carries the user's embedding and fails any such gate by construction. The similarity is now computed, written to `metadata.echo_clusters[].embedding_similarity` and logged, and decides nothing. `echo_embedding_threshold` is accepted and ignored.
 
@@ -368,6 +375,19 @@ The three numbers (0.5, 30 s, 3 words) are constants, not config keys.
 - The dedup runs per chunk, before cross-chunk reconciliation: a cluster is judged within its chunk, and there is no second pass at finalize.
 - Minority absorption runs before it, but on the mic stream only after the raw clusters were judged for echo (#249, Stage 6): a bleed cluster under 5% of a chunk is no longer absorbed into the user's cluster, provided it holds the 30 s a cluster needs to be judged. A shorter one is still absorbed; only the per-segment rule (3 words or more) sees it.
 - The text gates and the 3-word rule count whitespace-separated words, so they do little for a language written without spaces.
+- (b) judges a line against all the far end said around it: a user who repeats a phrase while the far end keeps talking passes the length test, and only (a) holds that line back. Without echo cancellation it can still be flagged.
+- Word normalisation handles English numbers only (below).
+
+### Word normalisation (#363)
+
+`EchoTextNormalizer.words` is applied to both sides before every word comparison (Jaccard, containment, the joined window, and the word counts of the per-line rule (b)):
+
+- **Case and punctuation** do not count, as before; accents are kept ("schön" is not "schon").
+- **Digit groups**: "7,500" and "7.500" are 7500 (a separator followed by exactly three digits); any other separator between digits is a decimal point ("7,5" = "7.5").
+- **English number words** become digits. A run of them, unbroken by punctuation other than a hyphen, is one number: with scale words it is evaluated ("seven thousand five hundred" = 7500, "one hundred and five" = 105, "a hundred" = 100); without, it is read in pairs or digit by digit ("one ninety five" = 195, "twenty twenty six" = 2026, "twenty oh five" = 2005, "one two three" = 123). "and", "oh" and "a" count only beside number words.
+- **Apostrophes** of every form split a word, as before ("don’t" and "don't" agree). English contractions are deliberately not normalised further. Both ways were tried on the replay below: expanding them ("she's" → "she is") added common words that made short lines of the user's look "contained" in long remote lines; joining a contraction and its long form into one token (`she_is`) also joined "who is" / "who are" and the like, which pushed true echo lines under the threshold and made a line like "I'm at the office" match "you're at the office". Both channels go through the same recogniser, which writes a contraction the same way on both.
+
+Limits: numbers in English only. The other languages' number words are left as they are, so their comparisons are unchanged; where an English number word is also one of theirs (French "six", Polish or Czech "ten") it maps the same way on both sides. Ordinals, decimals read aloud ("seven point five"), times ("one fifteen" against "1:15"), currencies ("five dollars" against "$5"), percentages ("fifty percent" against "50%") and contractions ("it's" against "it is") are not handled. Two numbers said without a pause ("one, ninety five" without the comma) read as one; the other side's digits then decide whether they match.
 
 ### Re-detect at a stated speaker count
 
@@ -377,7 +397,7 @@ A stated count is about people. With the far side on loudspeakers the diarizer f
 
 0. The mic channel is diarized for **one voice more than the people stated**. Asked for the people alone, the diarizer blends the echo voice into one of them (measured on a real recording: at 1, 186 of the other side's words stayed under the user's name; at 2, none), and nothing is left for the check to keep apart. Steps 1–2 run on that wider pass. When the check finds an echo voice there — a cluster of the diarizer's own judged echo; unattributed speech judged echo as a group does not count — that pass is the one used. When it finds none, the channel is diarized again at the stated count and steps 1–2 run on that pass, exactly as before #265: a clean channel pays a second diarizer pass, never a different result. The wider pass's extra cluster is then a fragment of somebody, and merging it by resemblance is not what the clusterer does at the stated count. If the wider pass fails (anything but a cancel), the stated count's pass runs as if it had found nothing. The remote channel is diarized once, at the stated count. The two mic passes share the "Detecting speakers" progress (the first fills it to half, the second to the end; when the wider pass is kept, the phase ends full).
 1. The channel's segments are labelled with the diarizer's RAW clusters. With no word timings at re-detect this is one segment in, one out.
-2. `EchoDeduplicator.deduplicate` judges those clusters against the other channel's unflagged segments — the same rule as at transcription (above), with the configured `echo_temporal_threshold` / `echo_text_threshold` (the rename dialog passes them).
+2. `EchoDeduplicator.deduplicate` judges those clusters against the other channel's unflagged segments — the same rule as at transcription (above), with the configured `echo_temporal_threshold` / `echo_text_threshold` (the rename dialog passes them), and with the per-line safeguards fed the chunks' echo-cancellation measures from `metadata.mic_echo_cancel.per_chunk` (#365; unmeasured for a transcript written before it).
 3. `SpeakerCountEnforcer.enforce(_:to:keeping:)` enforces the count on the other clusters. A cluster judged echo is never merged away, never merged into and not counted.
 4. The segments are labelled with the result:
    - a line of an echo cluster carries that cluster's own label; its matched lines are flagged `echo`, its unmatched lines are not. Nothing of it is given to the stated speaker, and at a count of 1 unattributed speech is never folded into it;
@@ -453,7 +473,9 @@ When `dualStream = true`, the summary prompt receives source labels ("Local" / "
 
 ### Validation
 
-The echo benchmark in `docs/benchmarks/` (2026-04-06) measured the earlier algorithm, before the cluster verdict (#242). It has not been re-run on the rule described here, so its numbers do not describe the current behaviour.
+The echo benchmark in `docs/benchmarks/` (2026-04-06) measured the earlier algorithm, before the cluster verdict (#242). It cannot be re-run: the `--legacy-dedup` flag it used is gone, its recordings' audio has since been removed by the storage limit, and their transcripts were written when echo lines were deleted, not flagged. Its numbers do not describe the current behaviour.
+
+#363 and #365 were measured instead by replaying the deduplicator over the owner's finished dual-stream transcripts (110 of them, local only; nothing of them is in the repository), once over each whole transcript as re-detect runs it, before and after the change; see `docs/benchmarks/2026-11-17-echo-line-matching.md`.
 
 ---
 

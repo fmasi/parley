@@ -49,6 +49,16 @@ The cluster rule has three constants. They are **not** config keys (`EchoDedupli
 | `clusterMinimumSeconds` | `30` | A cluster with less speech than this is not judged as a cluster. |
 | `minimumWordsOutsideEchoCluster` | `3` | Outside an echo cluster, a matched segment is flagged only when it has this many words or more (whitespace-separated words holding a letter or digit). In an echo cluster every matched segment is flagged, whatever its length. |
 
+Outside an echo cluster a matched segment is also flagged only when it can be an echo copy (#365). Constants, **not** config keys (`EchoDeduplicator`):
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `AcousticCoupling.uncoupledBelowLiftDB` | `15` dB | Where echo cancellation measured the far end less than this above the mic's floor (`far_end_lift_db`), the mic did not hear it, and a matching line there is not flagged. The same value as `EchoReduction.audibleEchoLiftDB` (#361). Measured: about 0–3 dB on headphones, 27–32 dB on loudspeakers. No measure (cancellation off, failed, or too little far-end speech) holds nothing back. |
+| `echoTimingToleranceSeconds` | `0.3` s | How far apart the two channels' recognisers may place the same sound. A line is judged against the remote speech within this of it; it is not flagged when it starts more than this before that speech (an echo never precedes its source). |
+| `maximumEchoDelaySeconds` | `0.5` s | The longest loudspeaker-to-mic delay (`LocalVQEEchoCanceller.maxDelaySamples`). A line with as many words as all the remote speech around it is not flagged when it starts later than this plus the tolerance after that speech: a full repetition starts once the far end has said it. A line with more words than that speech is never flagged (a repetition adds words). |
+
+Words are compared after `EchoTextNormalizer` (#363): case, punctuation, digit groups and English number words to digits. Not configurable; see docs/pipeline.md, "Word normalisation".
+
 ---
 
 ## Audio Archive

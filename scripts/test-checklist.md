@@ -1622,3 +1622,35 @@ start", "naming panel") are in the clear.
       the share or the recording in those 20 s (`sharingType = .none`, unverified on macOS 15+)? Record
       which apps show it. After it fades, nothing of it may appear. If any app shows it, Hide is the
       workaround to note in the PR.
+
+## Echo lines: numbers and repetitions (#363 / #365) — added 2026-11-17
+
+Synthetic speech only: a public podcast or video, or `say` played through the speakers, and your own
+voice; never a real third party. `echo_meta` is the helper of "Echo cluster detection (#242)" above.
+
+- [ ] **EL-01 Numbers written two ways are still echo.** `cfg mic_echo_cancel off`, output = the laptop
+      speakers. Play a clip that says numbers (e.g. `say "The price is one ninety five per seat. In twenty
+      twenty six we had one eighty three. We budgeted seven thousand five hundred."` into the call app's
+      far end, or a podcast with prices and years) for 2 minutes while you stay silent. Stop.
+  - PASS: wherever the mic side has a line with the numbers spelled out and the remote side has digits
+    at the same moment, the mic line carries `echo: true` in the JSON and is not in the TXT.
+- [ ] **EL-02 A different number is not echo.** Same setup; over a remote "one ninety five", say a
+      sentence of your own that ends in another number ("it was one eighty five"). PASS: your line is in
+      the TXT under your label.
+- [ ] **EL-03 Headphones: a phrase you repeat stays yours.** `cfg mic_echo_cancel on`, output = headphones
+      or AirPods. In a test call, have the far end say short phrases ("Not possible to wait.", "OK then.")
+      and repeat each right after, once word for word and once with a word added ("No, not possible to
+      wait.", "OK then, thanks."). 3 minutes. Stop.
+  - PASS: every repetition is in the TXT under your label; no `echo: true` in the JSON. In
+    `metadata.mic_echo_cancel.per_chunk`, each chunk has `start`, `seconds` and a `far_end_lift_db`
+    under 15 (write it down). `stream.log` shows `held back: N no coupling` on the chunk's `Echo cluster`
+    line for the word-for-word repetitions.
+- [ ] **EL-04 Loudspeakers: the echo copy is still flagged.** As EL-03 but output = the laptop speakers
+      and you stay silent. PASS: the far end's lines that came back through the mic carry `echo: true`;
+      `per_chunk`'s `far_end_lift_db` is 15 or more (write it down).
+- [ ] **EL-05 Re-detect keeps the rules.** On the EL-03 recording, open Rename Speakers… and re-detect "This
+      side" at 1. PASS: the repetitions are still in the TXT under your name; `echo_segments_flagged` is
+      absent or unchanged.
+- [ ] **EL-06 Another language is untouched.** With a French or German podcast through the speakers (mic
+      echo cancel off), 2 minutes: the echo lines are flagged as before (compare with E-01's numbers), and a
+      line of your own in that language over it is not.
