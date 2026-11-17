@@ -74,6 +74,9 @@ struct RenameDialog: View {
     /// `RenameWindowController` (one read, off the main thread) and again after a re-detect, which
     /// rewrites it. The copy and the people count are `EchoNotice`'s; nothing is worked out here.
     @State private var echo: EchoNotice.Findings
+    /// Whether the recording's audio is still on disk (#29): an old recording's may have been removed by the storage
+    /// limit. Re-detect needs all of it; Play shows only where a sample's file is there. Renaming never needs it.
+    let audio: RecordingAudioAvailability
 
     /// The transcript this dialog edits. State, not a constant: a Save that renamed the session but could not write
     /// the speaker names leaves the dialog open on the transcript's new path (#357).
@@ -88,7 +91,10 @@ struct RenameDialog: View {
     /// The speaker names, and the session name when it is a recording's (nil otherwise), for the transcript at the
     /// given path. The controller renames the session's files (`SessionRenamer`) before writing the names.
     let onSave: @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome
-    let onCancel: () -> Void
+    /// The dialog was cancelled; true when a re-detect rewrote the transcript meanwhile (its text files are then stale).
+    let onCancel: (_ transcriptRewritten: Bool) -> Void
+    /// A re-detect rewrote the transcript since the dialog opened.
+    @State private var transcriptRewritten = false
     /// The names a close would lose, each time they change (#359): the window asks before a close
     /// throws them away.
     let onUnsavedNamesChange: ([String]) -> Void
@@ -100,8 +106,9 @@ struct RenameDialog: View {
         speakers: [SpeakerEntry],
         initialChannelNames: [String: [String: String]] = [:],
         initialEcho: EchoNotice.Findings = .none,
+        audio: RecordingAudioAvailability = .available,
         onSave: @escaping @MainActor ([String: String], String?, URL) async -> RenameSaveOutcome,
-        onCancel: @escaping () -> Void = {},
+        onCancel: @escaping (_ transcriptRewritten: Bool) -> Void = { _ in },
         onUnsavedNamesChange: @escaping ([String]) -> Void = { _ in }
     ) {
         self._jsonPath = State(initialValue: jsonPath)
@@ -111,6 +118,7 @@ struct RenameDialog: View {
         self._speakers = State(initialValue: speakers)
         self._cachedChannelNames = State(initialValue: initialChannelNames)
         self._echo = State(initialValue: initialEcho)
+        self.audio = audio
         self.onSave = onSave
         self.onCancel = onCancel
         self.onUnsavedNamesChange = onUnsavedNamesChange
@@ -202,7 +210,9 @@ struct RenameDialog: View {
                         } else {
                             Button("Re-detect") { confirmThenRediarize(channel: channel, count: count) }
                                 .font(.caption)
-                                .disabled(rediarizing != nil || staleRowsChannel != nil)
+                                // Not without the recording's audio (#29): the notice above says why.
+                                .disabled(rediarizing != nil || staleRowsChannel != nil || !audio.allowsRedetect(on: channel))
+                                .help(audio.redetectHelp(on: channel) ?? "")
                         }
                     }
                     if let absorbed = absorbedClusters[channel], absorbed > 0 {
@@ -382,6 +392,8 @@ struct RenameDialog: View {
                     }
                 )
                 await MainActor.run {
+                    // The transcript is rewritten from here on: a Cancel must bring its text files along (#29 review).
+                    transcriptRewritten = true
                     rediarizePhase = .rebuildingList
                     rediarizeFraction = nil
                 }
@@ -543,6 +555,14 @@ struct RenameDialog: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                // An old recording whose audio is gone (#29): why Play or Re-detect is missing, said once.
+                if let notice = audio.notice {
+                    Label(notice, systemImage: "waveform.slash")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
+                }
             }
 
             sessionNameSection
@@ -559,7 +579,7 @@ struct RenameDialog: View {
                     // Escape lands here too (`.cancelAction`). Kept names not yet saved are asked about (#359).
                     guard Self.confirmDiscard(names: unsavedNames) else { return }
                     rediarizeTask?.cancel()
-                    onCancel()
+                    onCancel(transcriptRewritten)
                 }
                     .keyboardShortcut(.cancelAction)
                     // Not while a Save renames the session's files (#357): the panel closes when it is done.

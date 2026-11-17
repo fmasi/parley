@@ -2941,7 +2941,8 @@ public final class RecordingCoordinator {
 
     /// A session's key, as `RecordingSentinel.sessionKey` spells it: its folder and its id.
     nonisolated static func sessionKey(of location: (outputDir: URL, sessionId: String)) -> String {
-        location.outputDir.appendingPathComponent(location.sessionId).path
+        // `isDirectory: false`: never a look on disk (#29 review) — the same path either way.
+        location.outputDir.appendingPathComponent(location.sessionId, isDirectory: false).path
     }
 
     /// The stopping mark did not answer (L review 236): the Stop is kept apart — in a file of its own written on a queue of

@@ -1359,6 +1359,50 @@ speakers, not headphones) so the mic hears the far side.
 - [ ] CLI: `Parley download-models` still downloads into an empty test home; `Parley transcribe <file>` with a model missing fails with "not downloaded", never fetches it.
 - [ ] While a recording is being transcribed, switch Settings → Transcription to an engine whose model is missing (or hide `speaker-diarization` aside) and Save: no download starts; the row reads "…when you save, once the recording is stopped and transcribed". Save again once idle: it downloads.
 
+## Open any past recording in the rename dialog (#29) — added 2026-11-16
+
+Synthetic recordings only (a podcast or `say` through the speakers), at least three across two days
+(rename a day folder's date by hand if needed, e.g. `2026-11-15`).
+
+- [ ] **OP-01 The list.** Menu → Rename Speakers…: a "Rename Speakers" panel lists the recordings,
+      newest first (today's on top, latest selected), each with its name ("Unnamed recording" for
+      one without) and "Today at 09:30"-style time. No summary, `.diag`, `session.json`, `.json.bak`
+      or `.diag.coverage.json` row, even with a recording unfinished in the folder.
+- [ ] **OP-02 Open an old one.** Double-click a recording from an earlier day: the rename dialog
+      opens on it. Play a sample, rename a speaker, Save: the JSON of THAT recording has the name;
+      no summary is regenerated for it, and the newest recording's transcript is untouched.
+- [ ] **OP-03 Re-detect and rename it.** Reopen it, Re-detect "Other side" at another count (the
+      names typed before follow their voices, #359), then type a new recording name and Save: its
+      files carry the new name (S-02), and Menu → Rename Speakers… lists it under that name.
+- [ ] **OP-04 The latest is unchanged.** After OP-02/03, record 30 s and Stop: the dialog opens on
+      the NEW recording and its auto-summary runs as before. Menu → Rename Speakers… has it on top.
+- [ ] **OP-05 Audio removed.** On a copy of a recording, move its `.m4a` files out of the folder and add
+      `"audio_removed": {"files": ["<the .m4a names>"], "reason": "storage_limit"}` to its metadata.
+      Open it: one grey line says the storage limit removed its audio; no play buttons; Re-detect is
+      greyed out (hover says why); renaming speakers and the recording still Saves. Without the
+      mark, the line says the audio isn't where the transcript says. Put the files back.
+- [ ] **OP-06 Still in flight.** Stop a recording with a slow summary endpoint configured, close the
+      dialog (the auto-summary starts), open the same recording from the picker: an alert "This
+      recording can't be opened yet"; once the summary is written it opens.
+- [ ] **OP-07 Choose File….** In the picker, Choose File… opens at the recordings folder, `.json` only;
+      a transcript chosen there opens in the dialog.
+- [ ] **OP-08 A folder that does not answer.** Point Settings → recordings folder at an SMB share,
+      then unplug the network: Rename Speakers… shows the panel at once, "Reading the recordings
+      folder…", then within ~10 s "The recordings folder didn't answer"; the menu never freezes; Choose
+      File… still works. A folder that does not exist: "Parley couldn't open the recordings folder".
+- [ ] **OP-09 Empty.** A recordings folder with no recordings: "No recordings in the recordings folder
+      yet."; Choose File… still works. With a day folder made unreadable (`chmod 000` on a copy's day
+      folder): the picker says "Parley couldn't read 1 day folder…", never "No recordings yet".
+- [ ] **OP-10 Left open while recording.** Open the picker, leave it, start a recording from the menu:
+      Open greys out with "Parley is recording or finishing a recording…"; double-click does nothing.
+      Stop: while it transcribes, still greyed; once idle, Open works.
+- [ ] **OP-11 A pick while the dialog is up.** With a rename dialog open on recording A, pick A again:
+      the open dialog comes to the front, no second one. Pick B: an alert says it opens once the open
+      window is closed; close A and B's dialog opens. If B's auto-summary started meanwhile, B is
+      refused then ("still being finished").
+- [ ] **OP-12 Cancel leaves the text files alone.** Note the `.txt`/`.srt` modification time of an old
+      recording, open it, Cancel: unchanged. Open it, Re-detect, Cancel: they are rewritten.
+
 ## Rename the recording from the rename dialog (#357), and the Unknown row (#360) — added 2026-11-11
 
 Synthetic recordings only (a podcast or `say` through the speakers): the names below are examples, use
@@ -1375,8 +1419,9 @@ your own lowercase test names. `ls -la` the day folder before and after each ste
       ``*Source transcript: `HHMMSS-rename test.json`*``. In the JSON, `metadata.audio_files` and
       `audio_paths` name the new files; the marker's `session_id` / `transcript` name the new id.
       The speaker name is applied.
-- [ ] **S-03 It still plays and re-detects.** Menu → Rename Speakers… opens the renamed transcript
-      directly (no file picker); its play buttons play; Re-detect on either side works.
+- [ ] **S-03 It still plays and re-detects.** Menu → Rename Speakers… lists the renamed recording
+      first, selected, under its new name (#29); Return opens it; its play buttons play; Re-detect
+      on either side works.
 - [ ] **S-04 Rename again, and back.** Rename it to `other test`, then to an empty name: the files
       end as `HHMMSS.json` etc., the summary's source line follows each time.
 - [ ] **S-05 Case only.** Rename `rename test` to `Rename Test`: the files change case, nothing else
@@ -1388,11 +1433,11 @@ your own lowercase test names. `ls -la` the day folder before and after each ste
       name and Save at once: either it renames, or the alert says the recording is still being
       finished and the dialog stays open; Save a few seconds later renames it.
 - [ ] **S-08 While its summary runs.** With a slow summary endpoint configured, Save the dialog
-      (the auto-summary starts), reopen Rename Speakers… for the same transcript and change the
-      name: the alert says the recording is still being finished; once the summary is written it
-      renames, summary included.
+      (the auto-summary starts), reopen Rename Speakers… and open the same recording: the picker
+      refuses ("This recording can't be opened yet … still being finished", #29); once the summary
+      is written it opens and renames, summary included.
 - [ ] **S-09 A transcript that is not a recording's** (`Parley transcribe some.wav` → `some.json`,
-      opened with the file picker): no "Recording name" section.
+      opened with Choose File… in the picker): no "Recording name" section.
 - [ ] **S-10 rename-gui.** `Parley rename-gui <transcript>`: no "Recording name" section (the CLI
       cannot know whether the app is still summarizing it).
 - [ ] **S-11 Quit during a rename.** On a slow folder (a share), Save a new name and Quit at once:

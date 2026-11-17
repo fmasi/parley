@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import SettingsAccess
 import TranscriberCore
-import UniformTypeIdentifiers
 import UserNotifications
 import Sparkle
 import os
@@ -164,16 +163,16 @@ struct MenuView: View {
                     // only by a transcription in THIS app session — so after any quit or crash the
                     // item was permanently greyed out and a recording could never be renamed again.
                     // Speaker labels are the thing users most need to correct; there must always be
-                    // a way in. With no recent transcript we ask which one.
+                    // a way in. Any recording, not only the latest (#29): the picker lists the recent
+                    // ones, newest first and selected, and offers Choose File… for the rest.
                     isDisabled: !appState.isIdle
                 ) {
                     dismissPanel()
-                    if let jsonPath = appState.lastJsonPath,
-                       FileManager.default.fileExists(atPath: jsonPath) {
-                        RenameWindowController.shared.enqueue(jsonPath: URL(fileURLWithPath: jsonPath))
-                    } else if let picked = pickTranscript() {
-                        RenameWindowController.shared.enqueue(jsonPath: picked)
-                    }
+                    RecordingPickerWindowController.shared.show(
+                        root: URL(fileURLWithPath: configManager.config.recordingDirectory, isDirectory: true),
+                        latest: appState.lastJsonPath.map { URL(fileURLWithPath: $0, isDirectory: false) },
+                        appState: appState
+                    ) { RenameWindowController.shared.openPastRecording($0) }
                 }
 
                 SettingsLink {
@@ -453,20 +452,6 @@ struct MenuView: View {
         credits.append(link("GitHub", "https://github.com/fmasi/parley"))
         credits.append(text("\n\n© 2026 Frédéric Masi · AGPL-3.0", size: 10, color: .tertiaryLabelColor))
         return credits
-    }
-
-    /// Ask which transcript to rename. Used when this app session hasn't produced one (a relaunch,
-    /// or renaming an older recording) — otherwise a recording could never be renamed after a quit.
-    private func pickTranscript() -> URL? {
-        let panel = NSOpenPanel()
-        panel.title = "Choose a transcript"
-        panel.message = "Select the transcript (.json) whose speakers you want to rename."
-        panel.allowedContentTypes = [.json]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.directoryURL = URL(fileURLWithPath: configManager.config.recordingDirectory)
-        NSApp.activate()  // macOS 14+ replacement for the deprecated ignoringOtherApps: form
-        return panel.runModal() == .OK ? panel.url : nil
     }
 
     /// Quit while recording: stop it first, or stay.

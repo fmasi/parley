@@ -415,9 +415,12 @@ extension RecordingCoordinator {
     /// - its auto-summary is running (`TranscriptsInUse`).
     /// Session state in its folder is checked by `SessionRenamer.rename` itself, under the transcript's lock.
     public func isSessionInFlight(transcript: URL, inUse: TranscriptsInUse = .shared) -> Bool {
+        // Lexical, every path (#29 review): a URL made without `isDirectory` looks on disk whether it is a directory, and
+        // this runs on the main actor — a recording on a share that hangs would freeze the menu.
+        func lexical(_ path: String) -> String { URL(fileURLWithPath: path, isDirectory: false).standardized.path }
         let id = transcript.deletingPathExtension().lastPathComponent
-        let key = URL(fileURLWithPath: Self.sessionKey(of: (transcript.deletingLastPathComponent(), id))).standardizedFileURL.path
-        func same(_ other: String?) -> Bool { other.map { URL(fileURLWithPath: $0).standardizedFileURL.path == key } ?? false }
+        let key = lexical(Self.sessionKey(of: (transcript.deletingLastPathComponent(), id)))
+        func same(_ other: String?) -> Bool { other.map { lexical($0) == key } ?? false }
         switch appState.phase {
         case .idle: break
         case .transcribing: return true
