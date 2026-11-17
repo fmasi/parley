@@ -165,6 +165,54 @@ struct DiarizationCleanupTests {
             DiarizationResult(segments: segs, speakerDatabase: ["S1": [1, 0], "S2": [0, 1]]))
         #expect(durations(cleaned).count == 1)
     }
+
+    // MARK: - Clusters the echo check judged to be the other side (#249)
+
+    @Test("a kept cluster under the share is not absorbed; the others still are")
+    func aKeptClusterIsNeverAbsorbed() {
+        // 800 s of the user, a 40 s echo cluster (4.8%) and a 20 s fragment (2.4%).
+        let (cleaned, absorbed) = DiarizationCleanup.absorbMinorityClustersCounting(
+            result([("S1", 800), ("S2", 40), ("S3", 20)]), keeping: ["S2"])
+        #expect(durations(cleaned) == ["S1": 820, "S2": 40])
+        #expect(cleaned.speakerDatabase.keys.sorted() == ["S1", "S2"])
+        #expect(absorbed == 1)
+    }
+
+    @Test("nothing is absorbed into a kept cluster, even when it is the dominant one")
+    func nothingIsAbsorbedIntoAKeptCluster() {
+        // The user mostly listened: the echo cluster holds 89% of the channel. The user's own
+        // fragment must not vanish into it.
+        let (cleaned, absorbed) = DiarizationCleanup.absorbMinorityClustersCounting(
+            result([("S1", 500), ("S2", 50), ("S3", 10)]), keeping: ["S1"])
+        #expect(durations(cleaned) == ["S1": 500, "S2": 50, "S3": 10])
+        #expect(absorbed == 0)
+    }
+
+    @Test("a kept cluster still counts in the total: absorption takes no cluster it leaves alone without one")
+    func aKeptClusterStaysInTheTotal() {
+        // 300 s of the user, 300 s of echo, a 15 s fragment. Nobody holds half of the channel, so
+        // nothing is absorbed, as without the echo check. Leaving the echo out of the total would
+        // make the user dominant and absorb the fragment into them.
+        let (cleaned, absorbed) = DiarizationCleanup.absorbMinorityClustersCounting(
+            result([("S1", 300), ("S2", 300), ("S3", 15)]), keeping: ["S2"])
+        #expect(durations(cleaned).count == 3)
+        #expect(absorbed == 0)
+    }
+
+    @Test("an ID that names no cluster changes nothing")
+    func anUnknownKeptIDChangesNothing() {
+        let plain = DiarizationCleanup.absorbMinorityClustersCounting(result([("S1", 766), ("S2", 28)]))
+        let kept = DiarizationCleanup.absorbMinorityClustersCounting(result([("S1", 766), ("S2", 28)]), keeping: ["S9"])
+        #expect(durations(kept.0) == durations(plain.0))
+        #expect(kept.absorbed == plain.absorbed && plain.absorbed == 1)
+    }
+
+    @Test("the clusters absorption would take, before anything is absorbed")
+    func theMinorityClustersAreNamedBeforehand() {
+        #expect(DiarizationCleanup.minorityClusters(result([("S1", 800), ("S2", 40), ("S3", 20)])) == ["S2", "S3"])
+        #expect(DiarizationCleanup.minorityClusters(result([("S1", 312), ("S2", 211)])).isEmpty)
+        #expect(DiarizationCleanup.minorityClusters(result([("S1", 766), ("S2", 28)]), minShare: nil).isEmpty)
+    }
 }
 
 /// The absorption threshold is a tuning knob with real failure modes in both directions, so it is

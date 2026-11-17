@@ -61,36 +61,69 @@ public enum DiarizationCleanup {
     /// `absorbMinorityClusters`, also returning how many clusters were absorbed — so the record can
     /// say a quiet voice was merged into the main speaker (`clusters_absorbed`, P7) rather than the
     /// merge being invisible.
+    ///
+    /// - Parameter keeping: clusters (the diarizer's own IDs) the echo check judged to be the other
+    ///   side's voice through the loudspeakers (#249). A kept cluster is never absorbed and nothing is
+    ///   absorbed into it: when it holds the most speech no person on this channel is dominant, and
+    ///   nothing is absorbed at all. It still counts in the total, as the sound on this channel it is,
+    ///   so a kept cluster never makes absorption take a cluster it would leave alone without one. An
+    ///   ID that names no cluster is ignored.
     public static func absorbMinorityClustersCounting(
         _ result: DiarizationResult,
-        minShare: Double? = defaultMinShare
+        minShare: Double? = defaultMinShare,
+        keeping: Set<String> = []
     ) -> (DiarizationResult, absorbed: Int) {
-        guard let minShare, !result.segments.isEmpty else { return (result, 0) }
-
-        var speech: [String: Double] = [:]
-        for s in result.segments { speech[s.speaker, default: 0] += s.end - s.start }
-        guard speech.count > 1 else { return (result, 0) }
-
-        let total = speech.values.reduce(0, +)
-        guard total > 0 else { return (result, 0) }
-
-        guard let dominant = speech.max(by: { $0.value < $1.value }),
-              dominant.value / total >= dominanceShare
-        else { return (result, 0) }
-
-        let absorbed = Set(speech.filter { $0.key != dominant.key && $0.value / total < minShare }.keys)
-        guard !absorbed.isEmpty else { return (result, 0) }
+        guard let plan = plan(result, minShare: minShare, keeping: keeping) else { return (result, 0) }
+        let absorbed = plan.absorbed
 
         Logger.transcription.info(
-            "DiarizationCleanup: absorbed \(absorbed.count, privacy: .public) minority cluster(s) into the dominant speaker (each under \(Int(minShare * 100), privacy: .public)% of \(String(format: "%.1f", total), privacy: .public)s of speech)"
+            "DiarizationCleanup: absorbed \(absorbed.count, privacy: .public) minority cluster(s) into the dominant speaker (each under \(Int((minShare ?? 0) * 100), privacy: .public)% of \(String(format: "%.1f", plan.total), privacy: .public)s of speech), \(keeping.intersection(plan.clusters).count, privacy: .public) cluster(s) judged echo left as they are"
         )
 
         let segments = result.segments.map { seg in
             absorbed.contains(seg.speaker)
-                ? DiarizedSegment(start: seg.start, end: seg.end, speaker: dominant.key, qualityScore: seg.qualityScore)
+                ? DiarizedSegment(start: seg.start, end: seg.end, speaker: plan.dominant, qualityScore: seg.qualityScore)
                 : seg
         }
         let database = result.speakerDatabase.filter { !absorbed.contains($0.key) }
         return (DiarizationResult(segments: segments, speakerDatabase: database), absorbed.count)
+    }
+
+    /// The clusters `absorbMinorityClustersCounting` would absorb, absorbing nothing: empty when it
+    /// would leave the result as it is. With no clusters kept, the only clusters a kept one could
+    /// change the fate of (#249) — so the echo check before absorption only runs when this is not empty.
+    public static func minorityClusters(
+        _ result: DiarizationResult,
+        minShare: Double? = defaultMinShare,
+        keeping: Set<String> = []
+    ) -> Set<String> {
+        plan(result, minShare: minShare, keeping: keeping)?.absorbed ?? []
+    }
+
+    /// What absorption would do: the dominant cluster, the clusters absorbed into it, the stream's
+    /// total speech and every cluster in it. nil when nothing would be absorbed.
+    private static func plan(
+        _ result: DiarizationResult, minShare: Double?, keeping: Set<String>
+    ) -> (dominant: String, absorbed: Set<String>, total: Double, clusters: Set<String>)? {
+        guard let minShare, !result.segments.isEmpty else { return nil }
+
+        var speech: [String: Double] = [:]
+        for s in result.segments { speech[s.speaker, default: 0] += s.end - s.start }
+        guard speech.count > 1 else { return nil }
+
+        let total = speech.values.reduce(0, +)
+        guard total > 0 else { return nil }
+
+        // The dominant cluster is a PERSON: a kept cluster is never a target. When a kept cluster
+        // holds the most speech, no other can hold half of it, and nothing is absorbed.
+        guard let dominant = speech.filter({ !keeping.contains($0.key) }).max(by: { $0.value < $1.value }),
+              dominant.value / total >= dominanceShare
+        else { return nil }
+
+        let absorbed = Set(speech.filter {
+            $0.key != dominant.key && !keeping.contains($0.key) && $0.value / total < minShare
+        }.keys)
+        guard !absorbed.isEmpty else { return nil }
+        return (dominant.key, absorbed, total, Set(speech.keys))
     }
 }
