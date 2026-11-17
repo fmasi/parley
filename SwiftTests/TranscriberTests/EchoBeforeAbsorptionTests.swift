@@ -166,6 +166,25 @@ struct EchoBeforeAbsorptionLabelingTests {
         #expect(result.speakerDatabase.count == 3)
     }
 
+    /// The check reads the configured thresholds (`echo_text_threshold`). Here the mic hears 5 of each
+    /// far line's 8 words (containment 0.625): no match at the default 0.7, so the small cluster is a
+    /// fragment and absorbed; at 0.5 it matches, is echo, and is kept apart.
+    @Test("a configured text threshold decides the verdict before absorption", arguments: [nil, 0.5] as [Double?])
+    func theConfiguredTextThresholdApplies(textThreshold: Double?) {
+        let heard = BleedFixture.bleed.map { line in
+            BleedFixture.Line(start: line.start, end: line.end,
+                              text: (line.text.split(separator: " ").prefix(5) + ["heardx0", "heardx1", "heardx2"]).joined(separator: " "))
+        }
+        let segments = (BleedFixture.own + heard).sorted { $0.start < $1.start }.map(BleedFixture.segment)
+        let diarization = DiarizationResult(
+            segments: (BleedFixture.turns(BleedFixture.own, "S1") + BleedFixture.turns(heard, "S2")).sorted { $0.start < $1.start },
+            speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]])
+        let reference = StreamLabeling.EchoReference(segments: BleedFixture.remoteLines, temporalThreshold: nil, textThreshold: textThreshold)
+        let result = label(diarization, segments: segments, reference: reference)
+        #expect(result.absorbed == (textThreshold == nil ? 1 : 0))
+        #expect(speakers(heard, in: result.labeled) == (textThreshold == nil ? ["Speaker 1"] : ["Speaker 2"]))
+    }
+
     @Test("a stated speaker count still turns absorption off, echo check or not")
     func aStatedCountStillDisablesAbsorption() {
         let result = StreamLabeling.withDiarization(
@@ -211,7 +230,7 @@ struct EchoBeforeAbsorptionPipelineTests {
     }
 
     /// What the chunk must hold whichever way the mic was read.
-    private func expectTheBleedJudgedAsACluster(_ chunk: ProcessedChunk) throws {
+    private func expectTheBleedJudgedAsACluster(_ chunk: ProcessedChunk, extraLocal: Int = 0) throws {
         // The user's lines: under the user's label, none hidden.
         #expect(Set(local(BleedFixture.own, in: chunk).map(\.speaker)) == ["Local Speaker 1"])
         #expect(!local(BleedFixture.own, in: chunk).contains { $0.echo })
@@ -226,7 +245,7 @@ struct EchoBeforeAbsorptionPipelineTests {
         #expect(!chunk.issues.contains { $0.code == .clustersAbsorbed && $0.track == "local" })
         #expect(chunk.localSpeakerDatabase.keys.sorted() == ["Speaker 1", "Speaker 2"])
         // Flagged, never deleted.
-        #expect(chunk.segments.count == BleedFixture.micSegments.count + BleedFixture.systemSegments.count)
+        #expect(chunk.segments.count == BleedFixture.micSegments.count + BleedFixture.systemSegments.count + extraLocal)
     }
 
     @Test("a chunk: the small bleed cluster keeps its verdict, its lines are flagged and none is the user's")
@@ -248,6 +267,37 @@ struct EchoBeforeAbsorptionPipelineTests {
         #expect(diarizer.asked.last?.hasPrefix("parley-mic-aec-0-") == true, "the mic diarized was the cleaned copy: \(diarizer.asked)")
         #expect(chunk.audioPath == "meeting-0.m4a")
         #expect(chunk.micEchoCancel != nil)
+    }
+
+    /// Documented consequence (docs/pipeline.md, Stage 6): with the echo cluster kept, the mic has two
+    /// clusters, so the fold of `Unknown` lines into a channel's single speaker does not run. A line no
+    /// turn covers stays `Local Unknown` rather than going to the user — it may be the other side.
+    @Test("a line no turn covers, beside a spared echo cluster, stays Local Unknown")
+    func anUnknownLineBesideASparedEchoClusterIsNotFolded() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let stray = BleedFixture.Line(start: 1630, end: 1632, text: BleedFixture.words("stray", 4))
+        struct StrayEngine: TranscriptionEngine {
+            let name = "BleedAndStray"
+            let stray: BleedFixture.Line
+            func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+                audioSource == .microphone ? BleedFixture.micSegments + [BleedFixture.segment(stray)] : BleedFixture.systemSegments
+            }
+            func isReady() -> Bool { true }
+            func prepare() async throws {}
+        }
+        let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        let processor = ChunkProcessor(
+            config: .default, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0),
+                                       engine: "fluidAudio", chunkDurationMinutes: 30, chunks: []),
+            transcriber: StrayEngine(stray: stray), diarizer: BleedFixture.Diarizer())
+        await processor.processLastChunk(ChunkRotator.FinalizedChunk(
+            index: 0, systemPath: sys.path, micPath: mic.path, startTime: Date(timeIntervalSince1970: 0)))
+        let chunk = try #require(await processor.getSessionState().chunks.first)
+        try expectTheBleedJudgedAsACluster(chunk, extraLocal: 1)
+        #expect(local([stray], in: chunk).map(\.speaker) == ["Local Unknown"])
     }
 
     @Test("the single-file path (CLI, legacy recovery): the bleed cluster is judged before absorption too")
