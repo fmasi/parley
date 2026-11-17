@@ -56,40 +56,35 @@ struct DiarizerSpeakerCountTests {
 }
 
 /// Re-detect on the mic channel asks for N+1 voices, then N when the wider pass holds no echo voice
-/// (#265). With one forced-count manager kept, every such re-detect loaded both again. The two most
-/// recent forced counts are kept; room is made BEFORE a load, so at most one forced manager is held
-/// while another loads — the peak a one-deep slot evicting after the load already had.
+/// (#265). Measured in a release build (M5 Pro, 600 s of audio): a forced-count manager kept idle
+/// after its pass holds about 0.9 GB, and keeping the wider pass's beside the stated count's raised
+/// the peak by about 0.4 GB, while a load from the local cache takes about 135 ms. So ONE forced
+/// manager is kept, and it is released BEFORE another loads: the peak is one manager, below the old
+/// slot's (which released only after the next load), and a re-detect reloads rather than holds.
 @Suite("Diarizer forced-count managers (#265 review)")
 struct ForcedManagerSlotsTests {
 
-    @Test("N+1 then N, again and again: two loads, then none")
-    func aRepeatedRedetectLoadsNothingTheSecondTime() {
+    @Test("N+1 then N: the wider pass's manager is released before the stated count's loads")
+    func theWiderManagerGoesBeforeTheStatedOneLoads() {
         var slots = ForcedManagerSlots()
         #expect(slots.makeRoom(for: 2) == [])
         slots.loaded(2)
-        #expect(slots.makeRoom(for: 1) == [])
+        #expect(slots.makeRoom(for: 1) == [2])
+        #expect(slots.held.isEmpty)
         slots.loaded(1)
-        // The second re-detect finds both.
-        #expect(slots.held == [2, 1])
-        slots.used(2)
-        slots.used(1)
-        #expect(slots.held == [2, 1])
+        #expect(slots.held == [1])
     }
 
-    @Test("a third count evicts the least recently used, before it loads")
-    func aThirdCountEvictsTheOldestBeforeLoading() {
+    @Test("the same count again is reused, not reloaded")
+    func theSameCountIsReused() {
         var slots = ForcedManagerSlots()
-        slots.loaded(2)
         slots.loaded(1)
-        slots.used(2)
-        // 1 is the least recently used: dropped before 3 loads, so only 2 is held during the load.
-        #expect(slots.makeRoom(for: 3) == [1])
-        #expect(slots.held == [2])
-        slots.loaded(3)
-        #expect(slots.held == [2, 3])
+        slots.used(1)
+        #expect(slots.held == [1])
+        #expect(slots.makeRoom(for: 1) == [])
     }
 
-    @Test("never more than one forced manager held while another loads, never more than two after")
+    @Test("no forced manager is held while another loads, and one at most after")
     func theBoundHolds() {
         var slots = ForcedManagerSlots()
         for count in [1, 2, 3, 4, 2, 5, 5, 1, 6, 7, 3] {
@@ -97,11 +92,10 @@ struct ForcedManagerSlotsTests {
                 slots.used(count)
             } else {
                 _ = slots.makeRoom(for: count)
-                #expect(slots.held.count <= ForcedManagerSlots.capacity - 1)
+                #expect(slots.held.isEmpty)
                 slots.loaded(count)
             }
-            #expect(slots.held.count <= ForcedManagerSlots.capacity)
-            #expect(slots.held.last == count)
+            #expect(slots.held == [count])
         }
     }
 }

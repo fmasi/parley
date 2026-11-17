@@ -215,14 +215,19 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     /// count pays one model load (from the local cache — no download) the first time that count
     /// is used.
     ///
-    /// Besides the unforced one (key 0, never evicted), the TWO most recently used forced counts are
-    /// kept (`ForcedManagerSlots`). Keying without a bound let every distinct count accumulate its own
-    /// manager, each holding the full pyannote + WeSpeaker + VBx models — capped at 21 only by the UI
-    /// stepper's 1...20 range, which is not a property this actor should depend on. Two, not one,
-    /// because a re-detect of the mic channel asks for N+1 voices and then, without an echo voice, for
-    /// N (#265): one slot loaded both again on every such re-detect. Room is made BEFORE a load, so
-    /// while one loads at most one other forced manager is held — the same peak as the one-deep slot,
-    /// which evicted only after its load.
+    /// Besides the unforced one (key 0, never evicted), ONE forced count is kept (`ForcedManagerSlots`),
+    /// and it is released BEFORE another loads. Keying without a bound let every distinct count
+    /// accumulate its own manager, each holding the full pyannote + WeSpeaker + VBx models — capped at
+    /// 21 only by the UI stepper's 1...20 range, which is not a property this actor should depend on.
+    ///
+    /// One, not two, although a re-detect of the mic channel asks for N+1 voices and then, without an
+    /// echo voice, for N (#265), so a clean channel reloads both on every re-detect. Measured in a
+    /// release build (M5 Pro, GPU, 600 s of audio): a load from the local cache takes about 135 ms
+    /// (200–550 ms the first in a process), while a manager kept idle after its pass holds about
+    /// 0.9 GB — keeping the wider pass's beside the stated count's raised the peak from about 0.97 to
+    /// 1.39 GB, and what stays held while the dialog is open from about 0.47 to 1.36 GB. Releasing
+    /// before the load also keeps the peak below the earlier one-deep slot's, which released the old
+    /// manager only after the new one had loaded.
     private var forcedSlots = ForcedManagerSlots()
 
     private func ensureLoaded(forcedSpeakerCount: Int? = nil) async throws -> OfflineDiarizerManager {
@@ -288,9 +293,11 @@ public actor FluidAudioDiarizer: DiarizationProvider {
 }
 
 /// Which forced-count diarizer managers `FluidAudioDiarizer` keeps (#265 review): the `capacity` most
-/// recently used, by speaker count. Pure, so the bound is tested without loading a model.
+/// recently used, by speaker count, room made before a load. Pure, so the bound is tested without
+/// loading a model.
 struct ForcedManagerSlots {
-    static let capacity = 2
+    /// One: an idle manager holds about 0.9 GB after a pass, a reload costs about 135 ms.
+    static let capacity = 1
     /// The counts held, least recently used first.
     private(set) var held: [Int] = []
 
