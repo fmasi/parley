@@ -1960,6 +1960,35 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(record(segments) == record(before))
     }
 
+    /// A matched line the per-line rules of #365 hold back as the user's own is not spared from the fold
+    /// either: beside an echo voice, at a stated count of 1, it goes to the one person like any other
+    /// unattributed line. One starts 0.6 s before the remote line it repeats (rule (b): an echo never
+    /// precedes its source), at one word; the other lies in a chunk where echo cancellation measured no
+    /// coupling (rule (a), lift 2.5 dB).
+    @Test("a matched unattributed line the per-line rules hold back still folds into the person")
+    func aHeldBackUnattributedLineFolds() async throws {
+        let answers = Answers(), voices = answers.voices
+        let early = Line(start: 240, end: 241, text: Self.words("early", 1))
+        let quiet = Line(start: 260, end: 261.5, text: Self.words("quiet", 3))
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+            + [early, quiet].map { Self.segment($0, "Remote Speaker 1", "remote") }
+            + [Line(start: 239.4, end: 241, text: early.text), Line(start: 260.2, end: 261.7, text: quiet.text)]
+                .map { Self.segment($0, "Local Unknown", "local") }
+        let metadata: [String: Any] = ["mic_echo_cancel": ["chunks": 1, "chunks_failed": 0, "per_chunk": [
+            ["chunk": 0, "start": 255.0, "seconds": 10.0, "far_end_lift_db": 2.5]]]]
+        let (t, cleanup) = try makeRecording(segments: before, metadata: metadata); defer { cleanup() }
+
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: CountingDiarizer(answers.onePerson))
+
+        let segments = try read(t).segments
+        #expect(outcome.echoClusters == 1)
+        let held = [Line(start: 239.4, end: 241, text: early.text), Line(start: 260.2, end: 261.7, text: quiet.text)]
+        #expect(speakers(found(held, in: segments)) == ["Local Speaker 1"])
+        #expect(echoCount(found(held, in: segments)) == 0)
+        #expect(record(segments) == record(before))
+    }
+
     /// The same short line on a channel with no echo voice: the stated count of 1 folds it, as before.
     @Test("without an echo voice a short unattributed line that repeats the other side still folds, as before")
     func withoutAnEchoVoiceTheShortLineStillFolds() async throws {

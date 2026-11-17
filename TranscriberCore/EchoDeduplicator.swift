@@ -307,12 +307,18 @@ public enum EchoDeduplicator {
         /// The indices (into `segments`) of every local segment that matched concurrent remote speech,
         /// flagged or not: a match of 1–2 words outside an echo cluster is matched and left unflagged.
         public let matchedLocal: Set<Int>
+        /// The matches outside an echo cluster the per-line rules hold back as the user's own (#365): where
+        /// echo cancellation measured no coupling, or not shaped like an echo copy. Judged whatever the
+        /// line's length, so one or two words are listed too. A subset of `matchedLocal`, never flagged.
+        public let heldBack: Set<Int>
 
-        public init(segments: [LabeledSegment], flaggedCount: Int, clusters: [ClusterVerdict] = [], matchedLocal: Set<Int> = []) {
+        public init(segments: [LabeledSegment], flaggedCount: Int, clusters: [ClusterVerdict] = [], matchedLocal: Set<Int> = [],
+                    heldBack: Set<Int> = []) {
             self.segments = segments
             self.flaggedCount = flaggedCount
             self.clusters = clusters
             self.matchedLocal = matchedLocal
+            self.heldBack = heldBack
         }
 
         /// The chunk's processing issues for this result, both informational: `echo_flagged` (how
@@ -395,6 +401,7 @@ public enum EchoDeduplicator {
         var result = segments
         var flaggedCount = 0
         var clusters: [ClusterVerdict] = []
+        var heldBack = Set<Int>()
         for (label, indices) in clusterIndices.sorted(by: { $0.key < $1.key }) {
             let matched = indices.filter { matches[$0] != nil }
             let seconds = indices.reduce(0) { $0 + duration(of: segments[$1]) }
@@ -410,11 +417,16 @@ public enum EchoDeduplicator {
             var flagged = 0, heldUncoupled = 0, heldTiming = 0
             for i in matched {
                 if !isEcho {
+                    // The per-line rules, judged for every match so the held-back ones are known whatever
+                    // their length; only lines of 3 words or more can be flagged.
+                    let uncoupled = coupling.isUncoupled(start: segments[i].start, end: segments[i].end)
+                    let notACopy = !uncoupled && !(matches[i].map { canBeEchoCopy(segments[i], of: $0) } ?? true)
+                    if uncoupled || notACopy { heldBack.insert(i) }
                     // Counted both ways, the fewer wins: "Twenty twenty six." is one word against "2026".
                     let words = min(wordCount(segments[i].text), EchoTextNormalizer.words(segments[i].text).count)
                     guard words >= minimumWordsOutsideEchoCluster else { continue }
-                    if coupling.isUncoupled(start: segments[i].start, end: segments[i].end) { heldUncoupled += 1; continue }
-                    if let match = matches[i], !canBeEchoCopy(segments[i], of: match) { heldTiming += 1; continue }
+                    if uncoupled { heldUncoupled += 1; continue }
+                    if notACopy { heldTiming += 1; continue }
                 }
                 result[i].echo = true
                 flagged += 1
@@ -434,7 +446,7 @@ public enum EchoDeduplicator {
         }
 
         return DeduplicationResult(segments: result, flaggedCount: flaggedCount, clusters: clusters,
-                                   matchedLocal: Set(matches.keys))
+                                   matchedLocal: Set(matches.keys), heldBack: heldBack)
     }
 
     /// A segment's length; 0 when its times are not finite or run backwards.

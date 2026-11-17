@@ -351,4 +351,22 @@ struct EchoLineMatchingTests {
         #expect(EchoDeduplicator.deduplicate(segments: [earlier, source, local], localSpeakerDatabase: [:],
                                              remoteSpeakerDatabase: [:]).flaggedCount == 1)
     }
+
+    /// The matches the per-line rules hold back are listed, whatever their length, so a caller that spares
+    /// matched lines (re-detect's fold) spares only those that can be an echo copy.
+    @Test func theHeldBackMatchesAreListedWhateverTheirLength() {
+        let headphones = MicEchoCancelRecord(engine: "e", modelSHA256: "a", framesReverted: 0, seconds: 60, farEndLiftDB: 2.5)
+        let segments = [
+            remote(10, 11, "Right."), local(9.4, 11, "Right."),                         // one word, precedes its source
+            remote(20, 21.5, "Not possible to wait."), local(20.6, 21.9, "No, not possible to wait."),
+            remote(30, 31, "Fine."), local(30.2, 31.2, "Fine."),                         // one word, a plain copy
+        ]
+        let plain = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:])
+        #expect(plain.matchedLocal == [1, 3, 5])
+        #expect(plain.heldBack == [1, 3])
+        #expect(plain.flaggedCount == 0)
+        let uncoupled = EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:],
+                                                     coupling: .chunk(headphones))
+        #expect(uncoupled.heldBack == [1, 3, 5])
+    }
 }

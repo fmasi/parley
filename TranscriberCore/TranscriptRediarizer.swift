@@ -450,7 +450,11 @@ public enum TranscriptRediarizer {
         // it unflagged ("Right." through the speakers), so the fold would have handed it to the user.
         // It stays unattributed. Without an echo voice the fold is what it always was.
         let sparedFromFold: Set<Int> = echo.map { echo in
-            echo.clusterIDs.isEmpty ? [] : Set(pool.indices.filter { echo.result.matchedLocal.contains($0) })
+            // Only the matches that can be an echo copy: one the per-line rules hold back as the user's own
+            // (#365: no coupling, or not shaped like a copy) folds like any unattributed line.
+            echo.clusterIDs.isEmpty ? [] : Set(pool.indices.filter {
+                echo.result.matchedLocal.contains($0) && !echo.result.heldBack.contains($0)
+            })
         } ?? []
         labeled = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: speakerCount, keeping: echoClusterLabels,
                                                         sparing: sparedFromFold)
