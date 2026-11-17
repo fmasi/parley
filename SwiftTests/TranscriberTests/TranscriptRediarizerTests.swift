@@ -1699,4 +1699,245 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(plan.suggestions["Local Speaker 2"] == nil)
         #expect(plan.notKept == ["Bob"])
     }
+
+    // MARK: - The stated count is people (#265)
+
+    /// Answers each requested speaker count with its own clusters — a diarizer that blends two voices
+    /// when asked for N and separates them when asked for one more — and keeps the counts asked for.
+    final class CountingDiarizer: DiarizationProvider, @unchecked Sendable {
+        private let results: [Int: DiarizationResult]
+        private let lock = NSLock()
+        private var counts: [Int?] = []
+        init(_ results: [Int: DiarizationResult]) { self.results = results }
+        var asked: [Int?] { lock.withLock { counts } }
+
+        private func answer(_ numSpeakers: Int?) -> DiarizationResult {
+            lock.withLock { counts.append(numSpeakers) }
+            let key = numSpeakers ?? 0
+            return results[key] ?? results[results.keys.filter { $0 <= key }.max() ?? 0] ?? DiarizationResult(segments: [])
+        }
+        func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult { answer(numSpeakers) }
+        func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult {
+            progress?(1, 1)
+            return answer(numSpeakers)
+        }
+    }
+
+    /// A second person on this side (a colleague on the same mic): their own lines, nobody else's words.
+    static let colleague = lines("mate", count: 8, offset: 4, length: 3)
+
+    /// The four results a diarizer can give `TwoVoices` (plus `colleague` with two people), as asked.
+    struct Answers {
+        let voices = TwoVoices()
+        /// One person: everything in one cluster at 1; the echo voice separate at 2.
+        var onePerson: [Int: DiarizationResult] {
+            [1: DiarizationResult(segments: turns(voices.own + voices.far + voices.residue, "S1"), speakerDatabase: ["S1": [1, 0, 0]]),
+             2: voices.diarization()]
+        }
+        /// Two people: the colleague blended with the echo voice at 2; all three apart at 3.
+        var twoPeople: [Int: DiarizationResult] {
+            [2: DiarizationResult(segments: turns(voices.own, "S1") + turns(colleague + voices.far + voices.residue, "S2"),
+                                  speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]]),
+             3: DiarizationResult(segments: turns(voices.own, "S1") + turns(colleague, "S3") + turns(voices.far + voices.residue, "S2"),
+                                  speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0], "S3": [0, 0, 1]])]
+        }
+    }
+
+    @Test("blended at the stated count, apart at one more: the count is the people, the echo voice kept apart",
+          arguments: [1, 2])
+    func theStatedCountIsThePeople(stated: Int) async throws {
+        let answers = Answers(), voices = answers.voices
+        var before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+        if stated == 2 { before += Self.colleague.map { Self.segment($0, "Local Speaker 1", "local") } }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let diarizer = CountingDiarizer(stated == 1 ? answers.onePerson : answers.twoPeople)
+
+        let outcome = try await TranscriptRediarizer.rediarize(transcript: t, source: "local", speakerCount: stated, diarizer: diarizer)
+
+        let (segments, metadata) = try read(t)
+        // Room for one more voice than the people stated; it held the echo voice, so no second pass.
+        #expect(diarizer.asked == [stated + 1])
+        // The people: the user, and at 2 the colleague, each under a label of their own.
+        let user = speakers(found(voices.own, in: segments))
+        #expect(user.count == 1)
+        if stated == 2 {
+            let mate = speakers(found(Self.colleague, in: segments))
+            #expect(mate.count == 1 && mate != user)
+        }
+        // The echo voice: a label of its own, matched lines flagged, the rest under it — and none of
+        // its lines under a person's label.
+        let echoVoice = speakers(found(voices.far + voices.residue, in: segments))
+        #expect(echoVoice.count == 1)
+        #expect(echoVoice.isDisjoint(with: user.union(speakers(found(Self.colleague, in: segments)))))
+        #expect(!echoVoice.contains("Local Unknown"))
+        #expect(echoCount(found(voices.far, in: segments)) == voices.far.count)
+        #expect(echoCount(found(voices.residue + voices.own + Self.colleague, in: segments)) == 0)
+        #expect(record(segments) == record(before))
+        // Counted as people, not voices.
+        #expect(metadata["speaker_count_local"] as? Int == stated)
+        #expect(outcome.speakerCount == stated)
+        #expect(outcome.echoClusters == 1)
+        #expect(EchoNotice.Findings(metadata: metadata).voices.map(\.label) == Array(echoVoice))
+    }
+
+    /// No echo voice in the wider pass: the re-detect is the one it always was, at the stated count,
+    /// whatever the wider pass split.
+    @Test("a clean channel is re-detected as before, at every count", arguments: [1, 2, 3, 4])
+    func aCleanChannelIsAsBefore(stated: Int) async throws {
+        // Four people, no bleed: every line is somebody's on this side.
+        let people = (0..<4).map { Self.lines("p\($0)", count: 5, offset: Double($0) * 4, length: 3) }
+        let fragment = Set(people[0].prefix(2).map(\.start))
+        // At n the diarizer puts the people into n clusters (the last ones together). `splitFirst`
+        // also splits the first person in two: the fragment a wider target invites.
+        func partition(_ n: Int, splitFirst: Bool = false) -> DiarizationResult {
+            var segments: [DiarizedSegment] = []
+            for (i, lines) in people.enumerated() {
+                for line in lines {
+                    let id = splitFirst && fragment.contains(line.start) ? "S9" : "S\(min(i, n - 1))"
+                    segments.append(DiarizedSegment(start: line.start, end: line.end, speaker: id, qualityScore: 0.9))
+                }
+            }
+            let voices: [String: [Float]] = ["S0": [1, 0, 0, 0, 0], "S1": [0, 1, 0, 0, 0], "S2": [0, 0, 1, 0, 0],
+                                             "S3": [0, 0, 0, 1, 0], "S9": [0, 0.9, 0, 0, 0.1]]
+            return DiarizationResult(segments: segments, speakerDatabase: voices.filter { id, _ in segments.contains { $0.speaker == id } })
+        }
+        let before = people.flatMap { $0 }.map { Self.segment($0, "Local Speaker 1", "local") }
+            + people[1].enumerated().map { Self.segment(Line(start: $1.start, end: $1.end, text: Self.words("other\($0)", 6)), "Remote Speaker 1", "remote") }
+
+        let (today, cleanupToday) = try makeRecording(segments: before); defer { cleanupToday() }
+        let (now, cleanupNow) = try makeRecording(segments: before); defer { cleanupNow() }
+        // Today: the diarizer is asked for the stated count and nothing else.
+        let todayOutcome = try await TranscriptRediarizer.rediarize(
+            transcript: today, source: "local", speakerCount: stated, diarizer: ScriptedDiarizer(result: partition(stated)))
+        let diarizer = CountingDiarizer([stated: partition(stated), stated + 1: partition(stated + 1, splitFirst: true)])
+        let outcome = try await TranscriptRediarizer.rediarize(transcript: now, source: "local", speakerCount: stated, diarizer: diarizer)
+
+        // Wider first; no echo voice in it, so the stated count decides, as it always did.
+        #expect(diarizer.asked == [stated + 1, stated])
+        let (expected, expectedMetadata) = try read(today)
+        let (segments, metadata) = try read(now)
+        #expect(record(segments) == record(expected))
+        #expect(segments.map { $0["speaker"] as? String } == expected.map { $0["speaker"] as? String })
+        #expect(echoCount(segments) == echoCount(expected))
+        for key in ["speaker_count_local", "echo_segments_flagged"] {
+            #expect((metadata[key] as? Int) == (expectedMetadata[key] as? Int), "\(key)")
+        }
+        #expect(clusters(metadata, track: "local").map { $0["label"] as? String } == clusters(expectedMetadata, track: "local").map { $0["label"] as? String })
+        #expect(outcome.speakerCount == todayOutcome.speakerCount)
+        #expect(outcome.segmentsRelabeled == todayOutcome.segmentsRelabeled)
+        #expect(outcome.echoClusters == 0 && todayOutcome.echoClusters == 0)
+    }
+
+    @Test("the remote channel is diarized once, at the stated count")
+    func theRemoteChannelIsDiarizedOnceAtTheStatedCount() async throws {
+        let voices = TwoVoices()
+        let before = voices.own.map { Self.segment($0, "Remote Speaker 1", "remote") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let diarizer = CountingDiarizer([1: DiarizationResult(segments: Self.turns(voices.own, "S1"), speakerDatabase: ["S1": [1, 0, 0]])])
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "remote", speakerCount: 1, diarizer: diarizer)
+        #expect(diarizer.asked == [1])
+    }
+
+    /// Speech no turn covers ("Unknown") goes to the one person at a stated count of 1 — with an echo
+    /// voice on the channel too, now that "1" no longer has to be said as "2" to keep it apart.
+    @Test("at a stated count of 1, unattributed lines fold into the one person, echo voice or not",
+          arguments: [true, false])
+    func unattributedLinesFoldIntoTheOnePerson(withEcho: Bool) async throws {
+        let answers = Answers(), voices = answers.voices
+        // Two short lines the diarizer gave no turn to; nothing on the other side says them.
+        let stray = [Line(start: 230, end: 231, text: Self.words("stray", 2)), Line(start: 250, end: 251.5, text: Self.words("aside", 3))]
+        let before = (withEcho ? voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+                               : voices.own.map { Self.segment($0, "Local Speaker 1", "local") })
+            + stray.map { Self.segment($0, "Local Unknown", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let diarizer = CountingDiarizer(withEcho ? answers.onePerson
+            : [1: DiarizationResult(segments: Self.turns(voices.own, "S1"), speakerDatabase: ["S1": [1, 0, 0]])])
+
+        let outcome = try await TranscriptRediarizer.rediarize(transcript: t, source: "local", speakerCount: 1, diarizer: diarizer)
+
+        let (segments, metadata) = try read(t)
+        #expect(speakers(found(voices.own + stray, in: segments)) == ["Local Speaker 1"])
+        #expect(echoCount(found(stray, in: segments)) == 0)
+        if withEcho {
+            #expect(speakers(found(voices.far + voices.residue, in: segments)) == ["Local Speaker 2"])
+            #expect(outcome.echoClusters == 1)
+        }
+        #expect(!speakers(segments.filter { $0["source"] as? String == "local" && $0["echo"] == nil }).contains("Local Unknown"))
+        #expect(metadata["speaker_count_local"] as? Int == 1)
+    }
+
+    /// The per-line rule in the wider pass: a copy of the other side the diarizer left in the user's
+    /// own cluster is flagged and belongs to nobody, beside an echo voice it kept apart.
+    @Test("a line the per-line rule flags in the wider pass takes the channel's unattributed label")
+    func aLineFlaggedInTheWiderPassIsUnattributed() async throws {
+        let voices = TwoVoices()
+        let blended = [Line(start: 215, end: 220, text: Self.words("blended", 6))]
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+            + blended.map { Self.segment($0, "Remote Speaker 1", "remote") }
+            + blended.map { Self.segment($0, "Local Speaker 1", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let diarizer = CountingDiarizer([
+            1: DiarizationResult(segments: Self.turns(voices.own + voices.far + voices.residue + blended, "S1"), speakerDatabase: ["S1": [1, 0, 0]]),
+            2: DiarizationResult(segments: Self.turns(voices.own + blended, "S1") + Self.turns(voices.far + voices.residue, "S2"),
+                                 speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]]),
+        ])
+
+        let outcome = try await TranscriptRediarizer.rediarize(transcript: t, source: "local", speakerCount: 1, diarizer: diarizer)
+
+        let segments = try read(t).segments
+        #expect(echoCount(found(blended, in: segments)) == 1)
+        #expect(speakers(found(blended, in: segments)) == ["Local Unknown"])
+        #expect(speakers(found(voices.far + voices.residue, in: segments)) == ["Local Speaker 2"])
+        #expect(speakers(found(voices.own, in: segments)) == ["Local Speaker 1"])
+        #expect(outcome.echoFlagged == voices.far.count + 1)
+        #expect(outcome.speakerCount == 1)
+    }
+
+    /// Speech no turn covers can be judged echo as a group; that is no voice the wider pass separated.
+    /// With only that, the stated count decides as before — the wider pass's extra cluster (a fragment
+    /// of the user, nearer the colleague's voice) is not merged by resemblance.
+    @Test("an echo found only in the unattributed speech of the wider pass does not take the wider pass")
+    func unattributedEchoAloneKeepsTheStatedCount() async throws {
+        let voices = TwoVoices()
+        let fragment = Array(voices.own.prefix(2)), rest = Array(voices.own.dropFirst(2))
+        let before = voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1")
+            + Self.colleague.map { Self.segment($0, "Local Speaker 2", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let diarizer = CountingDiarizer([
+            2: DiarizationResult(segments: Self.turns(voices.own, "S1") + Self.turns(Self.colleague, "S2"),
+                                 speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0]]),
+            // The fragment's voice sits nearer the colleague's than the user's.
+            3: DiarizationResult(segments: Self.turns(rest, "S1") + Self.turns(Self.colleague, "S2") + Self.turns(fragment, "S3"),
+                                 speakerDatabase: ["S1": [1, 0, 0], "S2": [0, 1, 0], "S3": [0.1, 1, 0]]),
+        ])
+
+        _ = try await TranscriptRediarizer.rediarize(transcript: t, source: "local", speakerCount: 2, diarizer: diarizer)
+
+        let segments = try read(t).segments
+        #expect(diarizer.asked == [3, 2])
+        #expect(speakers(found(voices.own, in: segments)).count == 1)
+        #expect(speakers(found(voices.own, in: segments)).isDisjoint(with: speakers(found(Self.colleague, in: segments))))
+    }
+
+    /// Two diarizer passes on the mic channel: the progress fraction runs once from 0 to 1 across both.
+    @Test("two passes report one progress that never goes back")
+    func twoPassesReportOneProgress() async throws {
+        let voices = TwoVoices()
+        let before = voices.own.map { Self.segment($0, "Local Speaker 1", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let fractions = Fractions()
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1,
+            diarizer: CountingDiarizer([1: DiarizationResult(segments: Self.turns(voices.own, "S1"), speakerDatabase: ["S1": [1, 0, 0]])]),
+            onProgress: { if $0.phase == .detectingSpeakers, let f = $0.fraction { fractions.add(f) } })
+        let seen = fractions.all
+        #expect(seen == seen.sorted() && seen.last == 1 && seen.first ?? 1 < 1, "\(seen)")
+    }
+
+    final class Fractions: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Double] = []
+        func add(_ value: Double) { lock.withLock { values.append(value) } }
+        var all: [Double] { lock.withLock { values } }
+    }
 }

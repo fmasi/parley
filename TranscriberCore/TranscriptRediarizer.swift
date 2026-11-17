@@ -218,6 +218,14 @@ public enum TranscriptRediarizer {
     /// not counted as a person. It never refuses — the count is enforced on everything else — and
     /// re-detecting a transcript that was merged that way takes the echo voice back out.
     ///
+    /// **The stated count is people (#265).** On the mic channel the diarizer is first asked for one
+    /// voice more than the people stated: a diarizer asked for the people alone blended the echo voice
+    /// into one of them, and left nothing for the check to keep apart. When that wider pass holds an
+    /// echo voice it is the one used — the echo voice kept apart, the stated count enforced on the
+    /// rest. When it holds none, the channel is diarized again at the stated count and the re-detect
+    /// is exactly what it was before: a clean channel pays a second diarizer pass, never a different
+    /// result.
+    ///
     /// **A mic channel that was echo-cancelled is cancelled again (#342).** The pipeline diarized a
     /// cleaned copy of the mic; diarizing the raw one here would find the echo voice again and move
     /// the speakers. When `metadata.mic_echo_cancel` says chunks were cancelled, each archive's mic
@@ -312,20 +320,24 @@ public enum TranscriptRediarizer {
         // check here a cancel during that work goes unnoticed until a full diarize has also run.
         try Task.checkCancellation()
         onProgress?(Progress(phase: .detectingSpeakers))
-        let raw: DiarizationResult
-        switch decoded {
-        case .samples(let samples):
-            raw = try await diarizer.diarize(
-                audio: samples, numSpeakers: speakerCount,
-                progress: { processed, total in
-                    guard total > 0 else { return }
-                    onProgress?(Progress(phase: .detectingSpeakers, fraction: Double(processed) / Double(total)))
-                })
-        case .path(let audioURL):
-            // No pre-decoded buffer to share here (see the comment above) — each backend decodes
-            // its own copy, same as before #204 for this layout. No per-chunk progress fraction is
-            // available on this route either, but the coarser phase indicator still applies.
-            raw = try await diarizer.diarize(audioPath: audioURL, numSpeakers: speakerCount)
+        /// One diarizer pass at `count`, its own progress reported as the part `share` of the phase.
+        func diarize(_ count: Int, share: ClosedRange<Double>) async throws -> DiarizationResult {
+            switch decoded {
+            case .samples(let samples):
+                return try await diarizer.diarize(
+                    audio: samples, numSpeakers: count,
+                    progress: { processed, total in
+                        guard total > 0 else { return }
+                        let fraction = Double(processed) / Double(total)
+                        onProgress?(Progress(phase: .detectingSpeakers,
+                                             fraction: share.lowerBound + fraction * (share.upperBound - share.lowerBound)))
+                    })
+            case .path(let audioURL):
+                // No pre-decoded buffer to share here (see the comment above) — each backend decodes
+                // its own copy, same as before #204 for this layout. No per-chunk progress fraction is
+                // available on this route either, but the coarser phase indicator still applies.
+                return try await diarizer.diarize(audioPath: audioURL, numSpeakers: count)
+            }
         }
         // The diarizer's "forced" count is a target, not a ceiling — asking for 1 on an 82-minute
         // call still returned 2 (#201). Enforce it here, where the clusters and their embeddings
@@ -334,8 +346,40 @@ public enum TranscriptRediarizer {
         // But first, on the mic channel, find the clusters that are not a person on this side at
         // all (#243): the echo check runs on the RAW clusters, and those it judges echo are kept out
         // of the merge. Enforcing first would fold the other side's voice into the stated speaker.
+        //
+        // And the stated count is PEOPLE (#265). With the far side on loudspeakers the mic holds one
+        // voice more than that, and a diarizer asked for the people alone blends the echo voice into
+        // one of them: nothing is left for the check to keep apart, and the lines it cannot flag one
+        // by one go to that person. So the mic channel is diarized with room for one more voice
+        // first. When the check finds an echo voice there, that pass is the one used: the echo
+        // cluster is kept apart and the stated count enforced on the rest. When it finds none, the
+        // channel is diarized again at the stated count and the re-detect is the one it always was —
+        // the wider pass's extra cluster is then a fragment of somebody, and merging it by
+        // resemblance is not what the clusterer itself does at the stated count.
         let candidates = relabelCandidates(in: rawSegments, source: source)
-        var echo = source == "local" ? echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling) : nil
+        let raw: DiarizationResult
+        var echo: EchoCheck?
+        if source == "local" {
+            let wider = try await diarize(speakerCount + 1, share: 0...0.5)
+            if let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling),
+               !found.clusterIDs.isEmpty {
+                // An echo VOICE: a cluster of the diarizer's own. Unattributed speech judged echo as
+                // a group is no voice this pass separated.
+                Logger.transcription.info(
+                    "Re-diarize: with room for \(speakerCount + 1, privacy: .public) voices the mic channel holds \(found.clusterIDs.count, privacy: .public) echo voice(s) — kept apart, \(speakerCount, privacy: .public) people enforced on the rest")
+                raw = wider
+                echo = found
+            } else {
+                Logger.transcription.info(
+                    "Re-diarize: no echo voice with room for \(speakerCount + 1, privacy: .public) voices — diarizing again at the stated \(speakerCount, privacy: .public)")
+                try Task.checkCancellation()
+                raw = try await diarize(speakerCount, share: 0.5...1)
+                echo = echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling)
+            }
+        } else {
+            raw = try await diarize(speakerCount, share: 0...1)
+            echo = nil
+        }
         // With the check, every candidate is labeled — a line already flagged `echo` needs its
         // cluster's new label too. Without it, only the unflagged lines, as before the check existed.
         func relabel() -> (pool: [Candidate], labeled: [LabeledSegment]) {
