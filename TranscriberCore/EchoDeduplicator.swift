@@ -22,9 +22,10 @@ public enum EchoDeduplicator {
         return min(overlap / shorter, 1.0)
     }
 
+    /// Word-level Jaccard similarity, over the words `EchoTextNormalizer` makes of each side (#363).
     public static func textSimilarity(_ a: String, _ b: String) -> Double {
-        let wordsA = Set(a.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }))
-        let wordsB = Set(b.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }))
+        let wordsA = Set(EchoTextNormalizer.words(a))
+        let wordsB = Set(EchoTextNormalizer.words(b))
         guard !wordsA.isEmpty || !wordsB.isEmpty else { return 0 }
         let intersection = wordsA.intersection(wordsB).count
         let union = wordsA.union(wordsB).count
@@ -35,8 +36,8 @@ public enum EchoDeduplicator {
     /// Useful when `a` is a short excerpt of a longer `b` — Jaccard penalises
     /// the size mismatch, but containment captures that `a` is fully inside `b`.
     public static func textContainment(_ a: String, _ b: String) -> Double {
-        let wordsA = Set(a.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }))
-        let wordsB = Set(b.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }))
+        let wordsA = Set(EchoTextNormalizer.words(a))
+        let wordsB = Set(EchoTextNormalizer.words(b))
         guard !wordsA.isEmpty else { return 0 }
         let intersection = wordsA.intersection(wordsB).count
         return Double(intersection) / Double(wordsA.count)
