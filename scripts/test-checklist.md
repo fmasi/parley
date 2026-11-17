@@ -811,7 +811,8 @@ for about half of it, in the pauses and over the other side.
   - PASS: "1 speaker found · 1 echo voice kept separate · …"; `speaker_count_local` is 1; the
     echo entry's label is not yours; no `PERSON` line in `leaks`; every `echo: true` mic line is
     the other side's words (none of yours hidden); no visible `Local Unknown` line on this side
-    (at a count of 1 they fold into you).
+    except short ones that repeat the other side at that moment (at a count of 1 the rest fold
+    into you).
 - [ ] **EB-05 The case #265 was filed for: a channel the diarizer blends at 1.** Run EB-04 on a
       transcript whose mic side showed ONE row after Stop although the speakers were on (the
       pipeline blended the echo into you), or repeat the recording with the phone louder until
@@ -936,7 +937,10 @@ echo_meta() { python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));m=d["me
     and for the later ones, each with its `verdict`, and the labels match the speaker labels of the
     flagged segments in the transcript.
 - [ ] **E-05 The log line.** In `stream.log`, each chunk has one `Echo cluster <private>: verdict …`
-  line per mic-side speaker, and it shows numbers only (the label is redacted in `log show`).
+  line per mic-side speaker, and it shows numbers only (the label is redacted in `log show`). A
+  chunk whose mic clusters were judged before minority absorption (#249) also has lines starting
+  `Pre-absorption check (not the record): Echo cluster …`, one per RAW cluster: they are not the
+  record and are not counted here.
 - [ ] **E-06 An old config still loads.** `cfg echo_embedding_threshold 0.99`, relaunch, repeat E-01
   for 1 minute: the result is the same as E-01 (the key is ignored). `cfg echo_embedding_threshold null`.
 
