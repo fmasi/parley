@@ -557,6 +557,9 @@ public enum TranscriptRediarizer {
             // The user's answer is authoritative: absorption exists to second-guess a count nobody
             // supplied.
             minSpeakerShare: nil,
+            // Nothing is absorbed here, so there is nothing for an echo check before absorption to
+            // spare: re-detect runs its own on the raw clusters (`echoCheck`).
+            echoReference: nil,
             speakerCountIsUserStated: true)
         return (result.labeled, result.speakerDatabase)
     }

@@ -182,7 +182,8 @@ public final class TranscriptionRunner {
                 diarizer: diarizer,
                 label: "system\(index > 0 ? "-\(index + 1)" : "")",
                 audioSource: .system,
-                config: config
+                config: config,
+                echoReference: nil
             )
             perSegmentSystem.append(systemResult.segments)
             if embeddingDim == 0 {
@@ -228,7 +229,9 @@ public final class TranscriptionRunner {
                         diarizer: diarizer,
                         label: "mic\(index > 0 ? "-\(index + 1)" : "")",
                         audioSource: .microphone,
-                        config: config
+                        config: config,
+                        // Judged for echo against this segment's system lines before absorption (#249).
+                        echoReference: systemResult.segments
                     )
                     micSegments = micResult.segments
                     micSpeakerDb = micResult.speakerDatabase
@@ -1227,6 +1230,7 @@ public final class TranscriptionRunner {
     }
 
     /// `fileSize`: the file's size, read with the run's discovery on the folder's queue (L review 217).
+    /// `echoReference`: the other channel's lines, for the mic stream only (#249, as in `ChunkProcessor`).
     private func transcribeStream(
         audioPath: URL,
         fileSize: Int,
@@ -1235,7 +1239,8 @@ public final class TranscriptionRunner {
         diarizer: (any DiarizationProvider)?,
         label: String,
         audioSource: AudioSourceType,
-        config: Config
+        config: Config,
+        echoReference: [LabeledSegment]?
     ) async throws -> StreamResult {
         if fileSize <= wavHeaderSize {
             Logger.transcription.info("Skipping empty \(label, privacy: .public) audio (\(fileSize) bytes)")
@@ -1284,7 +1289,11 @@ public final class TranscriptionRunner {
                     diarizationResult: diarizationResult,
                     speechMap: speechMap,
                     vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5,
-                    minSpeakerShare: config.resolvedDiarizationMinSpeakerShare
+                    minSpeakerShare: config.resolvedDiarizationMinSpeakerShare,
+                    echoReference: echoReference.map {
+                        StreamLabeling.EchoReference(segments: $0, temporalThreshold: config.echoTemporalThreshold,
+                                                     textThreshold: config.echoTextThreshold)
+                    }
                 )
                 labeled = result.labeled
                 speakerDatabase = result.speakerDatabase

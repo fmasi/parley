@@ -418,7 +418,8 @@ public final class ChunkProcessor {
         }
         async let echoCancel = cancelMicEcho(chunkIndex: chunk.index, micURL: echoMic, systemURL: echoReference)
         let systemResult = await transcribeStream(
-            audioPath: systemURL, source: "remote", audioSource: .system, label: "chunk-\(chunk.index)-system"
+            audioPath: systemURL, source: "remote", audioSource: .system, label: "chunk-\(chunk.index)-system",
+            echoReference: nil
         )
         let echo = await echoCancel
         defer { if let cleaned = echo.cleanedMic { try? FileManager.default.removeItem(at: cleaned) } }
@@ -434,8 +435,12 @@ public final class ChunkProcessor {
         if hasDualStream {
             // The echo-cancelled copy when there is one: ASR and diarization only. The raw mic is
             // still what is archived and what speaker samples are cut from.
+            // The system stream's lines go with it: the mic's raw clusters are judged for echo
+            // against them before minority absorption, so a small bleed cluster is not folded into
+            // the user unjudged (#249).
             micResult = await transcribeStream(
-                audioPath: echo.cleanedMic ?? micURL, source: "local", audioSource: .microphone, label: "chunk-\(chunk.index)-mic"
+                audioPath: echo.cleanedMic ?? micURL, source: "local", audioSource: .microphone, label: "chunk-\(chunk.index)-mic",
+                echoReference: systemResult.segments
             )
         } else {
             micResult = StreamResult(segments: [], speakerDatabase: [:])
@@ -763,11 +768,16 @@ public final class ChunkProcessor {
     }
 
     /// Transcribe a single audio stream, with optional diarization + VAD.
+    ///
+    /// - Parameter echoReference: the other channel's lines, for the mic stream only: its raw
+    ///   clusters are judged for echo against them before minority absorption (#249). nil for the
+    ///   system stream.
     private nonisolated func transcribeStream(
         audioPath: URL,
         source: String,
         audioSource: AudioSourceType,
-        label: String
+        label: String,
+        echoReference: [LabeledSegment]?
     ) async -> StreamResult {
         // Recover crash-orphaned WAVs: a writer killed before finalize() leaves a
         // header that underreports the payload, so the file reads as empty/short.
@@ -839,7 +849,11 @@ public final class ChunkProcessor {
                     diarizationResult: diarizationResult,
                     speechMap: speechMap,
                     vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5,
-                    minSpeakerShare: config.resolvedDiarizationMinSpeakerShare
+                    minSpeakerShare: config.resolvedDiarizationMinSpeakerShare,
+                    echoReference: echoReference.map {
+                        StreamLabeling.EchoReference(segments: $0, temporalThreshold: config.echoTemporalThreshold,
+                                                     textThreshold: config.echoTextThreshold)
+                    }
                 )
                 labeled = result.labeled
                 speakerDatabase = result.speakerDatabase
