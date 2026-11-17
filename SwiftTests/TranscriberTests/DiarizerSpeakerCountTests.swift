@@ -54,3 +54,54 @@ struct DiarizerSpeakerCountTests {
         #expect(FluidAudioDiarizer().makeOfflineConfig(forcedSpeakerCount: -1).clustering.maxSpeakers == base.clustering.maxSpeakers)
     }
 }
+
+/// Re-detect on the mic channel asks for N+1 voices, then N when the wider pass holds no echo voice
+/// (#265). With one forced-count manager kept, every such re-detect loaded both again. The two most
+/// recent forced counts are kept; room is made BEFORE a load, so at most one forced manager is held
+/// while another loads — the peak a one-deep slot evicting after the load already had.
+@Suite("Diarizer forced-count managers (#265 review)")
+struct ForcedManagerSlotsTests {
+
+    @Test("N+1 then N, again and again: two loads, then none")
+    func aRepeatedRedetectLoadsNothingTheSecondTime() {
+        var slots = ForcedManagerSlots()
+        #expect(slots.makeRoom(for: 2) == [])
+        slots.loaded(2)
+        #expect(slots.makeRoom(for: 1) == [])
+        slots.loaded(1)
+        // The second re-detect finds both.
+        #expect(slots.held == [2, 1])
+        slots.used(2)
+        slots.used(1)
+        #expect(slots.held == [2, 1])
+    }
+
+    @Test("a third count evicts the least recently used, before it loads")
+    func aThirdCountEvictsTheOldestBeforeLoading() {
+        var slots = ForcedManagerSlots()
+        slots.loaded(2)
+        slots.loaded(1)
+        slots.used(2)
+        // 1 is the least recently used: dropped before 3 loads, so only 2 is held during the load.
+        #expect(slots.makeRoom(for: 3) == [1])
+        #expect(slots.held == [2])
+        slots.loaded(3)
+        #expect(slots.held == [2, 3])
+    }
+
+    @Test("never more than one forced manager held while another loads, never more than two after")
+    func theBoundHolds() {
+        var slots = ForcedManagerSlots()
+        for count in [1, 2, 3, 4, 2, 5, 5, 1, 6, 7, 3] {
+            if slots.held.contains(count) {
+                slots.used(count)
+            } else {
+                _ = slots.makeRoom(for: count)
+                #expect(slots.held.count <= ForcedManagerSlots.capacity - 1)
+                slots.loaded(count)
+            }
+            #expect(slots.held.count <= ForcedManagerSlots.capacity)
+            #expect(slots.held.last == count)
+        }
+    }
+}
