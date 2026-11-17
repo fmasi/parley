@@ -1975,6 +1975,36 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(speakers(found(right, in: try read(t).segments)) == ["Local Speaker 1"])
     }
 
+    /// A wider pass that fails (not a cancel) is not the re-detect failing: the stated count's pass is
+    /// what re-detect always ran.
+    @Test("a wider pass that throws falls back to the stated count")
+    func aFailingWiderPassFallsBack() async throws {
+        final class FailsWide: DiarizationProvider, @unchecked Sendable {
+            struct Boom: Error {}
+            let lock = NSLock()
+            var counts: [Int?] = []
+            let result: DiarizationResult
+            init(_ result: DiarizationResult) { self.result = result }
+            func answer(_ n: Int?) throws -> DiarizationResult {
+                lock.withLock { counts.append(n) }
+                if n == 2 { throw Boom() }
+                return result
+            }
+            func diarize(audioPath: URL, numSpeakers: Int?) async throws -> DiarizationResult { try answer(numSpeakers) }
+            func diarize(audio: [Float], numSpeakers: Int?, progress: (@Sendable (Int, Int) -> Void)?) async throws -> DiarizationResult { try answer(numSpeakers) }
+        }
+        let voices = TwoVoices()
+        let before = voices.own.map { Self.segment($0, "Local Speaker 1", "local") }
+        let (t, cleanup) = try makeRecording(segments: before); defer { cleanup() }
+        let diarizer = FailsWide(DiarizationResult(segments: Self.turns(voices.own, "S1"), speakerDatabase: ["S1": [1, 0, 0]]))
+
+        let outcome = try await TranscriptRediarizer.rediarize(transcript: t, source: "local", speakerCount: 1, diarizer: diarizer)
+
+        #expect(diarizer.lock.withLock { diarizer.counts } == [2, 1])
+        #expect(outcome.speakerCount == 1)
+        #expect(speakers(found(voices.own, in: try read(t).segments)) == ["Local Speaker 1"])
+    }
+
     final class Fractions: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [Double] = []

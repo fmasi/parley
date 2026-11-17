@@ -360,8 +360,21 @@ public enum TranscriptRediarizer {
         let raw: DiarizationResult
         var echo: EchoCheck?
         if source == "local" {
-            let wider = try await diarize(speakerCount + 1, share: 0...0.5)
-            if let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling),
+            // The wider pass is a try: if it fails (not a cancel), the stated count's pass — what
+            // re-detect always ran — still can.
+            let wider: DiarizationResult?
+            do {
+                wider = try await diarize(speakerCount + 1, share: 0...0.5)
+            } catch let cancelled as CancellationError {
+                throw cancelled
+            } catch {
+                try Task.checkCancellation()
+                Logger.transcription.error(
+                    "Re-diarize: the pass with room for \(speakerCount + 1, privacy: .public) voices failed (\(error, privacy: .private)) — diarizing at the stated \(speakerCount, privacy: .public)")
+                wider = nil
+            }
+            if let wider,
+               let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling),
                !found.clusterIDs.isEmpty {
                 // An echo VOICE: a cluster of the diarizer's own. Unattributed speech judged echo as
                 // a group is no voice this pass separated.
@@ -370,8 +383,10 @@ public enum TranscriptRediarizer {
                 raw = wider
                 echo = found
             } else {
-                Logger.transcription.info(
-                    "Re-diarize: no echo voice with room for \(speakerCount + 1, privacy: .public) voices — diarizing again at the stated \(speakerCount, privacy: .public)")
+                if wider != nil {
+                    Logger.transcription.info(
+                        "Re-diarize: no echo voice with room for \(speakerCount + 1, privacy: .public) voices — diarizing again at the stated \(speakerCount, privacy: .public)")
+                }
                 try Task.checkCancellation()
                 raw = try await diarize(speakerCount, share: 0.5...1)
                 echo = echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling)
