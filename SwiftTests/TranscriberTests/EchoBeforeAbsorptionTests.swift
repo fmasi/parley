@@ -209,17 +209,18 @@ struct EchoBeforeAbsorptionPipelineTests {
     }
 
     private func process(in dir: URL, diarizer: BleedFixture.Diarizer,
-                         micEchoCancel: MicEchoCancelSetup = .off) async throws -> ProcessedChunk {
+                         micEchoCancel: MicEchoCancelSetup = .off, config: Config = .default,
+                         engine: any TranscriptionEngine = BleedFixture.Engine()) async throws -> ProcessedChunk {
         let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
         try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
         try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
         let scratch = dir.appendingPathComponent("scratch")
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         let processor = ChunkProcessor(
-            config: .default, outputDirectory: dir,
+            config: config, outputDirectory: dir,
             sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0),
                                        engine: "fluidAudio", chunkDurationMinutes: 30, chunks: []),
-            transcriber: BleedFixture.Engine(), diarizer: diarizer, scratchDirectory: scratch, micEchoCancel: micEchoCancel)
+            transcriber: engine, diarizer: diarizer, scratchDirectory: scratch, micEchoCancel: micEchoCancel)
         await processor.processLastChunk(ChunkRotator.FinalizedChunk(
             index: 0, systemPath: sys.path, micPath: mic.path, startTime: Date(timeIntervalSince1970: 0)))
         return try #require(await processor.getSessionState().chunks.first)
@@ -298,6 +299,68 @@ struct EchoBeforeAbsorptionPipelineTests {
         let chunk = try #require(await processor.getSessionState().chunks.first)
         try expectTheBleedJudgedAsACluster(chunk, extraLocal: 1)
         #expect(local([stray], in: chunk).map(\.speaker) == ["Local Unknown"])
+    }
+
+    /// The mic hears 5 of each far line's 8 words: a match only at a text threshold of 0.5.
+    nonisolated static var heard: [BleedFixture.Line] {
+        BleedFixture.bleed.map { line in
+            BleedFixture.Line(start: line.start, end: line.end,
+                              text: (line.text.split(separator: " ").prefix(5) + ["heardx0", "heardx1", "heardx2"]).joined(separator: " "))
+        }
+    }
+
+    /// Hears the user and `heard` on the microphone, the far side on the system stream.
+    struct HeardEngine: TranscriptionEngine {
+        let name = "Heard"
+        func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+            audioSource == .microphone
+                ? (BleedFixture.own + EchoBeforeAbsorptionPipelineTests.heard).sorted { $0.start < $1.start }.map(BleedFixture.segment)
+                : BleedFixture.systemSegments
+        }
+        func isReady() -> Bool { true }
+        func prepare() async throws {}
+    }
+
+    private static func config(textThreshold: Double?) -> Config {
+        var config = Config.default
+        config.echoTextThreshold = textThreshold
+        return config
+    }
+
+    /// `echo_text_threshold` reaches the check before absorption (`ChunkProcessor` builds its
+    /// `EchoReference` from the config): at the default the small cluster is a fragment, absorbed into
+    /// the user; at 0.5 it is echo, kept apart and recorded.
+    @Test("a chunk: the configured echo_text_threshold reaches the check before absorption", arguments: [nil, 0.5] as [Double?])
+    func aChunkReadsTheConfiguredTextThreshold(textThreshold: Double?) async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let chunk = try await process(in: dir, diarizer: BleedFixture.Diarizer(),
+                                      config: Self.config(textThreshold: textThreshold), engine: HeardEngine())
+        let heardLabels = Set(local(Self.heard, in: chunk).map(\.speaker))
+        if textThreshold == nil {
+            #expect(heardLabels == ["Local Speaker 1"])
+            #expect(chunk.issues.contains(ChunkIssue(code: .clustersAbsorbed, track: "local", count: 1)))
+            #expect(!chunk.echoClusters.contains { $0.isEcho })
+        } else {
+            #expect(heardLabels == ["Local Speaker 2"])
+            #expect(!chunk.issues.contains { $0.code == .clustersAbsorbed && $0.track == "local" })
+            #expect(chunk.echoClusters.first { $0.label == "Local Speaker 2" }?.verdict == .echo)
+        }
+    }
+
+    @Test("the single-file path: the configured echo_text_threshold reaches the check before absorption", arguments: [nil, 0.5] as [Double?])
+    func theSingleFilePathReadsTheConfiguredTextThreshold(textThreshold: Double?) async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let system = dir.appendingPathComponent("m.wav"), mic = dir.appendingPathComponent("m_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: system, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        let runner = TranscriptionRunner()
+        runner.engineFactoryForTesting = { _ in (HeardEngine(), BleedFixture.Diarizer()) }
+        let result = try await runner.run(systemAudio: system, micAudio: mic, outputDirectory: dir,
+                                          config: Self.config(textThreshold: textThreshold))
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+        let segments = try #require(json["segments"] as? [[String: Any]]).filter { $0["source"] as? String == "local" }
+        let heardLabels = Set(BleedFixture.found(Self.heard, in: segments) { $0["text"] as? String ?? "" }.compactMap { $0["speaker"] as? String })
+        #expect(heardLabels == (textThreshold == nil ? ["Local Speaker 1"] : ["Local Speaker 2"]))
     }
 
     @Test("the single-file path (CLI, legacy recovery): the bleed cluster is judged before absorption too")
