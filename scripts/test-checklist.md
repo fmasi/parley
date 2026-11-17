@@ -708,10 +708,10 @@ about half of it, then Stop. `echo_meta` is the helper under "Echo cluster detec
   - If the echo voice has fewer than 5 unmarked lines it has no row at all; N-03 still applies.
 - [ ] **N-03 The count is people.**
   - PASS: under "Wrong number of speakers?", the "This side" stepper reads **1 speaker** although
-    two mic-side rows are listed, and under that row a grey caption reads "The count is people
-    only, not the echo voice. Re-detect checks for echo again and keeps an echo voice separate;
-    its matched lines stay marked as echo." "Other side" has no such caption and shows its own
-    row count.
+    two mic-side rows are listed, and under that row a grey caption reads "Set the number of
+    people on this side. Re-detect looks for the echo voice on its own and keeps it apart when it
+    finds it; its matched lines stay marked as echo." (#265) "Other side" has no such caption and
+    shows its own row count.
 - [ ] **N-04 After Re-detect.**
   - Do: leave "This side" at 1 and press Re-detect.
   - PASS: the caption under the row is replaced by the outcome, on one or two lines:
@@ -728,6 +728,108 @@ about half of it, then Stop. `echo_meta` is the helper under "Echo cluster detec
 - [ ] **N-07 Headphones: nothing.** Record 3 minutes on headphones. The completion notice is plain
       "Transcription Complete", no card has a caption, the stepper shows the row count, and there
       is no caption under "This side".
+
+## Echo before absorption, and the count is people (#249 / #265) — added 2026-11-17
+
+Both change how speakers are labelled, so they need a real speaker-bleed call. The voices are public
+podcasts or videos, never a real third party: one plays through the Mac (the other side), and a
+phone near the laptop plays a second one into the mic as a stand-in for you (or talk yourself).
+`echo_meta` is the helper under "Echo cluster detection". One more, next to it: the mic-side lines
+NOT marked as echo whose words repeat a concurrent line of the other side (more than half
+overlapping in time, more than 70 % of the words shared), with the label they carry:
+
+```zsh
+# the other side's words left visible on the mic side, by label
+leaks() { python3 - "$1" <<'PY'
+import json,re,sys
+d=json.load(open(sys.argv[1])); m=d["metadata"]
+voices={c["label"] for c in m.get("echo_clusters",[]) if c.get("track","local")=="local" and c["verdict"]=="echo"}
+words=lambda t:set(re.findall(r"\w+",t.lower()))
+flag=lambda s:s.get("echo") or s.get("filtered") or s.get("duplicate")
+remote=[s for s in d["segments"] if s["source"]=="remote" and not flag(s)]
+count={}
+for s in d["segments"]:
+  if s["source"]!="local" or flag(s): continue
+  for r in remote:
+    ov=min(s["end"],r["end"])-max(s["start"],r["start"]); short=min(s["end"]-s["start"],r["end"]-r["start"])
+    a,b=words(s["text"]),words(r["text"])
+    if short>0 and ov/short>0.5 and a and len(a&b)/len(a|b)>0.7:
+      kind="echo voice" if s["speaker"] in voices else ("unattributed" if s["speaker"].endswith("Unknown") else "PERSON")
+      count[(kind,s["speaker"])]=count.get((kind,s["speaker"]),0)+1; break
+print(count or "none")
+PY
+}
+```
+
+A "PERSON" entry in `leaks` is the failure these changes guard against: the other side's words
+under a label that stands for somebody on this side.
+
+### Live pipeline: a short bleed spell is judged before absorption (#249)
+
+- [ ] **EB-01 A bleed spell under 5 % of a chunk is its own echo cluster.**
+  - Do: default `chunk_duration_minutes` (30). Mic = built-in. Output = AirPods or headphones you
+    wear. The phone plays the "you" podcast near the laptop for the whole recording. The Mac plays
+    the other side's podcast. Around minute 8 switch the output to the laptop speakers for 45–60 s
+    of the other side talking, then back to the headphones. Stop at 16 minutes.
+  - Measure, from `echo_meta` (chunk 0 entries) and `stream.log`:
+    1. the `echo_clusters` entry with `verdict` `"echo"`: its `seconds`, `share` and
+       `matched_segments`, and the `seconds` of the local `"kept"` entry. Write down
+       `echo seconds / (echo seconds + kept seconds)`: this test is only meaningful when that
+       share is under 5 % (if it is above, the spell was too long — the old build kept it apart too);
+    2. whether `processing_issues` has a `clusters_absorbed` entry with `track` `local` for chunk 0
+       (PASS: none, unless a second, unmatched local fragment was absorbed; then its count only);
+    3. whether `stream.log` has `Judging N raw mic cluster(s) for echo before minority absorption`
+       for that chunk, and the `DiarizationCleanup: absorbed … , 1 cluster(s) judged echo left as they are` line if any;
+    4. `leaks <transcript.json>`.
+  - PASS: one `"echo"` entry for the spell; no `PERSON` line in `leaks`; the completion notice
+    says "echo marked"; the rename dialog shows the spell as a mic-side row with the echo caption.
+  - Not a failure of this change, but write it down: if `echo_meta` has only the `"kept"` entry and
+    there is no `Judging` line, the diarizer did not split the spell from the phone voice at all
+    (one blended cluster); the per-line rule then flagged what it could (`echo_segments_flagged`).
+- [ ] **EB-02 Headphones throughout: as before.** The same recording without the speaker spell.
+  - PASS: every local `echo_clusters` entry is `"kept"` with a `share` near 0; `leaks` prints
+    `none`; a `clusters_absorbed` issue, if the diarizer split off a fragment, is as it was on the
+    previous build for a comparable recording; no `Judging` line, or one followed by no echo verdict.
+- [ ] **EB-03 With mic echo cancellation on.** `cfg mic_echo_cancel on`, repeat EB-01.
+  - PASS: the chunk has a `mic_echo_cancel` record; the transcript of the cleaned mic usually has no
+    echo cluster left (write down `echo_meta` either way); `leaks` prints no `PERSON` line. In the
+    rename dialog, the spell's row (if there is one) plays the RAW mic: you hear the other side
+    through the laptop speakers in its sample. `cfg mic_echo_cancel off` afterwards.
+
+### Re-detect: the stated count is the people (#265)
+
+Setup as E-02: output = the laptop speakers, mic = built-in, 5 minutes, you (or the phone) talking
+for about half of it, in the pauses and over the other side.
+
+- [ ] **EB-04 Re-detect at 1 keeps the echo voice apart.**
+  - Do: open the rename dialog; "This side" reads 1. Press Re-detect without changing it. Note
+    the dialog's timer when it finishes.
+  - Measure: the outcome line; `stream.log`: `Re-diarize: with room for 2 voices the mic channel
+    holds 1 echo voice(s)` or `no echo voice with room for 2 voices — diarizing again at the stated 1`;
+    `echo_meta` (`speaker_count_local`, the local `"echo"` entry's label); `leaks`; and the
+    mic-side lines marked `echo: true` — read them: are they all the other side's words?
+  - PASS: "1 speaker found · 1 echo voice kept separate · …"; `speaker_count_local` is 1; the
+    echo entry's label is not yours; no `PERSON` line in `leaks`; every `echo: true` mic line is
+    the other side's words (none of yours hidden); no visible `Local Unknown` line on this side
+    (at a count of 1 they fold into you).
+- [ ] **EB-05 The case #265 was filed for: a channel the diarizer blends at 1.** Run EB-04 on a
+      transcript whose mic side showed ONE row after Stop although the speakers were on (the
+      pipeline blended the echo into you), or repeat the recording with the phone louder until
+      it does. Re-detect "This side" at 1.
+  - PASS: the log shows the `with room for 2 voices … 1 echo voice(s)` line, the dialog now shows
+    you and an echo voice, and `leaks` has no `PERSON` line. Write down `echo_segments_flagged`
+    and the `leaks` output before (from the `.json.bak`) and after.
+- [ ] **EB-06 Headphones: a clean channel is re-detected as before, at 1 and at 2.**
+  - Do: record 5 minutes with headphones (you and the phone voice both on the mic side if you
+    want two people). Re-detect "This side" at 1, note the timer; then at 2.
+  - PASS: the log shows `no echo voice with room for N+1 voices — diarizing again at the stated N`
+    each time; the rows are what the previous build gave for the same count (one row at 1; at 2
+    the diarizer's two); every `echo_clusters` entry `"kept"`. Write down the timer: a clean
+    channel costs two diarizer passes now, an echo channel one.
+- [ ] **EB-07 The progress bar never goes back.** During EB-06's re-detect at 1 the
+      "Detecting speakers…" bar fills to about half, then on to the end; it never jumps back to empty.
+- [ ] **EB-08 "Other side" is one pass.** Re-detect "Other side" at its count: `stream.log` has
+      neither `with room for` line, and the result is as on the previous build.
 
 ## Rename reaches flagged lines (#245) — added 2026-10-01
 
