@@ -376,7 +376,7 @@ The cluster numbers (0.5, 30 s, 3 words) and the per-line ones (15 dB, 0.3 s, 0.
 - Minority absorption runs before it, but on the mic stream only after the raw clusters were judged for echo (#249, Stage 6): a bleed cluster under 5% of a chunk is no longer absorbed into the user's cluster, provided it holds the 30 s a cluster needs to be judged. A shorter one is still absorbed; only the per-segment rule (3 words or more) sees it.
 - The text gates and the 3-word rule count whitespace-separated words, so they do little for a language written without spaces.
 - (b) cannot tell a repetition whose first or last word the far end also says in the line just before or after it (that word counts as carried): only (a) holds such a line back, and only with echo cancellation on, which is off by default. A full copy is held back when it starts more than 0.8 s after its source, so on an output slower than that (AirPlay, about 2 s) an echo copy of a whole line is held back too.
-- (a) needs a measure, which only echo cancellation records today. The lift needs levels only (no canceller): computing it for every dual-stream chunk is a follow-up.
+- (a) needs a measure, which only echo cancellation records today. The lift needs levels only (no canceller): computing it for every dual-stream chunk is #374.
 - Word normalisation handles English numbers only (below).
 
 ### Word normalisation (#363)
