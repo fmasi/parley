@@ -392,6 +392,8 @@ public enum TranscriptRediarizer {
                     "Re-diarize: with room for \(speakerCount + 1, privacy: .public) voices the mic channel holds \(found.clusterIDs.count, privacy: .public) echo voice(s) — kept apart, the stated \(speakerCount, privacy: .public) enforced on the rest")
                 raw = wider
                 echo = found
+                // No second pass: the phase is done.
+                onProgress?(Progress(phase: .detectingSpeakers, fraction: 1))
             } else {
                 if wider != nil {
                     Logger.transcription.info(

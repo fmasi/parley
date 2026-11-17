@@ -2032,6 +2032,22 @@ struct TranscriptRediarizerEchoGuardTests {
         #expect(outcome.echoClusters == (textThreshold == nil ? 0 : 1))
     }
 
+    /// Progress when the wider pass holds the echo voice: no second pass, and the phase ends full.
+    @Test("a re-detect that keeps the wider pass ends its progress at 1")
+    func theWiderPassEndsTheProgress() async throws {
+        let answers = Answers()
+        let (t, cleanup) = try makeRecording(segments: answers.voices.segments(own: "Local Speaker 1", bleed: "Local Speaker 1"))
+        defer { cleanup() }
+        let fractions = Fractions()
+        let diarizer = CountingDiarizer(answers.onePerson)
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: t, source: "local", speakerCount: 1, diarizer: diarizer,
+            onProgress: { if $0.phase == .detectingSpeakers, let f = $0.fraction { fractions.add(f) } })
+        #expect(diarizer.asked == [2])
+        let seen = fractions.all
+        #expect(seen == seen.sorted() && seen.last == 1, "\(seen)")
+    }
+
     final class Fractions: @unchecked Sendable {
         private let lock = NSLock()
         private var values: [Double] = []
