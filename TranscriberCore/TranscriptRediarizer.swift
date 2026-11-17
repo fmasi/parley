@@ -366,7 +366,7 @@ public enum TranscriptRediarizer {
                 // An echo VOICE: a cluster of the diarizer's own. Unattributed speech judged echo as
                 // a group is no voice this pass separated.
                 Logger.transcription.info(
-                    "Re-diarize: with room for \(speakerCount + 1, privacy: .public) voices the mic channel holds \(found.clusterIDs.count, privacy: .public) echo voice(s) — kept apart, \(speakerCount, privacy: .public) people enforced on the rest")
+                    "Re-diarize: with room for \(speakerCount + 1, privacy: .public) voices the mic channel holds \(found.clusterIDs.count, privacy: .public) echo voice(s) — kept apart, the stated \(speakerCount, privacy: .public) enforced on the rest")
                 raw = wider
                 echo = found
             } else {
