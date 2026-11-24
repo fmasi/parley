@@ -1,6 +1,10 @@
 """Fetch the first N FLEURS test utterances per language as WAV + ground-truth.json (#339).
 
-    HF_TOKEN=... python -I fetch-fleurs.py <out-dir> <parquet-cache-dir> ja_jp:50 ko_kr:50 cmn_hans_cn:50 en_us:20 ...
+Run inside a conda env, never with packages installed on the host (the report's "Reproduce" creates `cjk-bench`):
+
+    HF_TOKEN=... conda run -n cjk-bench python -I fetch-fleurs.py <out-dir> <parquet-cache-dir> ja_jp:50 ko_kr:50 ...
+
+Needs: huggingface_hub, pyarrow, soundfile, numpy.
 """
 import io, json, sys, os
 from pathlib import Path

@@ -1,6 +1,10 @@
 """Score CJKBench result files (#339): CER per engine and language, language-tag accuracy, speed and memory.
 
-    python -I score.py <ground-truth.json> <results.jsonl>...
+Run inside a conda env, never with packages installed on the host (the report's "Reproduce" creates `cjk-bench`):
+
+    conda run -n cjk-bench python -I score.py <ground-truth.json> <results.jsonl>...
+
+Needs: opencc-python-reimplemented.
 
 CER, the same for every engine: NFKC, lowercase, every Unicode punctuation/symbol and all whitespace removed, Chinese
 folded to Simplified (OpenCC t2s) on both sides, then character Levenshtein. Reported as the corpus CER (total edits /
