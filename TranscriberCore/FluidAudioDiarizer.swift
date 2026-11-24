@@ -84,6 +84,11 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     ///   and not to a `numSpeakers` hint.
     public nonisolated func makeOfflineConfig(forcedSpeakerCount: Int? = nil) -> OfflineDiarizerConfig {
         var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
+        // One speaker at every instant: SpeakerAssignment attributes ASR words by overlap, and echo dedup, the
+        // re-detect's label overlap and the speaker-count merge all read the segments as turns. FluidAudio 0.18.2
+        // changed its default to keep overlapping speech (`false`, its #1081); Parley keeps the output it was
+        // tuned and tested on. Changing it is a transcript-shaping decision, not a dependency bump (gotcha 103).
+        config.postProcessing.exclusiveSegments = true
         if let clusteringThreshold {
             config.clustering.threshold = clusteringThreshold
         }
