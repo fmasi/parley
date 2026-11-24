@@ -195,8 +195,10 @@ public enum TranscriptRenamer {
     /// (original → renamed), so re-renaming an already-renamed speaker accumulates entries and can
     /// leave a stale original → intermediate key. A reader has to resolve chains:
     /// `EchoNotice.Findings` does, to find the row of a label `echo_clusters` still holds under its
-    /// original name (#244). The other reader, `TranscriptRediarizer.channelNames`, only asks
-    /// whether a channel has any name at all.
+    /// original name (#244). The map does not keep the order of the Saves, so the end of a chain is
+    /// not always the current name (a reused or given-back name): `currentLabel` says when it can
+    /// tell (#270). `TranscriptRediarizer.channelNames` only asks whether a channel has any name at
+    /// all.
     @discardableResult
     public static func applyRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
         TranscriptWrites.exclusive(jsonPath) { applyRenamesUnlocked(mapping, jsonPath: jsonPath) }

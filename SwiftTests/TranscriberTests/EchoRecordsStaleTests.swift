@@ -475,6 +475,20 @@ import AVFoundation
         #expect((other["matched_remote"] as? [String: Double]) == ["Remote Speaker 9": 5])
     }
 
+    @Test("a re-detect of this side writes the record again, under the remote labels the lines carry now")
+    func aLocalRedetectMarksTheRecordCurrent() async throws {
+        let before = [line(10, 20, "Remote Speaker 1"), line(30, 40, "Local Speaker 1", "local")]
+        let (url, cleanup) = try makeRecording(
+            segments: before, metadata: echoRecord(remote: ["Remote Speaker 1": 60]).merging(["rediarized_channels": ["remote"]]) { $1 })
+        defer { cleanup() }
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: url, source: "local", speakerCount: 1, diarizer: Scripted(result: result([(30, 40, "A")])))
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let metadata = try #require(json["metadata"] as? [String: Any])
+        #expect(metadata[TranscriptRediarizer.matchedRemoteCurrentKey] as? Bool == true)
+        #expect(TranscriptRediarizer.matchedRemoteIsCurrent(in: metadata))
+    }
+
     @Test("a transcript without echo_clusters is re-detected as before")
     func noEchoClustersNoEchoRecordAppears() async throws {
         let before = [line(10, 20, "Remote Speaker 1"), line(30, 40, "Remote Speaker 2")]

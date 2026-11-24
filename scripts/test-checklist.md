@@ -1660,3 +1660,6 @@ voice; never a real third party. `echo_meta` is the helper of "Echo cluster dete
       side" (any count): the card names the label that now carries Alice's voice, or says "the other
       side" when the count split her; it never names a remote speaker who is someone else. In the JSON,
       `echo_clusters[].matched_remote` holds only labels that exist in the segments.
+      Then name the remote speaker "Sam" and Save; correct that row to "Tom" and name another remote
+      speaker "Sam" in one Save. PASS: the card never says the echo matched "Tom" when it matched the
+      new "Sam"; with the history ambiguous it says "the other side".
