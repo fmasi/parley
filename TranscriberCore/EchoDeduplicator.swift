@@ -115,6 +115,24 @@ public enum EchoDeduplicator {
     /// on both sides at once matches on time and text and is not an echo.
     public static let minimumWordsOutsideEchoCluster = 3
 
+    // MARK: - Who is late (#252)
+
+    /// A local cluster whose matched lines START this much earlier than the remote lines they match (the
+    /// cluster's median) is the original, and the remote holds the copy: the far end returned the user's
+    /// voice (a room system or speakerphone without echo cancellation). `echo_local_lead_margin_seconds`.
+    ///
+    /// From the issue's data, one direction only: on a real loudspeaker call the local copy started a
+    /// median of +0.08 s AFTER the remote (IQR 0.00 to 0.08 s, 80 pairs); a round trip that returns the
+    /// user's voice trails by the network delay, 0.15 s or more (0.4-0.6 s seen on AirPods, 2026-10-07).
+    /// 0.1 s sits 0.18 s from the bleed median and 0.05 s inside the shortest round trip expected. It needs
+    /// a real recording of the mirror case to confirm.
+    public static let defaultLocalLeadMarginSeconds = 0.1
+    /// The configurable margin's sane range: past a second the rule stops describing a round trip.
+    public static let localLeadMarginRange: ClosedRange<Double> = 0...1
+    /// Fewer matched lines than this give no median worth trusting: about 12 % of line pairs were placed
+    /// more than 0.2 s apart because the two channels were segmented differently (#252).
+    public static let minimumLagPairs = 3
+
     // MARK: - Per-line safeguards (#365, constants, not config keys)
 
     /// The longest loudspeaker-to-mic delay an echo copy can have: the canceller's own bound
@@ -272,12 +290,25 @@ public enum EchoDeduplicator {
         /// Per remote speaker label, the seconds of this cluster's matched segments that overlap the
         /// remote speech they repeat.
         public var matchedRemote: [String: Double]
+        /// Who is late (#252): the median, over the matched lines, of the local line's start minus the start
+        /// of the remote line it matches. Positive: the local side trails, as an echo copy does. nil without
+        /// a matched line, or in a verdict written before #252.
+        public var medianLagSeconds: Double?
+        /// How many matched lines that median is over; the rule needs `minimumLagPairs`.
+        public var lagPairs: Int?
+        /// Why the cluster or its lines were held back from the echo flag beyond the share: `reasonLocalLeads`
+        /// when its matched lines lead the remote by more than the margin. nil otherwise.
+        public var reason: String?
+
+        /// `reason`: the local side leads, so it is the original and the remote holds the copy (#252).
+        public static let reasonLocalLeads = "local_leads"
 
         public var isEcho: Bool { verdict == .echo }
 
         public init(label: String, segments: Int, matchedSegments: Int, seconds: Double, matchedSeconds: Double,
                     words: Int, matchedWords: Int, share: Double, verdict: Verdict,
-                    bestEmbeddingSimilarity: Double? = nil, matchedRemote: [String: Double] = [:]) {
+                    bestEmbeddingSimilarity: Double? = nil, matchedRemote: [String: Double] = [:],
+                    medianLagSeconds: Double? = nil, lagPairs: Int? = nil, reason: String? = nil) {
             self.label = label
             self.segments = segments
             self.matchedSegments = matchedSegments
@@ -289,6 +320,9 @@ public enum EchoDeduplicator {
             self.verdict = verdict
             self.bestEmbeddingSimilarity = bestEmbeddingSimilarity
             self.matchedRemote = matchedRemote
+            self.medianLagSeconds = medianLagSeconds
+            self.lagPairs = lagPairs
+            self.reason = reason
         }
 
         /// The same names as `metadata.echo_clusters`, so session.json and the transcript read alike.
@@ -299,6 +333,9 @@ public enum EchoDeduplicator {
             case matchedWords = "matched_words"
             case bestEmbeddingSimilarity = "embedding_similarity"
             case matchedRemote = "matched_remote"
+            case medianLagSeconds = "median_lag_seconds"
+            case lagPairs = "lag_pairs"
+            case reason
         }
 
         /// One `metadata.echo_clusters` entry. `chunk` is left out when the dedup ran over a whole
@@ -326,6 +363,9 @@ public enum EchoDeduplicator {
             if let bestEmbeddingSimilarity {
                 d["embedding_similarity"] = rounded(bestEmbeddingSimilarity, 10_000)
             }
+            if let medianLagSeconds { d["median_lag_seconds"] = rounded(medianLagSeconds, 1000) }
+            if let lagPairs { d["lag_pairs"] = lagPairs }
+            if let reason { d["reason"] = reason }
             return d
         }
     }
@@ -341,8 +381,9 @@ public enum EchoDeduplicator {
         /// flagged or not: a match of 1–2 words outside an echo cluster is matched and left unflagged.
         public let matchedLocal: Set<Int>
         /// The matches outside an echo cluster the per-line rules hold back as the user's own (#365): where
-        /// echo cancellation measured no coupling, or not shaped like an echo copy. Judged whatever the
-        /// line's length, so one or two words are listed too. A subset of `matchedLocal`, never flagged.
+        /// no coupling was measured, or not shaped like an echo copy; and every match of a cluster whose lines
+        /// lead the remote (#252). Judged whatever the line's length, so one or two words are listed too. A
+        /// subset of `matchedLocal`, never flagged.
         public let heldBack: Set<Int>
 
         public init(segments: [LabeledSegment], flaggedCount: Int, clusters: [ClusterVerdict] = [], matchedLocal: Set<Int> = [],
@@ -391,6 +432,15 @@ public enum EchoDeduplicator {
     ///   has said it). A shorter copy is placed anywhere inside it, as the recognisers cut lines differently.
     /// Neither changes a match, a share or a cluster's verdict, and neither applies in an echo cluster.
     ///
+    /// **Who is late (#252).** The original precedes its copy. Per local cluster, the median over its matched
+    /// lines of (local start - start of the remote line it matches); with `minimumLagPairs` lines or more and
+    /// a median below -`localLeadMarginSeconds`, the local side leads: it is the original and the remote
+    /// holds the copy (a far end that returns the user's voice). Such a cluster is never echo, whatever its
+    /// share, and none of its lines is flagged; the verdict records `reason: local_leads`. A cluster-level
+    /// median, not a per-line rule: line starts on the two channels differ by more than 0.2 s for about one
+    /// pair in eight. In a cluster that mixes real bleed with the mirror case the median decides for all of
+    /// its lines; a wrong call there leaves an echo line shown, never a user's line hidden.
+    ///
     /// - Parameter embeddingThreshold: DEPRECATED and ignored (`echo_embedding_threshold`). Kept for
     ///   one release so existing callers and config files keep working.
     /// - Parameter logPrefix: put before each verdict's log line, so a check whose verdicts are not
@@ -406,10 +456,13 @@ public enum EchoDeduplicator {
         embeddingThreshold: Double? = nil,
         embeddingDim: Int? = nil,
         logPrefix: String = "",
+        localLeadMarginSeconds: Double? = nil,
         coupling: AcousticCoupling = .unknown
     ) -> DeduplicationResult {
         let tThresh = temporalThreshold ?? defaultTemporalThreshold
         let xThresh = textThreshold ?? defaultTextThreshold
+        let leadMargin = localLeadMarginSeconds.flatMap { localLeadMarginRange.contains($0) ? $0 : nil }
+            ?? defaultLocalLeadMarginSeconds
 
         // An already-flagged segment (gate-filtered noise, an abutting repeat) is neither an echo
         // candidate nor evidence for one.
@@ -446,9 +499,19 @@ public enum EchoDeduplicator {
                 for (remoteLabel, overlap) in matches[i]?.overlapSeconds ?? [:] { remote[remoteLabel, default: 0] += overlap }
             }
             let share = seconds > 0 ? matchedSeconds / seconds : 0
-            let isEcho = share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
-            var flagged = 0, heldUncoupled = 0, heldTiming = 0
+            // Who is late (#252): local start minus the start of the remote speech each line matches.
+            let lags = matched.compactMap { i in matches[i].map { segments[i].start - $0.remoteStart } }.filter(\.isFinite)
+            let medianLag = lags.isEmpty ? nil : median(lags)
+            let localLeads = lags.count >= minimumLagPairs && (medianLag ?? 0) < -leadMargin
+            let isEcho = !localLeads && share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
+            var flagged = 0, heldUncoupled = 0, heldTiming = 0, heldLeading = 0
             for i in matched {
+                if localLeads {
+                    // The original: none of its lines is an echo copy.
+                    heldBack.insert(i)
+                    heldLeading += 1
+                    continue
+                }
                 if !isEcho {
                     // The per-line rules, judged for every match so the held-back ones are known whatever
                     // their length; only lines of 3 words or more can be flagged.
@@ -470,16 +533,24 @@ public enum EchoDeduplicator {
                 label: label, segments: indices.count, matchedSegments: matched.count,
                 seconds: seconds, matchedSeconds: matchedSeconds, words: words, matchedWords: matchedWords,
                 share: share, verdict: isEcho ? .echo : .kept,
-                bestEmbeddingSimilarity: similarities[dbKey], matchedRemote: remote)
+                bestEmbeddingSimilarity: similarities[dbKey], matchedRemote: remote,
+                medianLagSeconds: medianLag, lagPairs: lags.isEmpty ? nil : lags.count,
+                reason: localLeads ? ClusterVerdict.reasonLocalLeads : nil)
             clusters.append(verdict)
             // Numbers only are public; a label becomes a name once the user renames a speaker.
             Logger.transcription.info(
-                "\(logPrefix, privacy: .public)Echo cluster \(label, privacy: .private): verdict \(verdict.verdict.rawValue, privacy: .public), share \(share, format: .fixed(precision: 3), privacy: .public), matched \(matched.count, privacy: .public)/\(indices.count, privacy: .public) segments, \(matchedSeconds, format: .fixed(precision: 1), privacy: .public)/\(seconds, format: .fixed(precision: 1), privacy: .public) s, \(matchedWords, privacy: .public)/\(words, privacy: .public) words, flagged \(flagged, privacy: .public) (held back: \(heldUncoupled, privacy: .public) no coupling, \(heldTiming, privacy: .public) not an echo copy), remote speakers matched \(remote.count, privacy: .public), embedding similarity \(verdict.bestEmbeddingSimilarity ?? .nan, format: .fixed(precision: 3), privacy: .public) (evidence only)"
+                "\(logPrefix, privacy: .public)Echo cluster \(label, privacy: .private): verdict \(verdict.verdict.rawValue, privacy: .public), share \(share, format: .fixed(precision: 3), privacy: .public), matched \(matched.count, privacy: .public)/\(indices.count, privacy: .public) segments, \(matchedSeconds, format: .fixed(precision: 1), privacy: .public)/\(seconds, format: .fixed(precision: 1), privacy: .public) s, \(matchedWords, privacy: .public)/\(words, privacy: .public) words, flagged \(flagged, privacy: .public) (held back: \(heldUncoupled, privacy: .public) no coupling, \(heldTiming, privacy: .public) not an echo copy, \(heldLeading, privacy: .public) local side leads), median lag \(medianLag ?? .nan, format: .fixed(precision: 2), privacy: .public) s over \(lags.count, privacy: .public) line(s), remote speakers matched \(remote.count, privacy: .public), embedding similarity \(verdict.bestEmbeddingSimilarity ?? .nan, format: .fixed(precision: 3), privacy: .public) (evidence only)"
             )
         }
 
         return DeduplicationResult(segments: result, flaggedCount: flaggedCount, clusters: clusters,
                                    matchedLocal: Set(matches.keys), heldBack: heldBack)
+    }
+
+    /// The median of a non-empty list.
+    private static func median(_ values: [Double]) -> Double {
+        let sorted = values.sorted(), mid = sorted.count / 2
+        return sorted.count.isMultiple(of: 2) ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
     }
 
     /// A segment's length; 0 when its times are not finite or run backwards.
@@ -492,6 +563,9 @@ public enum EchoDeduplicator {
     private struct Match {
         /// Per remote label, the seconds the local segment overlaps the remote speech it repeats.
         var overlapSeconds: [String: Double]
+        /// Where the remote speech it repeats starts: the best-scoring remote line's start, or the first of the
+        /// joined window (#252).
+        var remoteStart: Double
         /// Remote speech that overlaps the local line in time (any remote segment, flagged ones included).
         var core: [LabeledSegment]
         /// Remote lines that ended within the whole echo delay before the local line starts
@@ -570,21 +644,22 @@ public enum EchoDeduplicator {
             let score = max(textSimilarity(local.text, remote.text), textContainment(local.text, remote.text))
             if score > textThreshold, score > (best?.score ?? 0) { best = (remote, score) }
         }
-        var matched: [String: Double]?
+        var matched: (overlap: [String: Double], remoteStart: Double)?
         if let best {
-            matched = [best.remote.speaker: overlapSeconds(best.remote)]
+            matched = ([best.remote.speaker: overlapSeconds(best.remote)], best.remote.start)
         } else if overlapping.count > 1 {
             let window = overlapping.sorted { $0.start < $1.start }
             if textSimilarity(local.text, window.map(\.text).joined(separator: " ")) > textThreshold {
                 var result: [String: Double] = [:]
                 for remote in window { result[remote.speaker, default: 0] += overlapSeconds(remote) }
-                matched = result
+                matched = (result, window[0].start)
             }
         }
         guard let matched else { return nil }
         let reach = maximumEchoDelaySeconds + echoTimingToleranceSeconds
         return Match(
-            overlapSeconds: matched,
+            overlapSeconds: matched.overlap,
+            remoteStart: matched.remoteStart,
             core: allRemote.filter { $0.end > local.start && $0.start < local.end },
             lead: allRemote.filter { $0.end <= local.start && $0.end >= local.start - reach },
             trail: allRemote.filter { $0.start >= local.end && $0.start <= local.end + echoTimingToleranceSeconds })

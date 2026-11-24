@@ -472,6 +472,7 @@ public final class ChunkProcessor {
                 remoteSpeakerDatabase: systemResult.speakerDatabase,
                 temporalThreshold: config.echoTemporalThreshold,
                 textThreshold: config.echoTextThreshold,
+                localLeadMarginSeconds: config.resolvedEchoLocalLeadMarginSeconds,
                 coupling: .chunk(lift: farEndLift)
             )
             allSegments = dedupResult.segments
@@ -885,7 +886,8 @@ public final class ChunkProcessor {
                     minSpeakerShare: config.resolvedDiarizationMinSpeakerShare,
                     echoReference: echoReference.map {
                         StreamLabeling.EchoReference(segments: $0, temporalThreshold: config.echoTemporalThreshold,
-                                                     textThreshold: config.echoTextThreshold)
+                                                     textThreshold: config.echoTextThreshold,
+                                                     localLeadMarginSeconds: config.resolvedEchoLocalLeadMarginSeconds)
                     }
                 )
                 labeled = result.labeled

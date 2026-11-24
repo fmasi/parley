@@ -387,6 +387,7 @@ public final class TranscriptionRunner {
                 temporalThreshold: config.echoTemporalThreshold,
                 textThreshold: config.echoTextThreshold,
                 embeddingDim: embeddingDim > 0 ? embeddingDim : nil,
+                localLeadMarginSeconds: config.resolvedEchoLocalLeadMarginSeconds,
                 coupling: EchoDeduplicator.AcousticCoupling(
                     transcriptMetadata: [EchoDeduplicator.AcousticCoupling.metadataKey: acousticCoupling ?? [:]])
             )
@@ -1353,7 +1354,8 @@ public final class TranscriptionRunner {
                     minSpeakerShare: config.resolvedDiarizationMinSpeakerShare,
                     echoReference: echoReference.map {
                         StreamLabeling.EchoReference(segments: $0, temporalThreshold: config.echoTemporalThreshold,
-                                                     textThreshold: config.echoTextThreshold)
+                                                     textThreshold: config.echoTextThreshold,
+                                                     localLeadMarginSeconds: config.resolvedEchoLocalLeadMarginSeconds)
                     }
                 )
                 labeled = result.labeled

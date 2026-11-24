@@ -46,6 +46,11 @@ public final class ConfigManager {
                 "diarization_min_speaker_share \(share, privacy: .public) exceeds the \(DiarizationCleanup.maxSensibleShare, privacy: .public) ceiling — at that level a real participant is absorbed, not a fragment. Using the \(DiarizationCleanup.defaultMinShare, privacy: .public) default instead."
             )
         }
+        if let margin = config.echoLocalLeadMarginSeconds, !EchoDeduplicator.localLeadMarginRange.contains(margin) {
+            Logger.config.warning(
+                "echo_local_lead_margin_seconds \(margin, privacy: .public) is outside \(EchoDeduplicator.localLeadMarginRange.lowerBound, privacy: .public)-\(EchoDeduplicator.localLeadMarginRange.upperBound, privacy: .public) s. Using the \(EchoDeduplicator.defaultLocalLeadMarginSeconds, privacy: .public) s default instead."
+            )
+        }
         Logger.config.info("Config loaded — format: \(config.outputFormat, privacy: .public), engine: \(config.engine.rawValue, privacy: .public)")
         return config
     }

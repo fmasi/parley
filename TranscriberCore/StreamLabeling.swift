@@ -18,6 +18,8 @@ enum StreamLabeling {
         /// `echo_temporal_threshold` / `echo_text_threshold`, as the chunk's echo dedup is given them.
         let temporalThreshold: Double?
         let textThreshold: Double?
+        /// `echo_local_lead_margin_seconds` (#252): a raw cluster that leads the other channel is no echo.
+        var localLeadMarginSeconds: Double? = nil
     }
 
     /// Label transcript segments against a **successful** diarization result: absorb minority
@@ -110,7 +112,8 @@ enum StreamLabeling {
             remoteSpeakerDatabase: [:],
             temporalThreshold: reference.temporalThreshold,
             textThreshold: reference.textThreshold,
-            logPrefix: "Pre-absorption check (not the record): "
+            logPrefix: "Pre-absorption check (not the record): ",
+            localLeadMarginSeconds: reference.localLeadMarginSeconds
         ).clusters
         let echoLabels = Set(verdicts.filter(\.isEcho).map(\.label))
         // "Unknown" (speech no turn covers) can be judged echo too; it is no cluster to keep.

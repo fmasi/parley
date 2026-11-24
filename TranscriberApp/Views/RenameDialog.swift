@@ -380,6 +380,7 @@ struct RenameDialog: View {
                     // The echo check reads the thresholds the live pipeline reads (#265 review).
                     echoTemporalThreshold: ConfigManager.shared.config.echoTemporalThreshold,
                     echoTextThreshold: ConfigManager.shared.config.echoTextThreshold,
+                    echoLocalLeadMarginSeconds: ConfigManager.shared.config.resolvedEchoLocalLeadMarginSeconds,
                     // Fires from off-main work (chunk decode loop, the diarizer's own background
                     // progress callback) — hop back to the main actor per update rather than
                     // requiring the whole signature be @MainActor, which the diarizer isn't.

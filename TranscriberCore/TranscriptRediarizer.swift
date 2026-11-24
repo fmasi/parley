@@ -227,8 +227,8 @@ public enum TranscriptRediarizer {
     /// result.
     ///
     /// The echo check reads `echo_temporal_threshold` / `echo_text_threshold` as the live pipeline does:
-    /// the caller passes the configured values (`echoTemporalThreshold`, `echoTextThreshold`; nil is
-    /// `EchoDeduplicator`'s default).
+    /// the caller passes the configured values (`echoTemporalThreshold`, `echoTextThreshold`, and
+    /// `echoLocalLeadMarginSeconds` for who is late, #252; nil is `EchoDeduplicator`'s default).
     ///
     /// **A mic channel that was echo-cancelled is cancelled again (#342).** The pipeline diarized a
     /// cleaned copy of the mic; diarizing the raw one here would find the echo voice again and move
@@ -244,11 +244,13 @@ public enum TranscriptRediarizer {
         echoCanceller: (any MicEchoSampleCancelling)? = LocalVQEMicEchoCanceller.bundled(),
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
+        echoLocalLeadMarginSeconds: Double? = nil,
         onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> Outcome {
         try await rediarize(transcript: url, source: source, speakerCount: speakerCount, diarizer: diarizer,
                             scratchDirectory: scratchDirectory, echoCanceller: echoCanceller,
                             echoTemporalThreshold: echoTemporalThreshold, echoTextThreshold: echoTextThreshold,
+                            echoLocalLeadMarginSeconds: echoLocalLeadMarginSeconds,
                             onProgress: onProgress, rawLabeling: label)
     }
 
@@ -268,6 +270,7 @@ public enum TranscriptRediarizer {
         echoCanceller: (any MicEchoSampleCancelling)? = nil,
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
+        echoLocalLeadMarginSeconds: Double? = nil,
         onProgress: (@Sendable (Progress) -> Void)? = nil,
         rawLabeling: Labeling
     ) async throws -> Outcome {
@@ -368,8 +371,8 @@ public enum TranscriptRediarizer {
         let candidates = relabelCandidates(in: rawSegments, source: source)
         let raw: DiarizationResult
         var echo: EchoCheck?
-        let thresholds = (temporal: echoTemporalThreshold, text: echoTextThreshold)
-        // The chunks' echo-cancellation measures (#365): every echo check here judges by the same per-line
+        let thresholds = (temporal: echoTemporalThreshold, text: echoTextThreshold, lead: echoLocalLeadMarginSeconds)
+        // The chunks' far-end lift (#365, #374): every echo check here judges by the same per-line
         // rules as the pipeline, the wider pass and the stated count's alike.
         let coupling = EchoDeduplicator.AcousticCoupling(transcriptMetadata: metadata)
         if source == "local" {
@@ -680,7 +683,7 @@ public enum TranscriptRediarizer {
     /// without it — a relabel must never lose or misplace words.
     private static func echoCheck(
         on candidates: [Candidate], raw: DiarizationResult, transcript: [[String: Any]], labeling: Labeling,
-        thresholds: (temporal: Double?, text: Double?), coupling: EchoDeduplicator.AcousticCoupling
+        thresholds: (temporal: Double?, text: Double?, lead: Double?), coupling: EchoDeduplicator.AcousticCoupling
     ) -> EchoCheck? {
         var (local, speakerDatabase) = labeling(candidates.map(\.segment), raw)
         guard local.count == candidates.count else {
@@ -702,10 +705,11 @@ public enum TranscriptRediarizer {
         }
         // The raw clusters' embeddings are passed as evidence. The transcript holds none for the
         // other channel, so no voice similarity is recorded; it decides nothing either way.
-        // The chunks' echo-cancellation measures (#365): the same per-line rules as the pipeline.
+        // The chunks' far-end lift (#365, #374) and who is late (#252): the same per-line rules as the pipeline.
         let result = EchoDeduplicator.deduplicate(
             segments: local + remote, localSpeakerDatabase: speakerDatabase, remoteSpeakerDatabase: [:],
-            temporalThreshold: thresholds.temporal, textThreshold: thresholds.text, coupling: coupling)
+            temporalThreshold: thresholds.temporal, textThreshold: thresholds.text,
+            localLeadMarginSeconds: thresholds.lead, coupling: coupling)
         let echoLabels = Set(result.clusters.filter(\.isEcho).map(\.label))
         let clusterIDs = SpeakerAssignment.buildSpeakerMap(from: raw.segments)
             .filter { echoLabels.contains(labelPrefix(for: "local") + $0.value) }.keys
