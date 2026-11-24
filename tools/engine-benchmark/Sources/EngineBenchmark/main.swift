@@ -251,7 +251,8 @@ func benchmarkFluidAudio(audioPath: URL, audioDuration: Double) async -> Benchma
         try await manager.loadModels(models)
 
         print("  Transcribing...")
-        let result = try await manager.transcribe(audioPath, source: .system)
+        var decoderState = try TdtDecoderState()  // FluidAudio 0.14+: caller owns decoder state, as in the app
+        let result = try await manager.transcribe(audioPath, decoderState: &decoderState)
 
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
@@ -1134,7 +1135,8 @@ func runBatchBenchmark(
             print("  FluidAudio...")
             let start = ContinuousClock.now
             do {
-                let result = try await mgr.transcribe(audioFile, source: .system)
+                var decoderState = try TdtDecoderState()  // FluidAudio 0.14+: caller owns decoder state, as in the app
+                let result = try await mgr.transcribe(audioFile, decoderState: &decoderState)
                 let elapsed = ContinuousClock.now - start
                 let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
                 fileResults.append(BenchmarkResult(
