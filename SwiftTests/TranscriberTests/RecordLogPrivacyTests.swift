@@ -59,6 +59,9 @@ import Testing
         Allowed(file: "TranscriptionRunner.swift",
                 line: #"Logger.state.error("Capture gap (\(gap.reason, privacy: .public), \(gap.seconds, privacy: .public)s) not recorded: no chunk pipeline is running")"#,
                 reason: "CaptureGap.reason: an app constant (\"sleep\", \"app relaunch\"), never a name or a path (L review 155)"),
+        Allowed(file: "SpeakerAnalysisCache.swift",
+                line: #"Logger.transcription.info("Re-detect: speaker analysis released (\(reason.rawValue, privacy: .public))")"#,
+                reason: "ReleaseReason: an app constant (\"a recording started\", \"memory pressure\"), never a name or a path (#341)"),
         // App sources (L review 95): enum values, no path, no free text.
         Allowed(file: "AppTerminationDelegate.swift",
                 line: #"Logger.state.info("Termination (\(String(describing: kind), privacy: .public)) with work in flight — stopping the helper first, bounded")"#,
