@@ -90,6 +90,19 @@ Benchmarks FluidAudio's speaker diarization (pyannote + WeSpeaker + VBx):
 swift run --package-path tools/engine-benchmark EngineBenchmark <meeting.wav> --diarize
 ```
 
+### ASR model comparison (v3 `.int8` / `.int8V2` / Parakeet Ultra)
+
+`AsrModelBench` runs one FluidAudio model configuration per process (`--config v3-int8|v3-int8v2|ultra`)
+along the app's own transcription path. `run-asr-model-bench.sh` fetches the data (FLEURS en/es/fr/pt,
+AMI ES2004a and ES2010c), runs every configuration under `/usr/bin/time -l` and prints WER, word diffs,
+RTFx, load time and peak footprint. Use `--fleurs-full` for the whole FLEURS test split, and
+`--timing-only [--repeat N]` to re-measure speed on an idle Mac. Report:
+[docs/benchmarks/2026-11-24-asr-v3-int8v2-ultra.md](../../docs/benchmarks/2026-11-24-asr-v3-int8v2-ultra.md).
+
+```bash
+bash tools/engine-benchmark/run-asr-model-bench.sh --timing-only --repeat 3
+```
+
 ## Metrics
 
 | Metric | Description |
