@@ -82,6 +82,9 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     ///   two people on one mic (2026-09-02) the unbounded default produced ONE speaker while
     ///   `maxSpeakers` of 2/3/4 produced exactly 2/3/4. That is why a user's answer is routed here
     ///   and not to a `numSpeakers` hint.
+    /// Segmentation windows per Core ML call. Fixed, not a config key: it changes memory only, never the output.
+    public static let segmentationBatchSize = 8
+
     public nonisolated func makeOfflineConfig(forcedSpeakerCount: Int? = nil) -> OfflineDiarizerConfig {
         var config = OfflineDiarizerConfig(embeddingExcludeOverlap: excludeOverlap)
         // One speaker at every instant: SpeakerAssignment attributes ASR words by overlap, and echo dedup, the
@@ -89,6 +92,10 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         // changed its default to keep overlapping speech (`false`, its #1081); Parley keeps the output it was
         // tuned and tested on. Changing it is a transcript-shaping decision, not a dependency bump (gotcha 103).
         config.postProcessing.exclusiveSegments = true
+        // 8 segmentation windows per model call instead of FluidAudio's 32: bit-identical segments, labels and
+        // embeddings (AMI ES2004a and a 30-min file, GPU and Neural Engine) at about 300 MB less peak footprint,
+        // in about the same time (gotcha 104, docs/parameters.md).
+        config.segmentation.batchSize = Self.segmentationBatchSize
         if let clusteringThreshold {
             config.clustering.threshold = clusteringThreshold
         }

@@ -44,7 +44,7 @@
       "minGapDurationSeconds": 0.1
     },
     "segmentation": {
-      "batchSize": 32,
+      "batchSize": 8,
       "minDurationOff": 0.0,
       "minDurationOn": 0.0,
       "sampleRate": 16000,
