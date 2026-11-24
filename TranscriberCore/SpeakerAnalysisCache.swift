@@ -9,7 +9,7 @@ import os
 /// One per rename dialog, closed when the dialog closes (`close`). It holds ONE analysis: a channel
 /// or a recording other than the one held releases the held analysis before the new one is decoded
 /// (`lookup`), so a long call's audio and embeddings are never in memory twice — on the 16 GB M1 Air
-/// an hour of channel audio is about 230 MB of samples (`PreparedSpeakerAnalysis`).
+/// an hour of channel audio is about 0.36 GB held (`PreparedSpeakerAnalysis`).
 ///
 /// In memory only, never on disk: an analysis never outlives the process, so a FluidAudio update can
 /// never be served one its predecessor made.

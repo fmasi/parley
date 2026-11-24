@@ -67,8 +67,9 @@ public enum DiarizerThrow {
 /// and is cheap next to it.
 ///
 /// Opaque: only the provider that made it can cluster it (FluidAudio's `PreparedDiarization` inside).
-/// It holds the channel's whole decoded audio (16 kHz mono Float, about 230 MB an hour) — the
-/// clustering re-reads short spans of it — plus the embeddings and the segmentation scores.
+/// It holds the channel's whole decoded audio (16 kHz mono Float, about 220 MB an hour) — the
+/// clustering re-reads short spans of it — plus the embeddings and the segmentation scores: measured,
+/// 120 MB more for 52.5 minutes (1,657 embeddings), about 0.36 GB an hour in all.
 public struct PreparedSpeakerAnalysis: Sendable {
     /// The provider's own prepared value.
     let payload: any Sendable

@@ -1654,3 +1654,31 @@ voice; never a real third party. `echo_meta` is the helper of "Echo cluster dete
 - [ ] **EL-06 Another language is untouched.** With a French or German podcast through the speakers (mic
       echo cancel off), 2 minutes: the echo lines are flagged as before (compare with E-01's numbers), and a
       line of your own in that language over it is not.
+
+## Re-detect reuses the speaker analysis (#341) — added 2026-11-24
+
+On the M1 Air (the 16 GB target) if you have it, else this Mac. Use a recording of 45 minutes or more
+with speech on "This side" (a public podcast on the remote side, never a real third party). Keep
+Activity Monitor's Memory column on Parley open, and `log stream --predicate 'subsystem ==
+"eu.fmasi.parley"' --level info | grep -i "speaker analysis\|Re-detect"` in a terminal.
+
+- [ ] **RA-01 The first Re-detect shows its progress.** Open Rename Speakers…, set "This side" to 2,
+      press Re-detect. PASS: the row reads "Splitting audio…" with a bar, then "Detecting
+      speakers…" with a bar that fills smoothly (no stalls, the dialog stays responsive: scroll it,
+      type in a name field), then "Regrouping voices…", then the rows rebuild. The log has one
+      "speaker analysis prepared" and one "speaker analysis kept for the dialog". Note the time the
+      timer showed.
+- [ ] **RA-02 The second Re-detect only regroups.** Set "This side" to 3, press Re-detect. PASS: no
+      "Splitting audio…" or "Detecting speakers…", only "Regrouping voices…"; it finishes in a few
+      seconds (note the time against RA-01's); the log says "reusing the dialog's speaker analysis".
+      Then back to 2: the rows are the ones RA-01 gave (same rows, same samples).
+- [ ] **RA-03 The other channel replaces it.** Re-detect "Other side" at its count. PASS: it splits
+      and detects again (a full pass), and the log has "speaker analysis released" BEFORE that
+      pass's "prepared". Parley's memory never shows two analyses' worth (about 0.36 GB per hour of
+      audio) above what RA-01 left.
+- [ ] **RA-04 Closing releases it.** Close the dialog (Cancel or the close button). PASS: the log
+      says "speaker analysis released"; Parley's memory drops back by about the analysis' size.
+      Reopen the dialog and re-detect: a full pass again (nothing outlives the dialog).
+- [ ] **RA-05 Cancel mid-analysis.** Start a Re-detect, press the row's Cancel during "Detecting
+      speakers…", then close the dialog. PASS: nothing rewritten, and the log ends with the
+      analysis released (or never kept), not "kept for the dialog" after the close.
