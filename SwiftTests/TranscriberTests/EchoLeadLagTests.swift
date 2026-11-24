@@ -82,26 +82,116 @@ enum MirrorFixture {
     /// Outside an echo cluster: the user repeats lines the far end then plays back 0.2 s late — inside the
     /// per-line rule's 0.3 s timing tolerance, so only the cluster's median keeps them.
     @Test func theUsersLinesInAKeptClusterAreNotFlaggedWhenTheyLead() throws {
-        let segments = F.pairs([-0.2, -0.2, -0.2]) + F.own(20)
+        let segments = F.pairs(Array(repeating: -0.2, count: 5)) + F.own(20)
         let result = F.dedup(segments)
         let verdict = try #require(result.clusters.first)
         #expect(verdict.verdict == .kept && verdict.reason == EchoDeduplicator.ClusterVerdict.reasonLocalLeads)
         #expect(result.flaggedCount == 0)
-        #expect(result.heldBack.count == 3)
+        #expect(result.heldBack.count == 5)
 
         // The same lines with a wider margin: the per-line rule flags them, as before #252.
         let wider = F.dedup(segments, margin: 0.25)
-        #expect(wider.flaggedCount == 3)
+        #expect(wider.flaggedCount == 5)
         #expect(wider.clusters.first?.reason == nil)
         #expect(abs((wider.clusters.first?.medianLagSeconds ?? 0) + 0.2) < 1e-9, "the median is recorded either way")
     }
 
-    /// Fewer than `minimumLagPairs` matched lines give no median worth trusting: the per-line rules decide.
-    @Test func fewerThanThreeLinesDoNotDecide() throws {
-        let result = F.dedup(F.pairs([-0.2, -0.2]) + F.own(20))
+    /// Fewer than `minimumLagPairs` (5) timed lines give no median worth trusting: the per-line rules decide,
+    /// even when every one of them leads.
+    @Test func fewerThanFiveTimedLinesDoNotDecide() throws {
+        for count in 3...4 {
+            let result = F.dedup(F.pairs(Array(repeating: -0.2, count: count)) + F.own(20))
+            let verdict = try #require(result.clusters.first)
+            #expect(verdict.lagPairs == count && verdict.reason == nil)
+            #expect(result.flaggedCount == count)
+        }
+    }
+
+    /// The review's edge: a bleed cluster of few timed pairs, two of them placed early. 3 to 5 pairs with 2
+    /// early never overturn it; neither do 3 of 5 early (the median leads, but not two thirds of the pairs).
+    @Test func twoEarlyPairsNeverOverturnABleedCluster() throws {
+        // Early by 0.2 s: inside the per-line rule's 0.3 s tolerance, so only who is late could unflag them.
+        for lags in [[-0.2, -0.2, 0.08], [-0.2, -0.2, 0.08, 0.08], [-0.2, -0.2, 0.08, 0.08, 0.08],
+                     [-0.2, -0.2, -0.2, 0.08, 0.08]] {
+            let result = F.dedup(F.pairs(lags))
+            let verdict = try #require(result.clusters.first)
+            #expect(verdict.reason == nil, "\(lags)")
+            #expect(verdict.verdict == (verdict.seconds >= 30 ? .echo : .kept), "\(lags)")
+            #expect(result.flaggedCount == lags.count, "\(lags): every bleed line flagged")
+        }
+    }
+
+    /// The review's scenario: 60 matched bleed lines, of which only a few are near-identical and timed, all
+    /// early. Too few of the matches are timed to judge the cluster: it stays echo, every line flagged.
+    @Test func aFewTimedPairsDoNotJudgeAClusterOfManyMatches() throws {
+        var segments: [LabeledSegment] = []
+        for i in 0..<60 {
+            let start = Double(i) * 20, text = F.words("b\(i)", 12)
+            segments.append(F.remote(start, start + 10, text))
+            if i < 6 {
+                segments.append(F.local(start - 0.4, start + 9.6, text))   // near-identical, early
+            } else {
+                // An excerpt of it (containment): matched, not timed.
+                segments.append(F.local(start + 0.1, start + 4.1, text.split(separator: " ").prefix(4).joined(separator: " ")))
+            }
+        }
+        let result = F.dedup(segments)
         let verdict = try #require(result.clusters.first)
-        #expect(verdict.lagPairs == 2 && verdict.reason == nil)
+        #expect(verdict.matchedSegments == 60 && verdict.lagPairs == 6)
+        #expect(verdict.reason == nil && verdict.verdict == .echo)
+        #expect(result.flaggedCount == 60)
+    }
+
+    /// When the rule holds, a line whose own lag clearly trails is still judged by the per-line rules: here
+    /// flagged, as a copy can be.
+    @Test func aTrailingLineInALeadingClusterIsStillJudged() throws {
+        let result = F.dedup(F.pairs([-0.2, -0.2, -0.2, -0.2, 0.3, 0.3]) + F.own(20))
+        let verdict = try #require(result.clusters.first)
+        #expect(verdict.reason == EchoDeduplicator.ClusterVerdict.reasonLocalLeads)
         #expect(result.flaggedCount == 2)
+        #expect(result.heldBack.count == 4)
+    }
+
+    /// Over several chunks (re-detect, the single-file path), who is late is judged per chunk: a mirror
+    /// episode in one chunk is not drowned by real bleed folded into the same cluster in the others.
+    @Test func whoIsLateIsJudgedPerChunk() throws {
+        var segments: [LabeledSegment] = []
+        for chunk in 0..<3 {
+            for i in 0..<6 {
+                let start = Double(chunk) * 600 + 5 + Double(i) * 40, text = F.words("k\(chunk)p\(i)", 6)
+                let lag = chunk == 1 ? -0.2 : 0.08   // chunk 1: the far end returns the user's voice
+                segments.append(F.remote(start, start + 8, text))
+                segments.append(F.local(start + lag, start + 8 + lag, text))
+                segments.append(F.local(start + 10, start + 30, F.words("own\(chunk)x\(i)", 10)))
+            }
+        }
+        let whole = F.dedup(segments)
+        #expect(whole.flaggedCount == 18, "judged as one, the 6 leading lines are 1/3 of 18: no lead")
+        let perChunk = EchoDeduplicator.deduplicate(
+            segments: segments.sorted { $0.start < $1.start }, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:],
+            chunkStarts: [600, 1200])
+        #expect(perChunk.flaggedCount == 12)
+        #expect(perChunk.clusters.first?.reason == EchoDeduplicator.ClusterVerdict.reasonLocalLeads)
+        let chunk1 = Set(perChunk.segments.indices.filter {
+            perChunk.segments[$0].source == "local" && (600..<1200).contains(perChunk.segments[$0].start)
+        })
+        #expect(perChunk.segments.indices.filter { chunk1.contains($0) && perChunk.segments[$0].echo }.isEmpty)
+    }
+
+    /// Re-detect finds the chunks in the transcript: `acoustic_coupling.per_chunk`, else the chunk archives'
+    /// `chunk_offsets`; none for a merged or single file.
+    @Test func reDetectFindsTheChunks() {
+        let archives = AudioLayout.chunkedArchives([URL(fileURLWithPath: "/x/a-0.m4a"), URL(fileURLWithPath: "/x/a-1.m4a"),
+                                                    URL(fileURLWithPath: "/x/a-2.m4a")])
+        let measured: [String: Any] = ["acoustic_coupling": ["per_chunk": [["start": 1200.0], ["start": 0.0], ["start": 600.0]]]]
+        #expect(TranscriptRediarizer.chunkStarts(metadata: measured, layout: .unavailable) == [600, 1200])
+        #expect(TranscriptRediarizer.chunkStarts(metadata: ["chunk_offsets": [0.0, 610.0, 1220.0]], layout: archives) == [610, 1220])
+        #expect(TranscriptRediarizer.chunkStarts(metadata: ["chunk_offsets": [0.0, 610.0]], layout: archives) == [], "counts differ")
+        #expect(TranscriptRediarizer.chunkStarts(metadata: ["chunk_offsets": [0.0, 610.0, 1220.0]],
+                                                 layout: .legacyDualStream(remote: nil, local: nil)) == [])
+        #expect(TranscriptRediarizer.chunkStarts(metadata: ["chunk_offsets": [0.0, 610.0, 500.0]], layout: archives) == [610],
+                "a value that goes back is dropped")
+        #expect(TranscriptRediarizer.chunkStarts(metadata: [:], layout: archives) == [])
     }
 
     /// Only near-identical pairs are timed, as the issue's data was: a short excerpt of a longer remote line
@@ -292,6 +382,49 @@ private struct MirrorEngine: TranscriptionEngine {
         }
         #expect(absorbed(margin: 0.1) == 1, "the user's own fragment, absorbed")
         #expect(absorbed(margin: 1.0) == 0, "judged echo by share alone, kept apart")
+    }
+
+    /// Re-detect judges who is late per chunk too: a mirror episode in the middle chunk of three keeps the
+    /// user's lines there, while the bleed folded into the user's cluster in the other two is flagged.
+    @Test func reDetectJudgesAMirrorEpisodePerChunk() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        let files = [dir.appendingPathComponent("call-0_mic.wav"), dir.appendingPathComponent("call-1.wav")]
+        for file in files {
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16000)!
+            buffer.frameLength = 16000
+            try AVAudioFile(forWriting: file, settings: format.settings).write(from: buffer)
+        }
+        var lines: [LabeledSegment] = []
+        for chunk in 0..<3 {
+            for i in 0..<6 {
+                let start = Double(chunk) * 600 + 5 + Double(i) * 40, text = MirrorFixture.words("k\(chunk)p\(i)", 6)
+                let lag = chunk == 1 ? -0.2 : 0.08
+                lines.append(MirrorFixture.remote(start, start + 8, text))
+                lines.append(MirrorFixture.local(start + lag, start + 8 + lag, text))
+                lines.append(MirrorFixture.local(start + 10, start + 30, MirrorFixture.words("own\(chunk)x\(i)", 10)))
+            }
+        }
+        lines.sort { $0.start < $1.start }
+        let segments: [[String: Any]] = lines.map {
+            ["start": $0.start, "end": $0.end, "speaker": $0.speaker, "source": $0.source, "text": $0.text, "confidence": 0.9]
+        }
+        let perChunk: [[String: Any]] = [0.0, 600.0, 1200.0].enumerated().map { ["chunk": $0.offset, "start": $0.element, "seconds": 600.0] }
+        let transcript = dir.appendingPathComponent("t.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["audio_paths": files.map(\.path), "chunk_durations": [1.0, 1.0],
+                         "acoustic_coupling": ["per_chunk": perChunk]],
+            "segments": segments,
+        ]).write(to: transcript)
+        let diarization = DiarizationResult(
+            segments: lines.filter { $0.source == "local" }
+                .map { DiarizedSegment(start: $0.start, end: $0.end, speaker: "S1", qualityScore: 0.9) },
+            speakerDatabase: ["S1": [1, 0, 0]])
+        let outcome = try await TranscriptRediarizer.rediarize(
+            transcript: transcript, source: "local", speakerCount: 1,
+            diarizer: EchoLineMatchingTests.ScriptedDiarizer(result: diarization),
+            echoCanceller: nil, rawLabeling: TranscriptRediarizer.label)
+        #expect(outcome.echoFlagged == 12)
     }
 
     /// Re-detect judges by the same rule, with the margin the dialog passes.

@@ -389,7 +389,9 @@ public final class TranscriptionRunner {
                 embeddingDim: embeddingDim > 0 ? embeddingDim : nil,
                 localLeadMarginSeconds: config.resolvedEchoLocalLeadMarginSeconds,
                 coupling: EchoDeduplicator.AcousticCoupling(
-                    transcriptMetadata: [EchoDeduplicator.AcousticCoupling.metadataKey: acousticCoupling ?? [:]])
+                    transcriptMetadata: [EchoDeduplicator.AcousticCoupling.metadataKey: acousticCoupling ?? [:]]),
+                // Who is late, per recovery segment as the chunk path judges per chunk (#252 review).
+                chunkStarts: Array(segmentOffsets.dropFirst())
             )
             allSegments = dedupResult.segments
             echoFlagged = dedupResult.flaggedCount
@@ -966,17 +968,19 @@ public final class TranscriptionRunner {
         })
     }
 
-    /// One recovery segment's far-end lift (#374): the canceller's own measure when it ran, else from levels
-    /// alone; nil without audio on both sides or when a read fails (unknown, judged as before #365).
+    /// One recovery segment's far-end lift (#374), per window from the raw mic's levels whether or not
+    /// cancellation ran; the canceller's whole-chunk measure only when the levels could not be read. nil
+    /// without frames on both sides or when nothing could be read (unknown, judged as before #365).
     nonisolated static func farEndLift(cancelled: MicEchoCancelRecord?, micURL: URL, systemURL: URL,
                                        qos: DispatchQoS.QoSClass) async -> FarEndLiftRecord? {
-        if let cancelled { return FarEndLiftRecord(cancelled) }
-        guard ChunkProcessor.hasAudio(micURL), ChunkProcessor.hasAudio(systemURL) else { return nil }
+        guard ChunkProcessor.hasAudioFrames(micURL), ChunkProcessor.hasAudioFrames(systemURL) else {
+            return cancelled.map(FarEndLiftRecord.init)
+        }
         do {
             return try await ChunkProcessor.offThePool(qos: qos) { try FarEndLift.measure(micURL: micURL, systemURL: systemURL) }
         } catch {
-            Logger.transcription.error("The far-end lift could not be measured, echo dedup treats it as unknown: \(ChunkProcessor.echoCancelFailureDetail(error), privacy: .private)")
-            return nil
+            Logger.transcription.error("The far-end lift could not be measured from levels: \(ChunkProcessor.echoCancelFailureDetail(error), privacy: .private)")
+            return cancelled.map(FarEndLiftRecord.init)
         }
     }
 

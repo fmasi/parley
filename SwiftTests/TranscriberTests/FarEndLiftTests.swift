@@ -48,6 +48,35 @@ enum LiftFixtures {
         return noise(i) + echo
     }
 
+    /// A Float32 WAV at `rate` with `channels` (each the same), written a second at a time; `sample(t)` gives
+    /// the value at `t` seconds.
+    static func write(_ url: URL, seconds: Double, rate: Int, channels: Int = 1, at sample: (Double) -> Float) throws {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: Double(rate),
+                                   channels: AVAudioChannelCount(channels), interleaved: false)!
+        let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let total = Int(seconds * Double(rate))
+        var offset = 0
+        while offset < total {
+            let n = min(rate, total - offset)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(n))!
+            buffer.frameLength = AVAudioFrameCount(n)
+            for k in 0..<n {
+                let value = sample(Double(offset + k) / Double(rate))
+                for c in 0..<channels { buffer.floatChannelData![c][k] = value }
+            }
+            try file.write(from: buffer)
+            offset += n
+        }
+    }
+
+    /// `farEnd` and `noise` by time, for files at other rates.
+    static func farEnd(at t: Double) -> Float { t < 0 ? 0 : farEnd(Int(t * 48_000)) }
+    static func noise(at t: Double) -> Float { noise(Int(t * 48_000)) }
+    /// The mic by time: its noise, and the far end through the speakers (10 dB down, 20 ms late) while `speakers(t)`.
+    static func mic(at t: Double, speakers: (Double) -> Bool) -> Float {
+        noise(at: t) + (speakers(t) ? 0.3 * farEnd(at: t - 0.02) : 0)
+    }
+
     /// A chunk's pair of WAVs: `system` and `mic`, `seconds` long.
     static func writePair(system: URL, mic: URL, hears: Mic, seconds: Double = 80) throws {
         try write(system, seconds: seconds) { farEnd($0) }
@@ -63,6 +92,21 @@ private final class RepeatedPhraseEngine: TranscriptionEngine, @unchecked Sendab
     func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
         let start = audioSource == .system ? 10.0 : 10.2
         return [TranscriptSegment(start: start, end: start + 1.4, text: Self.phrase, language: "en")]
+    }
+    func isReady() -> Bool { true }
+    func prepare() async throws {}
+}
+
+/// Two phrases on both streams, the mic 0.2 s after the system each time: one at 100 s (the speakers' part of
+/// `aChunkThatChangesOutputIsJudgedPerWindow`), one at 400 s (its headphones part).
+private struct TwoPhrasesEngine: TranscriptionEngine {
+    let name = "TwoPhrases"
+    static let bleed = "The budget closes on Friday."
+    static let repeated = "Not possible to wait now."
+    func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+        let delay = audioSource == .system ? 0.0 : 0.2
+        return [TranscriptSegment(start: 100 + delay, end: 101.6 + delay, text: Self.bleed, language: "en"),
+                TranscriptSegment(start: 400 + delay, end: 401.4 + delay, text: Self.repeated, language: "en")]
     }
     func isReady() -> Bool { true }
     func prepare() async throws {}
@@ -140,6 +184,50 @@ private struct LiftReportingCanceller: MicEchoCancelling {
         #expect(lift > EchoDeduplicator.AcousticCoupling.uncoupledBelowLiftDB)
     }
 
+    /// A mic at 24 kHz against a 48 kHz stereo system file: both are read at 16 kHz mono, so the rates and
+    /// channel counts do not change the measure.
+    @Test func aMicAtAnotherRateAgainstAStereoSystemFile() throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let system = dir.appendingPathComponent("s.wav")
+        try LiftFixtures.write(system, seconds: 80, rate: 48_000, channels: 2) { LiftFixtures.farEnd(at: $0) }
+        for (rate, hears) in [(24_000, true), (16_000, false)] {
+            let mic = dir.appendingPathComponent("m-\(rate).wav")
+            try LiftFixtures.write(mic, seconds: 80, rate: rate) { LiftFixtures.mic(at: $0, speakers: { _ in hears }) }
+            let record = try FarEndLift.measure(micURL: mic, systemURL: system)
+            let lift = try #require(record.farEndLiftDB, "\(rate)")
+            #expect(hears ? lift > 25 : abs(lift) < 3, "\(rate) Hz: \(lift) dB")
+            #expect(abs(record.seconds - 80) < 0.05)
+        }
+    }
+
+    /// Headphones, and the user talks: mostly in the far end's pauses, sometimes over it (a fifth of the
+    /// far end's speech). The far end is still not heard: the lift stays well under the line.
+    @Test func aHeadphoneMicWithTheUsersSpeechStaysUncoupled() throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let system = dir.appendingPathComponent("s.wav"), mic = dir.appendingPathComponent("m.wav")
+        try LiftFixtures.write(system, seconds: 120, rate: 16_000) { LiftFixtures.farEnd(at: $0) }
+        try LiftFixtures.write(mic, seconds: 120, rate: 16_000) { t in
+            let second = Int(t)
+            // Far end talks on even seconds; the user talks on 3 of every 5 odd seconds and 1 of every 5 even ones.
+            let talks = second % 2 == 1 ? second % 10 < 6 : second % 10 == 0
+            return LiftFixtures.noise(at: t) + (talks ? 0.03 * Float(sin(2 * Double.pi * 220 * t)) : 0)
+        }
+        let lift = try #require(try FarEndLift.measure(micURL: mic, systemURL: system).farEndLiftDB)
+        #expect(lift < EchoDeduplicator.AcousticCoupling.uncoupledBelowLiftDB, "\(lift) dB")
+    }
+
+    /// Windows of 120 s every 30 s, the last ending at the chunk's end; one window over a shorter chunk.
+    @Test func theWindowsCoverTheChunk() {
+        let quiet = [Double](repeating: -60, count: 4_500)   // 450 s of 100 ms frames
+        let windows = FarEndLift.windows(micDB: quiet, refDB: quiet, frameSeconds: 0.1)
+        #expect(windows.map(\.start) == [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330])
+        #expect(windows.allSatisfy { abs($0.seconds - 120) < 1e-9 })
+        #expect(abs((windows.last.map { $0.start + $0.seconds } ?? 0) - 450) < 1e-9)
+        let short = FarEndLift.windows(micDB: Array(quiet.prefix(800)), refDB: quiet, frameSeconds: 0.1)
+        #expect(short.count == 1 && short[0].start == 0 && abs(short[0].seconds - 80) < 1e-9)
+        #expect(FarEndLift.windows(micDB: [], refDB: [], frameSeconds: 0.1).isEmpty)
+    }
+
     @Test func aMissingFileThrows() throws {
         let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let system = dir.appendingPathComponent("s.wav")
@@ -161,12 +249,16 @@ private struct LiftReportingCanceller: MicEchoCancelling {
 
 @Suite struct FarEndLiftRecordTests {
     @Test func theChunkKeepsItsLiftInSessionJSON() throws {
+        let windows = [FarEndLiftRecord.Window(start: 0, seconds: 120, farEndLiftDB: 31),
+                       FarEndLiftRecord.Window(start: 30, seconds: 120, farEndLiftDB: nil)]
         let chunk = ProcessedChunk(index: 0, startTime: Date(timeIntervalSince1970: 0), audioPath: "a.m4a", segments: [],
-                                   speakerDatabase: [:], farEndLift: FarEndLiftRecord(seconds: 1800, farEndLiftDB: 2.5))
+                                   speakerDatabase: [:],
+                                   farEndLift: FarEndLiftRecord(seconds: 1800, farEndLiftDB: 2.5, windows: windows))
         let data = try JSONEncoder().encode(chunk)
         let json = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         let stored = try #require(json["far_end_lift"] as? [String: Any])
         #expect(stored["seconds"] as? Double == 1800 && stored["far_end_lift_db"] as? Double == 2.5)
+        #expect((stored["windows"] as? [[String: Any]])?.count == 2)
         #expect(try JSONDecoder().decode(ProcessedChunk.self, from: data).farEndLift == chunk.farEndLift)
 
         // Measured with too little far end: kept as measured, without a value.
@@ -203,7 +295,9 @@ private struct LiftReportingCanceller: MicEchoCancelling {
         let start = Date(timeIntervalSince1970: 1_000)
         let chunks = [
             ProcessedChunk(index: 0, startTime: start, audioPath: "a.m4a", segments: [], speakerDatabase: [:],
-                           farEndLift: FarEndLiftRecord(seconds: 600, farEndLiftDB: 2.5)),
+                           farEndLift: FarEndLiftRecord(seconds: 600, farEndLiftDB: 2.5, windows: [
+                               .init(start: 0, seconds: 120, farEndLiftDB: 31), .init(start: 120, seconds: 480, farEndLiftDB: 2),
+                           ])),
             ProcessedChunk(index: 1, startTime: start.addingTimeInterval(610), audioPath: "b.m4a", segments: [], speakerDatabase: [:],
                            micEchoCancel: MicEchoCancelRecord(engine: "e", modelSHA256: "a", framesReverted: 0, seconds: 600,
                                                               farEndLiftDB: 31)),
@@ -219,8 +313,12 @@ private struct LiftReportingCanceller: MicEchoCancelling {
         #expect(entries[0]["far_end_lift_db"] as? Double == 2.5 && entries[1]["far_end_lift_db"] as? Double == 31)
         #expect(entries[2]["far_end_lift_db"] == nil && entries[2]["seconds"] as? Double == 600)
 
+        let windows = try #require(entries[0]["windows"] as? [[String: Any]])
+        #expect(windows.compactMap { $0["start"] as? Double } == [0, 120])
         let coupling = EchoDeduplicator.AcousticCoupling(transcriptMetadata: ["acoustic_coupling": d])
-        #expect(coupling.isUncoupled(start: 100, end: 101))
+        #expect(!coupling.isUncoupled(start: 100, end: 101), "chunk 0's first window heard the far end")
+        #expect(coupling.isUncoupled(start: 200, end: 201), "its second did not")
+        #expect(!coupling.isUncoupled(start: 119, end: 121), "across both: one heard it")
         #expect(!coupling.isUncoupled(start: 700, end: 701))
         #expect(!coupling.isUncoupled(start: 1300, end: 1301), "measured, too little far end: unknown")
         #expect(!coupling.isUncoupled(start: 1900, end: 1901), "not measured: unknown")
@@ -250,14 +348,15 @@ private struct LiftReportingCanceller: MicEchoCancelling {
         return dir
     }
 
-    private func processor(in dir: URL, setup: MicEchoCancelSetup) throws -> ChunkProcessor {
+    private func processor(in dir: URL, setup: MicEchoCancelSetup,
+                           engine: any TranscriptionEngine = RepeatedPhraseEngine()) throws -> ChunkProcessor {
         let scratch = dir.appendingPathComponent("scratch")
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         return ChunkProcessor(
             config: .default, outputDirectory: dir,
             sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0),
                                        engine: "fluidAudio", chunkDurationMinutes: 10, chunks: []),
-            transcriber: RepeatedPhraseEngine(), diarizer: FakeDiarizer(), scratchDirectory: scratch, micEchoCancel: setup)
+            transcriber: engine, diarizer: FakeDiarizer(), scratchDirectory: scratch, micEchoCancel: setup)
     }
 
     private func chunkFiles(in dir: URL) -> (system: URL, mic: URL) {
@@ -288,14 +387,35 @@ private struct LiftReportingCanceller: MicEchoCancelling {
         }
     }
 
-    /// With cancellation on, the canceller's own measure is the chunk's: not measured a second time.
-    @Test func withCancellationOnTheCancellersMeasureIsTheChunks() async throws {
+    /// With cancellation on, the guard still reads the raw mic's windows, not the canceller's one number for
+    /// the whole chunk (here a canceller that claims 2.5 dB over audio that heard the far end).
+    @Test func withCancellationOnTheRawMicsWindowsDecide() async throws {
         let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let files = chunkFiles(in: dir)
         try LiftFixtures.writePair(system: files.system, mic: files.mic, hears: .loudspeaker)
         let chunk = try #require(await run(try processor(in: dir, setup: .on(LiftReportingCanceller(farEndLiftDB: 2.5))), in: dir))
-        #expect(chunk.farEndLift == FarEndLiftRecord(seconds: 1, farEndLiftDB: 2.5))
-        #expect(chunk.segments.first { $0.source == "local" }?.echo == false, "the canceller said: no coupling")
+        #expect(chunk.micEchoCancel?.farEndLiftDB == 2.5)
+        let windows = try #require(chunk.farEndLift?.windows)
+        #expect(windows.count == 1 && (windows[0].farEndLiftDB ?? 0) > 25)
+        #expect(chunk.segments.first { $0.source == "local" }?.echo == true)
+    }
+
+    /// The case the review of #374 found: laptop speakers for 3 minutes, then headphones, in one 10-minute
+    /// chunk. One lift for the chunk read about 0 dB and held back the bleed line of the first minutes under
+    /// the user's name. Per window, the bleed line is flagged and the repetition said on headphones is kept.
+    @Test func aChunkThatChangesOutputIsJudgedPerWindow() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let files = chunkFiles(in: dir)
+        try LiftFixtures.write(files.system, seconds: 600, rate: 16_000) { LiftFixtures.farEnd(at: $0) }
+        try LiftFixtures.write(files.mic, seconds: 600, rate: 16_000) { LiftFixtures.mic(at: $0, speakers: { $0 < 180 }) }
+        let processor = try processor(in: dir, setup: .off, engine: TwoPhrasesEngine())
+        let chunk = try #require(await run(processor, in: dir))
+        let lift = try #require(chunk.farEndLift)
+        #expect((lift.farEndLiftDB ?? 99) < EchoDeduplicator.AcousticCoupling.uncoupledBelowLiftDB,
+                "over the whole chunk it reads as headphones")
+        let locals = chunk.segments.filter { $0.source == "local" }
+        #expect(locals.first { $0.text == TwoPhrasesEngine.bleed }?.echo == true, "the bleed line on the speakers")
+        #expect(locals.first { $0.text == TwoPhrasesEngine.repeated }?.echo == false, "the repetition on headphones")
     }
 
     /// A failed cancellation still leaves the chunk measured, from levels.

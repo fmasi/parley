@@ -129,9 +129,18 @@ public enum EchoDeduplicator {
     public static let defaultLocalLeadMarginSeconds = 0.1
     /// The configurable margin's sane range: past a second the rule stops describing a round trip.
     public static let localLeadMarginRange: ClosedRange<Double> = 0...1
-    /// Fewer matched lines than this give no median worth trusting: about 12 % of line pairs were placed
-    /// more than 0.2 s apart because the two channels were segmented differently (#252).
-    public static let minimumLagPairs = 3
+    /// The evidence the rule needs before it overturns a cluster (review of #252): the lines' placement is
+    /// only good to `echoTimingToleranceSeconds` (0.3 s) and about 12 % of pairs are placed more than 0.2 s
+    /// off, so a few early pairs must not unflag a whole bleed cluster. All three must hold, per cluster and
+    /// per chunk: at least this many timed (near-identical) pairs ...
+    public static let minimumLagPairs = 5
+    /// ... at least this share of the matched lines timed (a bleed cluster with 60 matches, 5 of them timed,
+    /// is not judged by those 5) ...
+    public static let minimumTimedShare = 1.0 / 3
+    /// ... and at least this share of the timed pairs leading by more than the margin, each on its own, as
+    /// well as their median. A line whose own lag trails by more than the margin is still judged by the
+    /// per-line rules even then.
+    public static let minimumLeadingShare = 2.0 / 3
 
     // MARK: - Per-line safeguards (#365, constants, not config keys)
 
@@ -195,10 +204,14 @@ public enum EchoDeduplicator {
             chunk(lift: record.map(FarEndLiftRecord.init))
         }
 
-        /// One chunk's measure (#374), over the whole chunk whatever its timeline; unknown without one.
+        /// One chunk's measure (#374) on the chunk's own timeline: its windows; a record without windows (the
+        /// canceller's, or one written before them) over the whole chunk. Unknown without one.
         public static func chunk(lift: FarEndLiftRecord?) -> AcousticCoupling {
             guard let lift else { return .unknown }
-            return AcousticCoupling(spans: [Span(start: -.infinity, end: .infinity, farEndLiftDB: lift.farEndLiftDB)])
+            guard let windows = lift.windows else {
+                return AcousticCoupling(spans: [Span(start: -.infinity, end: .infinity, farEndLiftDB: lift.farEndLiftDB)])
+            }
+            return AcousticCoupling(spans: windows.map { Span(start: $0.start, end: $0.start + $0.seconds, farEndLiftDB: $0.farEndLiftDB) })
         }
 
         /// The chunks' measures a transcript keeps, on the transcript's timeline: `metadata.acoustic_coupling.per_chunk`
@@ -209,11 +222,16 @@ public enum EchoDeduplicator {
             let current = (metadata[Self.metadataKey] as? [String: Any])?["per_chunk"] as? [[String: Any]]
             let legacy = (metadata["mic_echo_cancel"] as? [String: Any])?["per_chunk"] as? [[String: Any]]
             let entries = current ?? legacy ?? []
-            self.init(spans: entries.compactMap { entry in
+            func span(_ entry: [String: Any]) -> Span? {
                 guard let start = (entry["start"] as? NSNumber)?.doubleValue,
                       let seconds = (entry["seconds"] as? NSNumber)?.doubleValue,
                       start.isFinite, seconds.isFinite, seconds > 0 else { return nil }
                 return Span(start: start, end: start + seconds, farEndLiftDB: (entry["far_end_lift_db"] as? NSNumber)?.doubleValue)
+            }
+            // A chunk with windows is judged by them (already on the transcript's timeline); one without, whole.
+            self.init(spans: entries.flatMap { entry -> [Span] in
+                if let windows = entry["windows"] as? [[String: Any]] { return windows.compactMap(span) }
+                return span(entry).map { [$0] } ?? []
             })
         }
 
@@ -225,11 +243,20 @@ public enum EchoDeduplicator {
             return entry
         }
 
-        /// One `acoustic_coupling.per_chunk` entry (#374): where the chunk sits on the transcript's timeline and
-        /// its lift; `far_end_lift_db` left out when there was too little far-end speech to measure.
+        /// One `acoustic_coupling.per_chunk` entry (#374): where the chunk sits on the transcript's timeline, its
+        /// whole lift, and its `windows` placed on the transcript's timeline too; each `far_end_lift_db` left out
+        /// when there was too little far-end speech to measure.
         public static func metadataEntry(chunk: Int, start: Double, lift: FarEndLiftRecord) -> [String: Any] {
-            var entry: [String: Any] = ["chunk": chunk, "start": (start * 1000).rounded() / 1000, "seconds": lift.seconds]
+            func ms(_ value: Double) -> Double { (value * 1000).rounded() / 1000 }
+            var entry: [String: Any] = ["chunk": chunk, "start": ms(start), "seconds": lift.seconds]
             if let value = lift.farEndLiftDB { entry["far_end_lift_db"] = value }
+            if let windows = lift.windows {
+                entry["windows"] = windows.map { window -> [String: Any] in
+                    var w: [String: Any] = ["start": ms(start + window.start), "seconds": window.seconds]
+                    if let value = window.farEndLiftDB { w["far_end_lift_db"] = value }
+                    return w
+                }
+            }
             return entry
         }
 
@@ -240,12 +267,16 @@ public enum EchoDeduplicator {
             return ["per_chunk": perChunk, "uncoupled_below_db": uncoupledBelowLiftDB]
         }
 
-        /// Whether a line from `start` to `end` touches a span measured without coupling. A line across a
-        /// chunk boundary counts as uncoupled when either chunk is: in doubt, not flagged.
+        /// Whether a line from `start` to `end` was said where the mic did not hear the far end: EVERY span over it
+        /// is measured and below the line, and there is one. A span that heard the far end, or one too little
+        /// far-end speech was in to measure, keeps the per-line rule: holding back a bleed line shows the other
+        /// side's words under the user's name, the worse of the two wrong calls (review of #374). So a line
+        /// across a chunk boundary, or a window edge, is held back only when both sides say "no coupling".
         public func isUncoupled(start: Double, end: Double) -> Bool {
-            spans.contains { span in
-                guard let lift = span.farEndLiftDB, lift < Self.uncoupledBelowLiftDB else { return false }
-                return start <= span.end && end >= span.start
+            let over = spans.filter { start <= $0.end && end >= $0.start }
+            return !over.isEmpty && over.allSatisfy { span in
+                guard let lift = span.farEndLiftDB else { return false }
+                return lift < Self.uncoupledBelowLiftDB
             }
         }
     }
@@ -435,13 +466,15 @@ public enum EchoDeduplicator {
     /// **Who is late (#252).** The original precedes its copy. Per local cluster, the median over its matched
     /// near-identical lines (word overlap with one remote line above the text threshold; not an excerpt
     /// matched by containment, nor a line matched against several joined) of (local start - start of that
-    /// remote line); with `minimumLagPairs` lines or more and
-    /// a median below -`localLeadMarginSeconds`, the local side leads: it is the original and the remote
-    /// holds the copy (a far end that returns the user's voice). Such a cluster is never echo, whatever its
-    /// share, and none of its lines is flagged; the verdict records `reason: local_leads`. A cluster-level
-    /// median, not a per-line rule: line starts on the two channels differ by more than 0.2 s for about one
-    /// pair in eight. In a cluster that mixes real bleed with the mirror case the median decides for all of
-    /// its lines; a wrong call there leaves an echo line shown, never a user's line hidden.
+    /// remote line), judged per chunk (`chunkStarts`). The local side leads there when it has
+    /// `minimumLagPairs` timed pairs or more, they are `minimumTimedShare` of its matched lines or more,
+    /// `minimumLeadingShare` of them lead by more than `localLeadMarginSeconds` each, and their median does
+    /// too. It is then the original and the remote holds the copy (a far end that returns the user's voice):
+    /// the cluster is never echo, whatever its share, and its timed lines there are not flagged, except a line
+    /// whose own lag trails by more than the margin; that one and the untimed matches are judged by the
+    /// per-line rules. The verdict
+    /// records `reason: local_leads`. Not a per-line rule: line starts on the two channels differ by more
+    /// than 0.2 s for about one pair in eight.
     ///
     /// - Parameter embeddingThreshold: DEPRECATED and ignored (`echo_embedding_threshold`). Kept for
     ///   one release so existing callers and config files keep working.
@@ -449,6 +482,9 @@ public enum EchoDeduplicator {
     ///   the record (the one before minority absorption, #249) does not read like the record.
     /// - Parameter coupling: the far-end lift measured for these segments (#374); `.unknown` when it was not
     ///   measured.
+    /// - Parameter chunkStarts: where each chunk after the first starts on the segments' timeline, when they
+    ///   span several (re-detect, the single-file path): who is late is judged per chunk, as the pipeline
+    ///   judges it, so a mirror episode in one chunk is not drowned by the rest of the call.
     public static func deduplicate(
         segments: [LabeledSegment],
         localSpeakerDatabase: [String: [Float]],
@@ -459,7 +495,8 @@ public enum EchoDeduplicator {
         embeddingDim: Int? = nil,
         logPrefix: String = "",
         localLeadMarginSeconds: Double? = nil,
-        coupling: AcousticCoupling = .unknown
+        coupling: AcousticCoupling = .unknown,
+        chunkStarts: [Double] = []
     ) -> DeduplicationResult {
         let tThresh = temporalThreshold ?? defaultTemporalThreshold
         let xThresh = textThreshold ?? defaultTextThreshold
@@ -502,14 +539,25 @@ public enum EchoDeduplicator {
             }
             let share = seconds > 0 ? matchedSeconds / seconds : 0
             // Who is late (#252): local start minus the start of the remote line each near-identical line copies.
-            let lags = matched.compactMap { i in matches[i]?.remoteStart.map { segments[i].start - $0 } }.filter(\.isFinite)
+            var lagOf: [Int: Double] = [:]
+            for i in matched {
+                if let start = matches[i]?.remoteStart, (segments[i].start - start).isFinite { lagOf[i] = segments[i].start - start }
+            }
+            let lags = matched.compactMap { lagOf[$0] }
             let medianLag = lags.isEmpty ? nil : median(lags)
-            let localLeads = lags.count >= minimumLagPairs && (medianLag ?? 0) < -leadMargin
+            // Judged per chunk: the chunks in which this cluster's lines lead.
+            let chunkOf = { (i: Int) in chunkStarts.filter { $0 <= segments[i].start }.count }
+            let leadingChunks = Set(Dictionary(grouping: matched, by: chunkOf).filter { _, lines in
+                localLeads(timed: lines.compactMap { lagOf[$0] }, matched: lines.count, margin: leadMargin)
+            }.keys)
+            let localLeads = !leadingChunks.isEmpty
             let isEcho = !localLeads && share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
             var flagged = 0, heldUncoupled = 0, heldTiming = 0, heldLeading = 0
             for i in matched {
-                if localLeads {
-                    // The original: none of its lines is an echo copy.
+                // The original, where its lines lead: a timed line there is not an echo copy, unless it itself
+                // clearly trails. An untimed match keeps the per-line rules: held back, a bleed line would read
+                // as the user's words.
+                if leadingChunks.contains(chunkOf(i)), let lag = lagOf[i], lag <= leadMargin {
                     heldBack.insert(i)
                     heldLeading += 1
                     continue
@@ -547,6 +595,15 @@ public enum EchoDeduplicator {
 
         return DeduplicationResult(segments: result, flaggedCount: flaggedCount, clusters: clusters,
                                    matchedLocal: Set(matches.keys), heldBack: heldBack)
+    }
+
+    /// Whether a cluster's lines in one chunk lead the remote (#252): enough timed pairs, enough of its
+    /// matches timed, enough of them leading each on its own, and their median leading.
+    private static func localLeads(timed lags: [Double], matched: Int, margin: Double) -> Bool {
+        guard lags.count >= minimumLagPairs, matched > 0,
+              Double(lags.count) >= minimumTimedShare * Double(matched) else { return false }
+        let leading = lags.filter { $0 < -margin }.count
+        return Double(leading) >= minimumLeadingShare * Double(lags.count) && median(lags) < -margin
     }
 
     /// The median of a non-empty list.

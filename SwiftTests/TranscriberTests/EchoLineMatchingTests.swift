@@ -134,8 +134,10 @@ struct EchoLineMatchingTests {
         let result = EchoDeduplicator.deduplicate(
             segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:], coupling: coupling)
         #expect(flagged(result) == ["Okay then thank you."])
-        // A line across the boundary touches the uncoupled chunk: held back.
-        #expect(coupling.isUncoupled(start: 599, end: 601))
+        // A line across the boundary touches a chunk that heard the far end: judged as a copy can be (#374
+        // review: holding back a bleed line puts the other side's words under the user's name).
+        #expect(!coupling.isUncoupled(start: 599, end: 601))
+        #expect(coupling.isUncoupled(start: 598, end: 599))
         #expect(!coupling.isUncoupled(start: 601, end: 602))
         #expect(!coupling.isUncoupled(start: 1300, end: 1301), "past every measured chunk: unknown")
     }

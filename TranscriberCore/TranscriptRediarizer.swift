@@ -375,6 +375,8 @@ public enum TranscriptRediarizer {
         // The chunks' far-end lift (#365, #374): every echo check here judges by the same per-line
         // rules as the pipeline, the wider pass and the stated count's alike.
         let coupling = EchoDeduplicator.AcousticCoupling(transcriptMetadata: metadata)
+        // Who is late is judged per chunk, as the pipeline judged it (#252 review).
+        let chunkStarts = Self.chunkStarts(metadata: metadata, layout: layout)
         if source == "local" {
             // The wider pass is a try: if it fails (not a cancel), the stated count's pass — what
             // re-detect always ran — still can.
@@ -391,7 +393,7 @@ public enum TranscriptRediarizer {
             }
             if let wider,
                let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling,
-                                     thresholds: thresholds, coupling: coupling),
+                                     thresholds: thresholds, coupling: coupling, chunkStarts: chunkStarts),
                !found.clusterIDs.isEmpty {
                 // An echo VOICE: a cluster of the diarizer's own. Unattributed speech judged echo as
                 // a group is no voice this pass separated.
@@ -409,7 +411,7 @@ public enum TranscriptRediarizer {
                 try Task.checkCancellation()
                 raw = try await diarize(speakerCount, share: 0.5...1)
                 echo = echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling,
-                                     thresholds: thresholds, coupling: coupling)
+                                     thresholds: thresholds, coupling: coupling, chunkStarts: chunkStarts)
             }
         } else {
             raw = try await diarize(speakerCount, share: 0...1)
@@ -683,7 +685,8 @@ public enum TranscriptRediarizer {
     /// without it — a relabel must never lose or misplace words.
     private static func echoCheck(
         on candidates: [Candidate], raw: DiarizationResult, transcript: [[String: Any]], labeling: Labeling,
-        thresholds: (temporal: Double?, text: Double?, lead: Double?), coupling: EchoDeduplicator.AcousticCoupling
+        thresholds: (temporal: Double?, text: Double?, lead: Double?), coupling: EchoDeduplicator.AcousticCoupling,
+        chunkStarts: [Double]
     ) -> EchoCheck? {
         var (local, speakerDatabase) = labeling(candidates.map(\.segment), raw)
         guard local.count == candidates.count else {
@@ -709,11 +712,35 @@ public enum TranscriptRediarizer {
         let result = EchoDeduplicator.deduplicate(
             segments: local + remote, localSpeakerDatabase: speakerDatabase, remoteSpeakerDatabase: [:],
             temporalThreshold: thresholds.temporal, textThreshold: thresholds.text,
-            localLeadMarginSeconds: thresholds.lead, coupling: coupling)
+            localLeadMarginSeconds: thresholds.lead, coupling: coupling, chunkStarts: chunkStarts)
         let echoLabels = Set(result.clusters.filter(\.isEcho).map(\.label))
         let clusterIDs = SpeakerAssignment.buildSpeakerMap(from: raw.segments)
             .filter { echoLabels.contains(labelPrefix(for: "local") + $0.value) }.keys
         return EchoCheck(result: result, rawLabels: local.map(\.speaker), echoLabels: echoLabels, clusterIDs: Set(clusterIDs))
+    }
+
+    /// Where each chunk after the first started on the transcript's timeline, for who is late (#252 review):
+    /// the chunks' places in `metadata.acoustic_coupling.per_chunk` (every measured chunk, #374), else — the
+    /// chunk archives not merged into one — `chunk_offsets`. None for a single file or a transcript that keeps
+    /// neither: the whole recording is then judged as one, as before. Values that are not finite and
+    /// increasing are dropped, so a damaged list only merges chunks, never splits one.
+    static func chunkStarts(metadata: [String: Any], layout: AudioLayout) -> [Double] {
+        let measured = ((metadata[EchoDeduplicator.AcousticCoupling.metadataKey] as? [String: Any])?["per_chunk"] as? [[String: Any]])?
+            .compactMap { ($0["start"] as? NSNumber)?.doubleValue }
+        var starts: [Double] = []
+        if let measured, measured.count > 1 {
+            starts = measured.sorted()
+        } else if case .chunkedArchives(let chunks) = layout, chunks.count > 1,
+                  let offsets = metadata["chunk_offsets"] as? [Double], offsets.count == chunks.count {
+            starts = offsets
+        }
+        var previous = -Double.infinity
+        let increasing = starts.filter { start in
+            guard start.isFinite, start > previous else { return false }
+            previous = start
+            return true
+        }
+        return Array(increasing.dropFirst())
     }
 
     /// The longest a single chunk can plausibly be, and the most recorded-gap time the bound will

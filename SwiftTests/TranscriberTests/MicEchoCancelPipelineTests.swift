@@ -265,16 +265,20 @@ private struct ThrowingCanceller: MicEchoCancelling {
         #expect(stamp["engine"] as? String == "fake")
     }
 
-    /// #365 (a) in the live chunk path: the chunk's own record decides whether a matching line outside an
-    /// echo cluster can be flagged.
+    /// #365 (a) in the live chunk path, cancellation on: the raw mic's measured coupling decides whether a
+    /// matching line outside an echo cluster can be flagged (#374: its windows, not the canceller's figure).
     @Test func aChunkWithoutCouplingKeepsARepeatedPhraseAndOneWithCouplingFlagsIt() async throws {
-        for (lift, flagged) in [(2.5, false), (31.0, true)] {
+        for (hears, flagged) in [(LiftFixtures.Mic.headphones, false), (.loudspeaker, true)] {
             let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+            try LiftFixtures.writePair(system: dir.appendingPathComponent("meeting-0.wav"),
+                                       mic: dir.appendingPathComponent("meeting-0_mic.wav"), hears: hears)
+            let lift = hears == .headphones ? 31.0 : 2.5   // the canceller's figure, contradicting the audio
             let chunk = try #require(try await process(.on(CopyingCanceller(erleDB: 0, farEndLiftDB: lift)),
-                                                       engine: RepeatedPhraseEngine(), in: dir))
+                                                       engine: RepeatedPhraseEngine(), in: dir,
+                                                       writeSystem: false, writeMic: false))
             let line = try #require(chunk.segments.first { $0.source == "local" })
             #expect(line.text == RepeatedPhraseEngine.phrase)
-            #expect(line.echo == flagged, "lift \(lift)")
+            #expect(line.echo == flagged, "\(hears)")
         }
     }
 
@@ -305,10 +309,11 @@ private struct ThrowingCanceller: MicEchoCancelling {
     /// The single-file path: each recovery segment's record at the segment's offset, and the dedup reads
     /// them — the repeated phrase is kept on an uncoupled recording and flagged on a coupled one.
     @Test func theSingleFilePathPlacesEachSegmentsMeasureAndUsesIt() async throws {
-        for (lift, flagged) in [(2.5, false), (31.0, true)] {
+        for (hears, lift, flagged) in [(LiftFixtures.Mic.headphones, 2.5, false), (.loudspeaker, 31.0, true)] {
             let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
-            for name in ["m-0.wav", "m-0_mic.wav", "m-1.wav", "m-1_mic.wav"] {
-                try RecoveryFixtures.writeFakeWav(at: dir.appendingPathComponent(name), seconds: 1)
+            for n in 0..<2 {
+                try LiftFixtures.writePair(system: dir.appendingPathComponent("m-\(n).wav"),
+                                           mic: dir.appendingPathComponent("m-\(n)_mic.wav"), hears: hears)
             }
             let runner = TranscriptionRunner()
             runner.engineFactoryForTesting = { _ in (RepeatedPhraseEngine(), FakeDiarizer()) }
@@ -320,7 +325,7 @@ private struct ThrowingCanceller: MicEchoCancelling {
             let metadata = try #require(json["metadata"] as? [String: Any])
             let entries = try #require((metadata["mic_echo_cancel"] as? [String: Any])?["per_chunk"] as? [[String: Any]])
             #expect(entries.compactMap { $0["chunk"] as? Int } == [0, 1])
-            #expect(entries.compactMap { $0["start"] as? Double } == [0, 1])
+            #expect(entries.compactMap { $0["start"] as? Double } == [0, 80])
             let locals = (json["segments"] as? [[String: Any]] ?? []).filter { $0["source"] as? String == "local" }
             #expect(locals.count == 2)
             #expect(locals.allSatisfy { ($0["echo"] as? Bool ?? false) == flagged }, "lift \(lift)")
