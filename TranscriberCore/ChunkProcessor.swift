@@ -652,11 +652,6 @@ public final class ChunkProcessor {
         return fm.fileExists(atPath: archive.path) ? archive : nil
     }
 
-    /// Split an archived chunk (L = mic, R = system) into scratch WAVs outside the output folder.
-    /// The mic side is kept only when this chunk was dual-stream: like the session's other chunks
-    /// when it has any (so the reconciler's namespaces agree), else when the mic channel holds any
-    /// non-zero sample. nil when the archive can't be read — the chunk is then recorded with its
-    /// system stream missing, never dropped.
     /// Echo cancellation, then the chunk's far-end lift (#374), measured per window from the raw mic's levels
     /// whether or not cancellation ran. The canceller's whole-chunk measure stands in only when the levels
     /// could not be read at all.
@@ -766,6 +761,11 @@ public final class ChunkProcessor {
         }
     }
 
+    /// Split an archived chunk (L = mic, R = system) into scratch WAVs outside the output folder.
+    /// The mic side is kept only when this chunk was dual-stream: like the session's other chunks
+    /// when it has any (so the reconciler's namespaces agree), else when the mic channel holds any
+    /// non-zero sample. nil when the archive can't be read — the chunk is then recorded with its
+    /// system stream missing, never dropped.
     private nonisolated func splitArchive(_ archive: URL, chunkIndex: Int, micWavLeft: Bool) async -> (directory: URL, system: URL, mic: URL?)? {
         let directory = scratchDirectory.appendingPathComponent("parley-archive-\(UUID().uuidString)")
         do {

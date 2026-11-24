@@ -45,9 +45,6 @@ public struct FarEndLiftRecord: Codable, Equatable, Sendable {
         self.init(seconds: record.seconds, farEndLiftDB: record.farEndLiftDB)
     }
 
-    /// Whether any window holds a measure.
-    public var hasMeasuredWindow: Bool { windows?.contains { $0.farEndLiftDB != nil } ?? false }
-
     enum CodingKeys: String, CodingKey {
         case seconds, windows
         case farEndLiftDB = "far_end_lift_db"
