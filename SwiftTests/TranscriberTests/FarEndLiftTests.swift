@@ -326,6 +326,34 @@ private struct LiftReportingCanceller: MicEchoCancelling {
         #expect(TranscriptionRunner.acousticCouplingDictionary(chunks: [chunks[3]], meetingStart: start) == nil)
     }
 
+    /// An unmeasured window (the far end too quiet there) is no evidence either way: with nothing played there
+    /// is nothing to echo. On a real headphone call 22 of 68 windows were measured; a repetition 4.6 s after
+    /// the far end, under two windows at 2.0 and 1.4 dB and two unmeasured, was hidden by the r2 rule.
+    @Test func anUnmeasuredWindowIsNoEvidenceEitherWay() {
+        func coupling(_ lifts: [Double?]) -> EchoDeduplicator.AcousticCoupling {
+            .chunk(lift: FarEndLiftRecord(seconds: 600, farEndLiftDB: 1.8, windows: lifts.enumerated().map { i, lift in
+                .init(start: Double(i) * 30, seconds: 120, farEndLiftDB: lift)
+            }))
+        }
+        // The line at 100-101.6 s sits under all four windows (0, 30, 60, 90).
+        let segments = [
+            LabeledSegment(start: 95.4, end: 97, speaker: "Remote Speaker 1", text: "Not possible to wait now.", source: "remote"),
+            LabeledSegment(start: 95.6, end: 97.2, speaker: "Local Speaker 1", text: "Not possible to wait now.", source: "local"),
+        ]
+        func flagged(_ lifts: [Double?]) -> Bool {
+            EchoDeduplicator.deduplicate(segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:],
+                                         coupling: coupling(lifts)).segments.contains { $0.echo }
+        }
+        #expect(coupling([2.0, nil, 1.4, nil]).isUncoupled(start: 95.6, end: 97.2))
+        #expect(!flagged([2.0, nil, 1.4, nil]), "measured uncoupled plus unmeasured: held back")
+        #expect(flagged([31, nil, nil, nil]), "the only measured window heard the far end: judged as a copy")
+        #expect(flagged([2.0, 31, nil, 1.4]), "one measured window heard it: never held back")
+        #expect(!coupling([nil, nil, nil, nil]).isUncoupled(start: 95.6, end: 97.2))
+        #expect(flagged([nil, nil, nil, nil]), "all unmeasured: unknown, as before #365")
+        #expect(flagged([nil, nil, nil, nil]) == EchoDeduplicator.deduplicate(
+            segments: segments, localSpeakerDatabase: [:], remoteSpeakerDatabase: [:]).segments.contains { $0.echo })
+    }
+
     /// The reader: `acoustic_coupling` when present, else a #365 transcript's `mic_echo_cancel.per_chunk`,
     /// else unknown.
     @Test func theReaderPrefersTheNewPlaceAndStillReadsTheOld() {

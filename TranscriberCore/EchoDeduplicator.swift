@@ -267,17 +267,19 @@ public enum EchoDeduplicator {
             return ["per_chunk": perChunk, "uncoupled_below_db": uncoupledBelowLiftDB]
         }
 
-        /// Whether a line from `start` to `end` was said where the mic did not hear the far end: EVERY span over it
-        /// is measured and below the line, and there is one. A span that heard the far end, or one too little
-        /// far-end speech was in to measure, keeps the per-line rule: holding back a bleed line shows the other
-        /// side's words under the user's name, the worse of the two wrong calls (review of #374). So a line
-        /// across a chunk boundary, or a window edge, is held back only when both sides say "no coupling".
+        /// Whether a line from `start` to `end` was said where the mic did not hear the far end: at least one span
+        /// over it is measured, and every measured one is below the line. A span that heard the far end keeps the
+        /// per-line rule: holding back a bleed line shows the other side's words under the user's name (review of
+        /// #374), so a line across a chunk boundary or a window edge with one side coupled is judged as a copy
+        /// can be. A span too little far-end speech was in to measure is no evidence either way: with the far end
+        /// silent there is nothing to echo (on a real headphone call 22 of 68 windows were measured, and counting
+        /// the unmeasured ones against the line hid the user's own repetition). All unmeasured: unknown.
+        ///
+        /// The chunk's own lift is deliberately not required as well: in a chunk mostly on loudspeakers it would
+        /// stop holding back the user's repetitions in its headphone part, which its windows already judge.
         public func isUncoupled(start: Double, end: Double) -> Bool {
-            let over = spans.filter { start <= $0.end && end >= $0.start }
-            return !over.isEmpty && over.allSatisfy { span in
-                guard let lift = span.farEndLiftDB else { return false }
-                return lift < Self.uncoupledBelowLiftDB
-            }
+            let measured = spans.filter { start <= $0.end && end >= $0.start }.compactMap(\.farEndLiftDB)
+            return !measured.isEmpty && measured.allSatisfy { $0 < Self.uncoupledBelowLiftDB }
         }
     }
 
