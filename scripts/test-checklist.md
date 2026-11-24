@@ -1669,10 +1669,17 @@ lift() { python3 -c 'import json,sys;m=json.load(open(sys.argv[1]))["metadata"];
       phrases, you repeat each right after; 3 minutes).
   - PASS: every repetition is in the TXT under your label; no `echo: true`. `lift` shows
     `acoustic_coupling.per_chunk` with one entry per chunk, `far_end_lift_db` under 15, and
-    `mic_echo_cancel` null. `stream.log` has `far end … above the mic's floor (levels only, … s of audio
-    in … s)` per chunk and `held back: N no coupling` on the chunk's `Echo cluster` line.
+    `mic_echo_cancel` null. `stream.log` has `far end … above the mic's floor over the chunk; N windows: N
+    uncoupled, … unmeasured (levels only, … s of audio in … s)` per chunk and `held back: N no coupling` on the chunk's `Echo cluster` line.
   - MEASURE: write down each chunk's `far_end_lift_db` and the `in … s` time of a 30-minute chunk if
-    you record one (synthetic: 2.0–2.2 s in a debug build; expect less in the release build).
+    you record one (synthetic: about 2 s in a debug build; expect less in the release build).
+- [ ] **EL-07b Speakers, then headphones, in one chunk (#374 review).** `cfg mic_echo_cancel off`, output =
+      the laptop speakers for the first 3 minutes (you silent, the far end talking), then switch to
+      headphones and do EL-03's script for 4 minutes. One chunk.
+  - PASS: the far end's lines of the first 3 minutes that came back through the mic carry `echo: true`
+    and none of them is in the TXT under your label; your repetitions after the switch are in the TXT
+    under your label. `lift`: the chunk's `windows` read 15 dB or more over the first minutes and under
+    15 after (write down the window at the switch).
 - [ ] **EL-08 Loudspeakers, cancellation OFF: echo still flagged (#374).** As EL-07 with output = the laptop
       speakers and you silent. PASS: the far end's lines on the mic carry `echo: true`; `far_end_lift_db`
       is 15 or more (write it down).
