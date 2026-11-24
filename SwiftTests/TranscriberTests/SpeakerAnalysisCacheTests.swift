@@ -293,3 +293,26 @@ import Testing
         #expect(await cache.heldKey != nil)
     }
 }
+
+/// #341: the decoded channel can be kept as the dialog's analysis, so its buffer is sized from the
+/// chunks' lengths instead of the first chunk's times the count (a long first chunk and a short last
+/// one left most of a chunk's capacity held for nothing).
+@Suite struct RedetectDecodeSizingTests {
+    @Test func theLengthsLaidEndToEndWithoutOffsets() {
+        #expect(TranscriptRediarizer.expectedSampleCount(lengths: [1800, 300], offsets: nil, contributes: [true, true])
+                == 2100 * 16_000 + 2 * 16_000)
+    }
+
+    /// With offsets the end of the last chunk that contributes: a gap is inside it, a skipped chunk at the end is not.
+    @Test func theEndOfTheLastContributingChunkOnTheTimeline() {
+        #expect(TranscriptRediarizer.expectedSampleCount(lengths: [600, 600, 600], offsets: [0, 700, 1400], contributes: [true, true, false])
+                == 1300 * 16_000 + 3 * 16_000)
+    }
+
+    @Test func anUnknownLengthLeavesTheEstimateToTheDecode() {
+        #expect(TranscriptRediarizer.expectedSampleCount(lengths: [600, nil], offsets: nil, contributes: [true, true]) == nil)
+        #expect(TranscriptRediarizer.expectedSampleCount(lengths: [600, .infinity], offsets: nil, contributes: [true, true]) == nil)
+        // A chunk that contributes nothing needs no length.
+        #expect(TranscriptRediarizer.expectedSampleCount(lengths: [600, nil], offsets: [0, 600], contributes: [true, false]) != nil)
+    }
+}

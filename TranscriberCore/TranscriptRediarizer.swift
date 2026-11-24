@@ -860,6 +860,26 @@ public enum TranscriptRediarizer {
         }
     }
 
+    /// The samples a channel decodes to, from each chunk's length in seconds: the end of the last
+    /// contributing chunk on the recorded timeline (`offsets`), or the lengths laid end to end. One
+    /// second of slack per chunk covers a decoder's rounding, so the buffer never has to grow (a grow
+    /// doubles it). nil when a contributing chunk's length is unknown.
+    static func expectedSampleCount(lengths: [Double?], offsets: [Double]?, contributes: [Bool]) -> Int? {
+        let rate = AudioDecode.targetSampleRate
+        var end = 0.0
+        for i in lengths.indices where i < contributes.count && contributes[i] {
+            guard let length = lengths[i], length.isFinite, length >= 0 else { return nil }
+            if let offsets {
+                guard i < offsets.count else { return nil }
+                end = max(end, offsets[i] + length)
+            } else {
+                end += length
+            }
+        }
+        guard end.isFinite else { return nil }
+        return Int((end * rate).rounded(.up)) + Int(rate) * lengths.count
+    }
+
     /// What `decodeChannelAudio` hands back: either pre-decoded samples for the diarizer, or a
     /// path for it to decode itself.
     ///
@@ -944,6 +964,13 @@ public enum TranscriptRediarizer {
             // Cached lengths are trusted only when they line up one-to-one with the chunks.
             let cachedDurations = chunkDurations.count == chunks.count ? chunkDurations : []
             var combined: [Float] = []
+            // Sized once from the chunks' known lengths (#341): the buffer can outlive the re-detect as
+            // the dialog's kept analysis, so capacity it never fills would be held as long as the dialog.
+            let expected = expectedSampleCount(
+                lengths: chunks.indices.map { fileLengths[$0] ?? (cachedDurations.indices.contains($0) && cachedDurations[$0] > 0 && plausible(cachedDurations[$0]) ? cachedDurations[$0] : nil) },
+                offsets: offsets,
+                contributes: chunks.map { offsets == nil || channelRole(of: $0, wantsLocal: wantsLocal) != .skip })
+            if let expected { combined.reserveCapacity(expected) }
             for (position, index) in order.enumerated() {
                 let chunk = chunks[index]
                 // Per-iteration: decoding one chunk is itself slow, so a cancel during chunk 2 of
@@ -1011,8 +1038,9 @@ public enum TranscriptRediarizer {
                 // durations can be absent for chunks that are decoded, not padded), so use it to
                 // size the rest in one shot rather than free-growing through log2(chunkCount)
                 // reallocations. Chunks differ in length (the last is usually short), so this is an
-                // estimate — over- or under-shooting only costs capacity or one extra grow.
-                if combined.isEmpty {
+                // estimate — over- or under-shooting only costs capacity or one extra grow. Only when
+                // a chunk's length is unknown: otherwise `expected` sized it exactly.
+                if combined.isEmpty, expected == nil {
                     combined.reserveCapacity(decodedChunk.count * chunks.count)
                 }
                 combined.append(contentsOf: decodedChunk)
