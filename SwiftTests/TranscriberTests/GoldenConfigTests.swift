@@ -54,6 +54,22 @@ import Testing
         Issue.record(Comment(rawValue: message))
     }
 
+    /// The model manifest records which FluidAudio downloaded a model (`sdk_label`). The label is a
+    /// constant, so a dependency bump can leave it naming the previous version: 0.18.3 shipped
+    /// labelled "0.17.x" until this test. It must name the minor line Package.resolved pins.
+    @Test func sdkLabelNamesTheFluidAudioVersionInPackageResolved() throws {
+        let resolved = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Package.resolved")
+        let root = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: resolved)) as? [String: Any])
+        let pins = try #require(root["pins"] as? [[String: Any]])
+        let pin = try #require(pins.first { ($0["identity"] as? String) == "fluidaudio" })
+        let version = try #require((pin["state"] as? [String: Any])?["version"] as? String)
+        let parts = version.split(separator: ".")
+        try #require(parts.count == 3, "an x.y.z version, got \(version)")
+        #expect(FluidAudioEngine.sdkLabel == "FluidAudio \(parts[0]).\(parts[1]).x")
+    }
+
     // MARK: - Rendering
 
     /// The full resolved-config document. Deterministic: sorted keys, hand-rendered JSON (no

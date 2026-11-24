@@ -22,7 +22,8 @@ public actor FluidAudioEngine: TranscriptionEngine {
     /// Bump alongside FluidAudio if the SDK starts pulling a different default repo.
     public static let parakeetRepoSlug = "FluidInference/parakeet-tdt-0.6b-v3-coreml"
     /// Label written into manifest records for forensic identification of the SDK at download time.
-    public static let sdkLabel = "FluidAudio 0.17.x"
+    /// `GoldenConfigTests` compares it with the FluidAudio version in Package.resolved, so a bump moves it.
+    public static let sdkLabel = "FluidAudio 0.18.x"
 
     private var manager: AsrManager?
     private let unloadTimeout: TimeInterval
