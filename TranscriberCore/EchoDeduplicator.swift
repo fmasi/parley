@@ -290,9 +290,9 @@ public enum EchoDeduplicator {
         /// Per remote speaker label, the seconds of this cluster's matched segments that overlap the
         /// remote speech they repeat.
         public var matchedRemote: [String: Double]
-        /// Who is late (#252): the median, over the matched lines, of the local line's start minus the start
-        /// of the remote line it matches. Positive: the local side trails, as an echo copy does. nil without
-        /// a matched line, or in a verdict written before #252.
+        /// Who is late (#252): the median, over the matched near-identical lines, of the local line's start
+        /// minus the start of the remote line it copies. Positive: the local side trails, as an echo copy does.
+        /// nil without such a line, or in a verdict written before #252.
         public var medianLagSeconds: Double?
         /// How many matched lines that median is over; the rule needs `minimumLagPairs`.
         public var lagPairs: Int?
@@ -433,7 +433,9 @@ public enum EchoDeduplicator {
     /// Neither changes a match, a share or a cluster's verdict, and neither applies in an echo cluster.
     ///
     /// **Who is late (#252).** The original precedes its copy. Per local cluster, the median over its matched
-    /// lines of (local start - start of the remote line it matches); with `minimumLagPairs` lines or more and
+    /// near-identical lines (word overlap with one remote line above the text threshold; not an excerpt
+    /// matched by containment, nor a line matched against several joined) of (local start - start of that
+    /// remote line); with `minimumLagPairs` lines or more and
     /// a median below -`localLeadMarginSeconds`, the local side leads: it is the original and the remote
     /// holds the copy (a far end that returns the user's voice). Such a cluster is never echo, whatever its
     /// share, and none of its lines is flagged; the verdict records `reason: local_leads`. A cluster-level
@@ -499,8 +501,8 @@ public enum EchoDeduplicator {
                 for (remoteLabel, overlap) in matches[i]?.overlapSeconds ?? [:] { remote[remoteLabel, default: 0] += overlap }
             }
             let share = seconds > 0 ? matchedSeconds / seconds : 0
-            // Who is late (#252): local start minus the start of the remote speech each line matches.
-            let lags = matched.compactMap { i in matches[i].map { segments[i].start - $0.remoteStart } }.filter(\.isFinite)
+            // Who is late (#252): local start minus the start of the remote line each near-identical line copies.
+            let lags = matched.compactMap { i in matches[i]?.remoteStart.map { segments[i].start - $0 } }.filter(\.isFinite)
             let medianLag = lags.isEmpty ? nil : median(lags)
             let localLeads = lags.count >= minimumLagPairs && (medianLag ?? 0) < -leadMargin
             let isEcho = !localLeads && share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
@@ -563,9 +565,11 @@ public enum EchoDeduplicator {
     private struct Match {
         /// Per remote label, the seconds the local segment overlaps the remote speech it repeats.
         var overlapSeconds: [String: Double]
-        /// Where the remote speech it repeats starts: the best-scoring remote line's start, or the first of the
-        /// joined window (#252).
-        var remoteStart: Double
+        /// Where the remote line it copies starts, for who is late (#252): only for a near-identical pair (the
+        /// best remote line's word overlap is above the text threshold, as the issue's 80 timed pairs were).
+        /// nil for an excerpt matched by containment or a line matched against several remote lines joined:
+        /// their starts are where the recognisers cut the lines, not who spoke first.
+        var remoteStart: Double?
         /// Remote speech that overlaps the local line in time (any remote segment, flagged ones included).
         var core: [LabeledSegment]
         /// Remote lines that ended within the whole echo delay before the local line starts
@@ -644,15 +648,16 @@ public enum EchoDeduplicator {
             let score = max(textSimilarity(local.text, remote.text), textContainment(local.text, remote.text))
             if score > textThreshold, score > (best?.score ?? 0) { best = (remote, score) }
         }
-        var matched: (overlap: [String: Double], remoteStart: Double)?
+        var matched: (overlap: [String: Double], remoteStart: Double?)?
         if let best {
-            matched = ([best.remote.speaker: overlapSeconds(best.remote)], best.remote.start)
+            let nearIdentical = textSimilarity(local.text, best.remote.text) > textThreshold
+            matched = ([best.remote.speaker: overlapSeconds(best.remote)], nearIdentical ? best.remote.start : nil)
         } else if overlapping.count > 1 {
             let window = overlapping.sorted { $0.start < $1.start }
             if textSimilarity(local.text, window.map(\.text).joined(separator: " ")) > textThreshold {
                 var result: [String: Double] = [:]
                 for remote in window { result[remote.speaker, default: 0] += overlapSeconds(remote) }
-                matched = (result, window[0].start)
+                matched = (result, nil)
             }
         }
         guard let matched else { return nil }

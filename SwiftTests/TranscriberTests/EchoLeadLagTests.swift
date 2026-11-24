@@ -104,6 +104,25 @@ enum MirrorFixture {
         #expect(result.flaggedCount == 2)
     }
 
+    /// Only near-identical pairs are timed, as the issue's data was: a short excerpt of a longer remote line
+    /// (matched by containment) or a line matched against several remote lines joined is placed by where the
+    /// recognisers cut it, not by who spoke first.
+    @Test func onlyNearIdenticalPairsAreTimed() throws {
+        var segments: [LabeledSegment] = []
+        for i in 0..<5 {
+            let start = Double(i) * 20, text = F.words("c\(i)", 12)
+            segments.append(F.remote(start, start + 10, text))
+            // The first 4 of its 12 words, placed 0.4 s before it: a containment match, not a copy's timing.
+            let excerpt = text.split(separator: " ").prefix(4).joined(separator: " ")
+            segments.append(F.local(start - 0.4, start + 7.6, excerpt))
+        }
+        let result = F.dedup(segments)
+        let verdict = try #require(result.clusters.first)
+        #expect(verdict.matchedSegments == 5)
+        #expect(verdict.lagPairs == nil && verdict.medianLagSeconds == nil && verdict.reason == nil)
+        #expect(verdict.verdict == .echo)
+    }
+
     /// "More than the margin": a median exactly at it is not a lead.
     @Test func aMedianExactlyAtTheMarginIsNotALead() {
         #expect(F.dedup(F.pairs(Array(repeating: -0.25, count: 5)), margin: 0.25).clusters.first?.verdict == .echo)
