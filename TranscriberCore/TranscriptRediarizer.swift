@@ -82,6 +82,25 @@ public enum TranscriptRediarizer {
         return channelNames(in: metadata, source: source)
     }
 
+    /// The keys of `speaker_names` that belong to one channel: its labels', and the names they were
+    /// given that a later rename keyed in turn (`Sam → Tom` after `Remote Speaker 1 → Sam`, #270).
+    /// A name reached from the other channel's labels as well is shared (a rename applies to every
+    /// line carrying the name, on both channels) and is not counted as this channel's.
+    static func channelRenameKeys(in names: [String: String], source: String) -> Set<String> {
+        func reached(from prefix: String) -> Set<String> {
+            var keys = Set(names.keys.filter { $0.hasPrefix(prefix) })
+            var stack = Array(keys)
+            while let key = stack.popLast() {
+                if let next = names[key], names[next] != nil, keys.insert(next).inserted { stack.append(next) }
+            }
+            return keys
+        }
+        let other = source == "local" ? "remote" : "local"
+        let theirs = reached(from: labelPrefix(for: other))
+        let prefix = labelPrefix(for: source)
+        return reached(from: prefix).filter { $0.hasPrefix(prefix) || !theirs.contains($0) }
+    }
+
     /// Clear the re-diarized channel's speaker names, stashing them under `speaker_names_previous`.
     ///
     /// Names are NOT carried across a re-detect BY KEY, and this is deliberate (#202). Speaker
@@ -105,13 +124,13 @@ public enum TranscriptRediarizer {
     /// The other channel is untouched, and a channel with no names is left exactly as it was — no
     /// empty stash key appears in a file people read.
     public static func clearingChannelNames(in metadata: [String: Any], source: String) -> [String: Any] {
-        let cleared = channelNames(in: metadata, source: source)
-        guard !cleared.isEmpty else { return metadata }
+        let names = metadata["speaker_names"] as? [String: String] ?? [:]
+        let goes = channelRenameKeys(in: names, source: source)
+        guard !goes.isEmpty else { return metadata }
+        let cleared = names.filter { goes.contains($0.key) }
 
         var metadata = metadata
-        let names = metadata["speaker_names"] as? [String: String] ?? [:]
-        let prefix = labelPrefix(for: source)
-        let kept = names.filter { !$0.key.hasPrefix(prefix) }
+        let kept = names.filter { !goes.contains($0.key) }
         if kept.isEmpty {
             metadata["speaker_names"] = nil
         } else {
@@ -122,6 +141,22 @@ public enum TranscriptRediarizer {
         previous.merge(cleared) { _, newer in newer }
         metadata[previousNamesKey] = previous
         return metadata
+    }
+
+    /// Metadata key, `true` once the keys of `echo_clusters[].matched_remote` are known to be the
+    /// remote channel's labels as its lines carry them (#270): stamped when a remote re-detect
+    /// remaps them (`remappingMatchedRemote`) and when a mic re-detect writes the record again.
+    public static let matchedRemoteCurrentKey = "echo_matched_remote_current"
+
+    /// Whether the keys of `matched_remote` can be resolved at all (#270). A remote channel
+    /// re-detected by a build that did not remap them (before #270: `rediarized_channels` holds
+    /// "remote", or an older build's `speaker_count_remote`, and no `echo_matched_remote_current`)
+    /// holds the labels of a clustering that no longer exists: "Remote Speaker 1" there is
+    /// whoever that run numbered first, which may be somebody else now. Such keys are unknown.
+    public static func matchedRemoteIsCurrent(in metadata: [String: Any]) -> Bool {
+        if metadata[matchedRemoteCurrentKey] as? Bool == true { return true }
+        guard let rediarized = TranscriptRenamer.rediarizedChannels(in: metadata) else { return false }
+        return !rediarized.contains("remote")
     }
 
     /// Follows the remote speakers a re-detect of the REMOTE channel renumbered, in `echo_clusters`
@@ -137,28 +172,30 @@ public enum TranscriptRediarizer {
     /// side". Keys that land on one new label add up.
     ///
     /// The key is the label the check saw, and a rename may have given that speaker a name since,
-    /// which is what the lines carried (`speaker_names`, followed to its end). Call it BEFORE the
-    /// channel's names are cleared. Only `matched_remote` changes; a record without echo clusters,
-    /// or an entry without `matched_remote`, is returned as it was.
+    /// which is what the lines carried: `TranscriptRenamer.currentLabel`, with the labels that had
+    /// speech before as the lines' labels. A key whose name the renames cannot settle (a name reused
+    /// for someone else) is dropped. So is every key of a record `matchedRemoteIsCurrent` says is
+    /// stale. Call it BEFORE the channel's names are cleared; it stamps
+    /// `echo_matched_remote_current`.
+    ///
+    /// Entries are taken one at a time: one that is not an object, or has no `matched_remote`, is
+    /// left as it was; a key whose seconds are not a finite number is dropped. A record without
+    /// `echo_clusters`, or with none in it, is returned as it was.
     ///
     /// - Parameter overlap: the speech each label of the remote channel had before shares with the
     ///   label it has now (`Outcome.labelOverlap`).
     public static func remappingMatchedRemote(
         in metadata: [String: Any], overlap: SpeakerNameCarryOver.Overlap
     ) -> [String: Any] {
-        guard let entries = metadata["echo_clusters"] as? [[String: Any]] else { return metadata }
+        guard let entries = metadata["echo_clusters"] as? [Any], !entries.isEmpty else { return metadata }
         let names = metadata["speaker_names"] as? [String: String] ?? [:]
+        let current = matchedRemoteIsCurrent(in: metadata)
+        let hadSpeech = Set(overlap.oldSpeech.filter { $0.value > 0 }.keys)
 
-        /// The label the key's lines carry now (before this re-detect): the end of its rename chain.
-        func current(_ key: String) -> String {
-            var seen = [key]
-            while let next = names[seen[seen.count - 1]], !seen.contains(next) { seen.append(next) }
-            return seen[seen.count - 1]
-        }
         /// Where that speaker went, or nil when there is no clear answer.
         func home(of key: String) -> String? {
-            let label = current(key)
-            guard let total = overlap.oldSpeech[label], total > 0, let perNew = overlap.seconds[label],
+            guard current, let label = TranscriptRenamer.currentLabel(of: key, names: names, present: hadSpeech),
+                  let total = overlap.oldSpeech[label], total > 0, let perNew = overlap.seconds[label],
                   let best = perNew.max(by: { ($0.value, $1.key) < ($1.value, $0.key) }),
                   best.value > SpeakerNameCarryOver.most * total,
                   !perNew.contains(where: { $0.key != best.key && $0.value >= SpeakerNameCarryOver.offerShare * total })
@@ -167,21 +204,24 @@ public enum TranscriptRediarizer {
         }
 
         var dropped = 0
-        var remapped = entries
-        for i in remapped.indices {
-            guard let matched = remapped[i]["matched_remote"] as? [String: Any] else { continue }
+        let remapped: [Any] = entries.map { element in
+            guard var entry = element as? [String: Any], let matched = entry["matched_remote"] as? [String: Any]
+            else { return element }
             var moved: [String: Double] = [:]
-            for (key, seconds) in matched {
-                guard let label = home(of: key) else { dropped += 1; continue }
-                moved[label, default: 0] += (seconds as? NSNumber)?.doubleValue ?? 0
+            for (key, value) in matched {
+                guard let seconds = (value as? NSNumber)?.doubleValue, seconds.isFinite, let label = home(of: key)
+                else { dropped += 1; continue }
+                moved[label, default: 0] += seconds
             }
-            remapped[i]["matched_remote"] = moved.mapValues { ($0 * 1000).rounded() / 1000 }
+            entry["matched_remote"] = moved.mapValues { ($0 * 1000).rounded() / 1000 }
+            return entry
         }
         if dropped > 0 {
             Logger.transcription.info("Re-diarize: \(dropped, privacy: .public) remote label(s) in the echo record had no clear successor and were dropped")
         }
         var out = metadata
         out["echo_clusters"] = remapped
+        out[matchedRemoteCurrentKey] = true
         return out
     }
 
@@ -606,6 +646,9 @@ public enum TranscriptRediarizer {
             metadata["echo_clusters"] = verdicts + echo.result.clusters.map {
                 $0.metadataDictionary(track: source, chunk: nil) { finalLabels[$0] ?? $0 }
             }
+            // Its `matched_remote` keys are the remote labels the lines carry now (#270), except on a
+            // record that also holds entries of the remote track the check did not write again.
+            if verdicts.isEmpty { metadata[matchedRemoteCurrentKey] = true }
             TranscriptAssembler.stampEchoFlagged(segments.filter { $0["echo"] as? Bool == true }.count, in: &metadata)
         }
         if let issues = metadata["processing_issues"] as? [[String: Any]] {

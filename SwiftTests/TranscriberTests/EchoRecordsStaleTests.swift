@@ -137,6 +137,60 @@ import AVFoundation
         }
     }
 
+    /// A name reused for someone else: RS1 was "Sam", then one Save corrected RS1 to "Tom" and named
+    /// RS2 "Sam". The map is `{RS1: Sam, Sam: Tom, RS2: Sam}`; whose "Sam" is whose is lost, so the
+    /// key is dropped, not pinned on Tom's speech.
+    @Test func aKeyWhoseNameWasReusedIsDropped() {
+        let names = [r1: "Sam", "Sam": "Tom", r2: "Sam"]
+        let overlap = SpeakerNameCarryOver.Overlap(
+            old: [line(0, 100, "Tom"), line(200, 300, "Sam")],
+            new: [line(0, 100, r1), line(200, 300, r2)])
+        let out = TranscriptRediarizer.remappingMatchedRemote(in: metadata(remote: [r2: 250], names: names), overlap: overlap)
+        #expect(matched(out).isEmpty)
+    }
+
+    /// Renamed there and back (Sam → Tom → Sam): one person, and the lines carried "Sam".
+    @Test func aKeyRenamedThereAndBackFollowsTheNameItsLinesCarry() {
+        let names = [r1: "Sam", "Sam": "Tom", "Tom": "Sam"]
+        let overlap = SpeakerNameCarryOver.Overlap(old: [line(0, 100, "Sam")], new: [line(0, 100, r2)])
+        let out = TranscriptRediarizer.remappingMatchedRemote(in: metadata(remote: [r1: 90], names: names), overlap: overlap)
+        #expect(matched(out) == [r2: 90])
+    }
+
+    /// A remote channel an older build re-detected: its keys are the labels of a clustering that is
+    /// gone, so none of them is followed — even one that happens to name a label with speech now.
+    @Test func aRecordAnOlderBuildLeftStaleDropsEveryKey() {
+        let overlap = SpeakerNameCarryOver.Overlap(old: [line(0, 100, r1)], new: [line(0, 100, r1)])
+        for stamp in [["rediarized_channels": ["remote"]], ["speaker_count_remote": 2]] as [[String: Any]] {
+            let before = metadata(remote: [r1: 90]).merging(stamp) { $1 }
+            let out = TranscriptRediarizer.remappingMatchedRemote(in: before, overlap: overlap)
+            #expect(matched(out).isEmpty)
+            #expect(out[TranscriptRediarizer.matchedRemoteCurrentKey] as? Bool == true)
+        }
+        // Once this build has remapped it, a later re-detect follows the keys again.
+        let stamped = metadata(remote: [r1: 90]).merging(
+            ["rediarized_channels": ["remote"], TranscriptRediarizer.matchedRemoteCurrentKey: true]) { $1 }
+        #expect(matched(TranscriptRediarizer.remappingMatchedRemote(in: stamped, overlap: overlap)) == [r1: 90])
+    }
+
+    /// One malformed entry, or key, is skipped on its own; the rest of the record is still remapped.
+    @Test func aMalformedEntryDoesNotStopTheRemap() throws {
+        var before = metadata(remote: [r2: 250])
+        before["echo_clusters"] = ["not an entry"] + (before["echo_clusters"] as? [[String: Any]] ?? []).map { $0 as Any }
+        var entries = try #require(before["echo_clusters"] as? [Any])
+        var first = try #require(entries[1] as? [String: Any])
+        first["matched_remote"] = [r2: 250.0, r1: "twelve"] as [String: Any]
+        entries[1] = first
+        before["echo_clusters"] = entries
+        let overlap = SpeakerNameCarryOver.Overlap(
+            old: [line(0, 100, r2), line(200, 260, r1)], new: [line(0, 100, r1), line(200, 260, r3)])
+        let out = TranscriptRediarizer.remappingMatchedRemote(in: before, overlap: overlap)
+        let after = try #require(out["echo_clusters"] as? [Any])
+        #expect(after.count == 3)
+        #expect(after[0] as? String == "not an entry")
+        #expect((after[1] as? [String: Any])?["matched_remote"] as? [String: Double] == [r1: 250])
+    }
+
     @Test func anEntryWithoutMatchedRemoteIsLeftAlone() throws {
         let before: [String: Any] = ["echo_clusters": [["track": "local", "label": "Local Speaker 2", "verdict": "echo"]]]
         let out = TranscriptRediarizer.remappingMatchedRemote(
@@ -161,43 +215,96 @@ import AVFoundation
         return m
     }
 
-    private func notice(_ metadata: [String: Any]) throws -> String {
-        try #require(EchoNotice.Findings(metadata: metadata).cardNotice(forRow: echo))
+    /// The card as the dialog builds it: from the transcript, whose remote lines carry `remote`.
+    private func findings(_ metadata: [String: Any], remote: [String]) -> EchoNotice.Findings {
+        EchoNotice.Findings(json: [
+            "metadata": metadata,
+            "segments": remote.enumerated().map { i, label in
+                ["start": Double(i * 10), "end": Double(i * 10 + 5), "speaker": label, "source": "remote", "text": "w"]
+            } + [["start": 500.0, "end": 505.0, "speaker": echo, "source": "local", "text": "w"]],
+        ])
+    }
+
+    private func notice(_ metadata: [String: Any], remote: [String]) throws -> String {
+        try #require(findings(metadata, remote: remote).cardNotice(forRow: echo))
     }
 
     @Test func aRenamedRemoteSpeakerIsQuotedByItsName() throws {
-        let text = try notice(metadata(remote: [r1: 400], names: [r1: "Alice"]))
+        let text = try notice(metadata(remote: [r1: 400], names: [r1: "Alice"]), remote: ["Alice"])
         #expect(text.contains("match Alice at the same time"))
         #expect(!text.contains(r1))
     }
 
     @Test func aTwiceRenamedRemoteSpeakerIsQuotedByItsLastName() throws {
-        let text = try notice(metadata(remote: [r1: 400], names: [r1: "Alice", "Alice": "Alicia"]))
+        let text = try notice(metadata(remote: [r1: 400], names: [r1: "Alice", "Alice": "Alicia"]), remote: ["Alicia"])
         #expect(text.contains("match Alicia at the same time"))
         #expect(!text.contains("Alice at") && !text.contains(r1))
     }
 
-    /// Renamed there and back: the loop ends, and the label is the one the record holds.
+    /// Renamed there and back to the label: the loop ends, and the lines say what it is called now.
     @Test func aLoopInTheNamesDoesNotHangTheCard() throws {
-        let text = try notice(metadata(remote: [r1: 400], names: [r1: "Alice", "Alice": r1]))
-        #expect(text.contains("match \(r1) at the same time") || text.contains("match Alice at the same time"))
+        let text = try notice(metadata(remote: [r1: 400], names: [r1: "Alice", "Alice": r1]), remote: [r1])
+        #expect(text.contains("match \(r1) at the same time"))
+        // Without the lines, a loop has no end to quote.
+        let bare = try #require(EchoNotice.Findings(metadata: metadata(remote: [r1: 400], names: [r1: "Alice", "Alice": r1]))
+            .cardNotice(forRow: echo))
+        #expect(bare.contains("match the other side at the same time"))
+    }
+
+    /// Sam → Tom → Sam: one person, whose lines carry "Sam" again; never "Tom", which no row shows.
+    @Test func aNameGivenThereAndBackIsTheOneTheLinesCarry() throws {
+        let text = try notice(metadata(remote: [r1: 400], names: [r1: "Sam", "Sam": "Tom", "Tom": "Sam"]), remote: ["Sam"])
+        #expect(text.contains("match Sam at the same time"))
+    }
+
+    /// RS1 was "Sam"; one Save corrected RS1 to "Tom" and named RS2 "Sam". The echo matched RS2, who
+    /// is Sam — but the map `{RS1: Sam, Sam: Tom, RS2: Sam}` cannot say so, and following it says
+    /// Tom. The card names neither.
+    @Test func aReusedNameIsNotFollowedToSomebodyElse() throws {
+        let names = [r1: "Sam", "Sam": "Tom", r2: "Sam"]
+        let text = try notice(metadata(remote: [r2: 400], names: names), remote: ["Tom", "Sam"])
+        #expect(text.contains("match the other side at the same time"))
+        #expect(!text.contains("Tom"))
+    }
+
+    /// A later Save overwrote the reused name's entry: RS1 "Sam", then {Sam: Tom, RS2: Sam}, then
+    /// {Sam: Bob}. RS1 is Tom, RS2 is Bob, and `{RS1: Sam, Sam: Bob, RS2: Sam}` has lost Tom: the
+    /// chain from RS1 meets exactly one label on the lines (Bob), the wrong one. Neither resolves.
+    @Test func anOverwrittenRenameResolvesNeitherSpeaker() {
+        let names = [r1: "Sam", "Sam": "Bob", r2: "Sam"]
+        #expect(TranscriptRenamer.currentLabel(of: r1, names: names, present: ["Tom", "Bob"]) == nil)
+        #expect(TranscriptRenamer.currentLabel(of: r2, names: names, present: ["Tom", "Bob"]) == nil)
+        // Two labels given one name, never renamed on: both are that name.
+        #expect(TranscriptRenamer.currentLabel(of: r1, names: [r1: "Sam", r2: "Sam"], present: ["Sam"]) == "Sam")
+        // A label never renamed is itself, whatever the lines.
+        #expect(TranscriptRenamer.currentLabel(of: r1, names: [r2: "Sam"], present: []) == r1)
+    }
+
+    /// A remote channel an older build re-detected: its keys name a clustering that is gone.
+    @Test func aRecordAnOlderBuildLeftStaleQuotesNoRemoteLabel() throws {
+        var m = metadata(remote: [r1: 400])
+        m["rediarized_channels"] = ["remote"]
+        #expect(try notice(m, remote: [r1]).contains("match the other side at the same time"))
+        m[TranscriptRediarizer.matchedRemoteCurrentKey] = true
+        #expect(try notice(m, remote: [r1]).contains("match \(r1) at the same time"))
     }
 
     @Test func twoLabelsGivenTheSameNameAreOnePersonAndTheirSecondsAdd() throws {
-        let f = EchoNotice.Findings(metadata: metadata(remote: [r1: 100, r2: 150, "Remote Speaker 3": 120],
-                                                       names: [r1: "Alice", r2: "Alice"]))
+        let f = findings(metadata(remote: [r1: 100, r2: 150, "Remote Speaker 3": 120], names: [r1: "Alice", r2: "Alice"]),
+                         remote: ["Alice", "Remote Speaker 3"])
         #expect(f.voices.first?.remoteLabels == ["Alice", "Remote Speaker 3"])    // 250 s, then 120 s
         #expect(try #require(f.cardNotice(forRow: echo)).contains("match Alice and Remote Speaker 3"))
     }
 
     @Test func aLabelNobodyRenamedIsQuotedAsItAlwaysWas() throws {
-        let text = try notice(metadata(remote: [r1: 400, r2: 50], names: ["Local Speaker 1": "Robin", "Remote Speaker 9": "Zed"]))
+        let text = try notice(metadata(remote: [r1: 400, r2: 50], names: ["Local Speaker 1": "Robin", "Remote Speaker 9": "Zed"]),
+                              remote: [r1, r2])
         #expect(text.contains("match \(r1) and \(r2) at the same time"))
     }
 
     /// A rename of this side does not touch what the card says about the other.
     @Test func aLocalRenameDoesNotChangeTheQuotedRemoteLabel() throws {
-        let f = EchoNotice.Findings(metadata: metadata(remote: [r1: 400], names: [echo: "Voice B"]))
+        let f = findings(metadata(remote: [r1: 400], names: [echo: "Voice B"]), remote: [r1])
         let text = try #require(f.cardNotice(forRow: "Voice B"))
         #expect(text.contains("match \(r1) at the same time"))
     }
@@ -376,6 +483,51 @@ import AVFoundation
             transcript: url, source: "remote", speakerCount: 2, diarizer: Scripted(result: result([(10, 20, "A"), (30, 40, "B")])))
         let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         #expect((json["metadata"] as? [String: Any])?["echo_clusters"] == nil)
+    }
+
+    @Test("a name a later rename keyed is cleared with the channel's labels, so it cannot resolve a new speaker")
+    func aNameKeyedEntryDoesNotSurviveARemoteRedetect() async throws {
+        // RS1 was named Sam, then Sam renamed Tom: `{RS1: Sam, Sam: Tom}`. The lines carry "Tom".
+        let before = [line(10, 20, "Tom"), line(30, 40, "Remote Speaker 2"), line(50, 60, "Tom")]
+        let (url, cleanup) = try makeRecording(
+            segments: before,
+            metadata: echoRecord(remote: ["Remote Speaker 1": 70]).merging(
+                ["speaker_names": ["Remote Speaker 1": "Sam", "Sam": "Tom", "Local Speaker 1": "Robin"]]) { $1 })
+        defer { cleanup() }
+        _ = try await TranscriptRediarizer.rediarize(
+            transcript: url, source: "remote", speakerCount: 2,
+            diarizer: Scripted(result: result([(10, 20, "A"), (50, 60, "A"), (30, 40, "B")])))
+        var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var metadata = try #require(json["metadata"] as? [String: Any])
+        // The whole remote chain went to the stash; this side's name stayed.
+        #expect(metadata["speaker_names"] as? [String: String] == ["Local Speaker 1": "Robin"])
+        #expect(metadata["speaker_names_previous"] as? [String: String] == ["Remote Speaker 1": "Sam", "Sam": "Tom"])
+        #expect(metadata[TranscriptRediarizer.matchedRemoteCurrentKey] as? Bool == true)
+        let tomNow = try #require((json["segments"] as? [[String: Any]])?.first { $0["start"] as? Double == 10 }?["speaker"] as? String)
+        #expect(try matchedRemote(url) == [tomNow: 70])
+
+        // Somebody names the speaker "Sam": the card quotes Sam, not the Tom of the old clustering.
+        let other = tomNow == "Remote Speaker 1" ? "Remote Speaker 2" : "Remote Speaker 1"
+        #expect(TranscriptRenamer.applyRenames([tomNow: "Sam", other: "Ann"], jsonPath: url))
+        json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        metadata = try #require(json["metadata"] as? [String: Any])
+        #expect((metadata["speaker_names"] as? [String: String])?["Sam"] == nil)
+        let text = try #require(EchoNotice.Findings(json: json).cardNotice(forRow: "Local Speaker 2"))
+        #expect(text.contains("match Sam at the same time"))
+    }
+
+    @Test("a second remote re-detect still follows the keys the first one remapped")
+    func aSecondRemoteRedetectStillRemaps() async throws {
+        let before = [line(10, 20, "Remote Speaker 1"), line(30, 40, "Remote Speaker 2")]
+        let (url, cleanup) = try makeRecording(segments: before, metadata: echoRecord(remote: ["Remote Speaker 1": 60]))
+        defer { cleanup() }
+        for turns in [[(30.0, 40.0, "A"), (10.0, 20.0, "B")], [(10.0, 20.0, "A"), (30.0, 40.0, "B")]] {
+            _ = try await TranscriptRediarizer.rediarize(
+                transcript: url, source: "remote", speakerCount: 2, diarizer: Scripted(result: result(turns)))
+        }
+        let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let now = try #require((json["segments"] as? [[String: Any]])?.first { $0["start"] as? Double == 10 }?["speaker"] as? String)
+        #expect(try matchedRemote(url) == [now: 60])
     }
 
     @Test("a renamed remote speaker is followed through the name, and the re-detect still clears the names")
