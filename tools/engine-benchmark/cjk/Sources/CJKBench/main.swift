@@ -109,6 +109,56 @@ struct SenseVoiceEngine: Engine {
     }
 }
 
+/// SenseVoice's fp32 encoder on the CPU, driven here: FluidAudio 0.17.7 pads to its fp16 buckets (128…1800 frames),
+/// which the fp32 export (fixed 1800 frames) refuses. Same pipeline otherwise: fp32 preprocessor, encoder, greedy CTC.
+struct SenseVoiceFP32Engine: Engine {
+    let preprocessor: MLModel
+    let encoder: MLModel
+    let vocabulary: [Int: String]
+    let textNorm: Int32
+    func run(file: URL, lang: String) async throws -> Output {
+        let audio = try samples16k(file)
+        let wave = try MLMultiArray(shape: [1, audio.count as NSNumber], dataType: .float32)
+        let wp = wave.dataPointer.assumingMemoryBound(to: Float32.self)
+        for i in 0..<audio.count { wp[i] = audio[i] * SenseVoiceConfig.waveformScale }
+        let feats = try await preprocessor.prediction(from: MLDictionaryFeatureProvider(
+            dictionary: ["waveform": MLFeatureValue(multiArray: wave)])).featureValue(for: "features")!.multiArrayValue!
+        let dim = SenseVoiceConfig.featureDim, bucket = SenseVoiceConfig.maxFrames
+        let t = min(feats.shape[1].intValue, bucket)
+        let speech = try MLMultiArray(shape: [1, bucket as NSNumber, dim as NSNumber], dataType: .float32)
+        let sp = speech.dataPointer.assumingMemoryBound(to: Float32.self)
+        memset(sp, 0, bucket * dim * 4)
+        memcpy(sp, feats.dataPointer, t * dim * 4)
+        func int(_ v: Int32) throws -> MLMultiArray {
+            let a = try MLMultiArray(shape: [1], dataType: .int32); a[0] = NSNumber(value: v); return a
+        }
+        let out = try await encoder.prediction(from: MLDictionaryFeatureProvider(dictionary: [
+            "speech": MLFeatureValue(multiArray: speech), "speech_lengths": MLFeatureValue(multiArray: try int(Int32(t))),
+            "language": MLFeatureValue(multiArray: try int(0)), "textnorm": MLFeatureValue(multiArray: try int(textNorm)),
+        ]))
+        let logits = out.featureValue(for: "ctc_logits")!.multiArrayValue!
+        let frames = min(SenseVoiceConfig.numQueryTokens + t, logits.shape[1].intValue)
+        let vocab = logits.shape[2].intValue, stride = logits.strides[1].intValue
+        var ids: [Int] = []
+        var prev = -1
+        for f in 0..<frames {
+            var best = 0
+            var bestVal = -Float.infinity
+            for v in 0..<vocab {
+                let x = logits[f * stride + v].floatValue
+                if x > bestVal { bestVal = x; best = v }
+            }
+            if best != SenseVoiceConfig.blankId && best != prev { ids.append(best) }
+            prev = best
+        }
+        let raw = decodeCtcTokenIds(ids, vocabulary: vocabulary)
+        let pattern = try NSRegularExpression(pattern: "<\\|([^|]*)\\|>")
+        let tags = pattern.matches(in: raw, range: NSRange(raw.startIndex..., in: raw)).map { (raw as NSString).substring(with: $0.range(at: 1)) }
+        let text = raw.replacingOccurrences(of: "<\\|[^|]*\\|>", with: "", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+        return Output(text: text, tag: tags.first, tags: tags)
+    }
+}
+
 struct ParaformerEngine: Engine {
     let manager: ParaformerManager
     func run(file: URL, lang: String) async throws -> Output {
@@ -225,10 +275,12 @@ func makeEngine(_ a: Args, langs: [String]) async throws -> Engine {
     switch a.engine {
     case "sensevoice": return SenseVoiceEngine(manager: try await SenseVoiceManager.load(precision: .fp16))
     case "sensevoice-int8": return SenseVoiceEngine(manager: try await SenseVoiceManager.load(precision: .int8))
-    case "sensevoice-fp32":
-        return SenseVoiceEngine(manager: try await senseVoice(encoder: ModelNames.SenseVoice.encoderFp32, units: .cpuOnly, textNorm: 15))
-    case "sensevoice-fp32-itn":
-        return SenseVoiceEngine(manager: try await senseVoice(encoder: ModelNames.SenseVoice.encoderFp32, units: .cpuOnly, textNorm: 14))
+    case "sensevoice-fp32", "sensevoice-fp32-itn":
+        let dir = modelsRoot.appendingPathComponent("sensevoice-small")
+        return SenseVoiceFP32Engine(
+            preprocessor: try loadCompiled(dir, ModelNames.SenseVoice.preprocessor, .cpuOnly),
+            encoder: try loadCompiled(dir, ModelNames.SenseVoice.encoderFp32, .cpuOnly),
+            vocabulary: try loadVocab(dir), textNorm: a.engine.hasSuffix("itn") ? 14 : 15)
     case "sensevoice-itn":
         return SenseVoiceEngine(manager: try await senseVoice(encoder: ModelNames.SenseVoice.encoder, units: .cpuAndNeuralEngine, textNorm: 14))
     case "paraformer": return ParaformerEngine(manager: try await ParaformerManager.load(precision: .fp16))

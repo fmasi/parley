@@ -76,6 +76,12 @@ def main():
                     tot_n += len(rr)
                     per.append(e / max(len(rr), 1))
                 line += f"  CER corpus {100 * tot_e / tot_n:5.1f}%  mean {100 * sum(per) / len(per):5.1f}%"
+                blank = [r for r in rows if not norm(r.get("text", ""), lang)]
+                if blank:
+                    kept = [r for r in rows if norm(r.get("text", ""), lang)]
+                    e2 = sum(edits(norm(ref[r["file"]], lang), norm(r["text"], lang)) for r in kept)
+                    n2 = sum(len(norm(ref[r["file"]], lang)) for r in kept)
+                    line += f"  blank {len(blank)}/{len(rows)} (CER without them {100 * e2 / max(n2, 1):5.1f}%)"
             tags = [r.get("tag") for r in rows if "tag" in r]
             if tags:
                 exp = EXPECTED[lang]
