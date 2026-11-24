@@ -1642,8 +1642,9 @@ voice; never a real third party. `echo_meta` is the helper of "Echo cluster dete
       and repeat each right after, once word for word and once with a word added ("No, not possible to
       wait.", "OK then, thanks."). 3 minutes. Stop.
   - PASS: every repetition is in the TXT under your label; no `echo: true` in the JSON. In
-    `metadata.mic_echo_cancel.per_chunk`, each chunk has `start`, `seconds` and a `far_end_lift_db`
-    under 15 (write it down). `stream.log` shows `held back: N no coupling` on the chunk's `Echo cluster`
+    `metadata.acoustic_coupling.per_chunk` (and `metadata.mic_echo_cancel.per_chunk`), each chunk has
+    `start`, `seconds` and a `far_end_lift_db` under 15 (write it down). EL-07 repeats this with
+    cancellation off. `stream.log` shows `held back: N no coupling` on the chunk's `Echo cluster`
     line for the word-for-word repetitions.
 - [ ] **EL-04 Loudspeakers: the echo copy is still flagged.** As EL-03 but output = the laptop speakers
       and you stay silent. PASS: the far end's lines that came back through the mic carry `echo: true`;
@@ -1654,3 +1655,48 @@ voice; never a real third party. `echo_meta` is the helper of "Echo cluster dete
 - [ ] **EL-06 Another language is untouched.** With a French or German podcast through the speakers (mic
       echo cancel off), 2 minutes: the echo lines are flagged as before (compare with E-01's numbers), and a
       line of your own in that language over it is not.
+
+## Far-end lift on every chunk (#374) and who is late (#252) — added 2026-11-24
+
+Synthetic speech only, as above. `lift` prints each chunk's measure and the echo verdicts' timing:
+
+```bash
+lift() { python3 -c 'import json,sys;m=json.load(open(sys.argv[1]))["metadata"];print(json.dumps({"acoustic_coupling":m.get("acoustic_coupling"),"mic_echo_cancel":(m.get("mic_echo_cancel") or {}).get("per_chunk"),"clusters":[{k:c.get(k) for k in ("chunk","label","verdict","share","median_lag_seconds","lag_pairs","reason")} for c in m.get("echo_clusters",[])]},indent=1))' "$1"; }
+```
+
+- [ ] **EL-07 Headphones, echo cancellation OFF: a phrase you repeat stays yours (#374).** `cfg
+      mic_echo_cancel off`, output = headphones or AirPods, then EL-03's script (the far end says short
+      phrases, you repeat each right after; 3 minutes).
+  - PASS: every repetition is in the TXT under your label; no `echo: true`. `lift` shows
+    `acoustic_coupling.per_chunk` with one entry per chunk, `far_end_lift_db` under 15, and
+    `mic_echo_cancel` null. `stream.log` has `far end … above the mic's floor (levels only, … s of audio
+    in … s)` per chunk and `held back: N no coupling` on the chunk's `Echo cluster` line.
+  - MEASURE: write down each chunk's `far_end_lift_db` and the `in … s` time of a 30-minute chunk if
+    you record one (synthetic: 2.0–2.2 s in a debug build; expect less in the release build).
+- [ ] **EL-08 Loudspeakers, cancellation OFF: echo still flagged (#374).** As EL-07 with output = the laptop
+      speakers and you silent. PASS: the far end's lines on the mic carry `echo: true`; `far_end_lift_db`
+      is 15 or more (write it down).
+- [ ] **EL-09 The unmeasured band (#374) — MEASURE, no pass/fail.** Output = the laptop speakers at their
+      lowest audible volume, a fan or a running tap near the Mac, cancellation off, 3 minutes of the far
+      end talking with you silent. Write down `far_end_lift_db` and whether its echo lines were flagged.
+      A value between 7 and 15 dB is the band #365's 15 dB line was never measured on: report it on #374
+      with the echo lines it left unflagged.
+- [ ] **EL-10 An old transcript still re-detects as before (#374).** Re-detect "This side" on a recording
+      made before this build with cancellation off (no `acoustic_coupling` key). PASS: it completes, and
+      what it flags matches the same re-detect on the previous build (unmeasured: rule (a) holds nothing
+      back).
+- [ ] **WL-01 The mirror case: the far end returns your voice (#252).** A second Mac or phone joins the call
+      on its loudspeaker with its mic open and its echo cancellation off (in Zoom: Settings → Audio →
+      "Original sound for musicians" on, echo cancellation off; or a speakerphone without AEC). On this
+      Mac, headphones, `cfg mic_echo_cancel off`. Talk for 3 minutes in full sentences while the far end
+      stays silent; your voice comes back on the remote channel.
+  - PASS: your lines are in the TXT under your label, none `echo: true`. `lift`: your cluster's entry has
+    `verdict` `"kept"`, a negative `median_lag_seconds` and `reason` `"local_leads"`.
+  - MEASURE (the decision #252 waits for): write down `median_lag_seconds` and `lag_pairs`, and the round
+    trip you expected. The margin (`echo_local_lead_margin_seconds`, 0.1 s) was picked without a mirror
+    recording; if `median_lag_seconds` is closer to −0.1 than −0.15, report it on #252.
+- [ ] **WL-02 Bleed in the other direction is unchanged (#252).** Repeat E-01 (speaker mode, the far end
+      talking, you silent). PASS: the bleed cluster is `"echo"` as before, `reason` absent, and
+      `median_lag_seconds` positive (write it down: #242 measured +0.08 s).
+- [ ] **WL-03 Re-detect keeps the mirror case (#252).** On the WL-01 recording, re-detect "This side" at 1.
+      PASS: your lines are still in the TXT under your name; no local `"echo"` entry in `echo_clusters`.
