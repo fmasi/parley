@@ -43,6 +43,52 @@ import Testing
         #expect(await cache.lookup(Self.key()) == nil)
     }
 
+    /// A release lets the analysis go but keeps the cache usable: the next lookup's store is kept.
+    @Test func aReleaseKeepsTheCacheUsable() async {
+        let cache = SpeakerAnalysisCache()
+        await cache.store(Self.analysis, for: Self.key())
+        await cache.release(.memoryPressure)
+        #expect(await cache.heldKey == nil)
+        await cache.store(Self.analysis, for: Self.key())
+        #expect(await cache.heldKey == nil, "a store after the release and before a lookup is refused")
+        #expect(await cache.lookup(Self.key()) == nil)
+        await cache.store(Self.analysis, for: Self.key())
+        #expect(await cache.heldKey == Self.key())
+    }
+
+    /// Every open cache is reached: what a recording's start and memory pressure call.
+    @Test func releaseAllReachesEveryOpenCache() async {
+        let a = SpeakerAnalysisCache(), b = SpeakerAnalysisCache()
+        await a.store(Self.analysis, for: Self.key())
+        await b.store(Self.analysis, for: Self.key("remote"))
+        SpeakerAnalysisCache.releaseAll(.recordingStarted)
+        for _ in 0..<1000 {
+            let aHeld = await a.heldKey, bHeld = await b.heldKey
+            if aHeld == nil && bHeld == nil { break }
+            await Task.yield()
+        }
+        let aHeld = await a.heldKey, bHeld = await b.heldKey
+        #expect(aHeld == nil && bHeld == nil)
+    }
+
+    @Test func aWarningOrWorseReleases() {
+        #expect(SpeakerAnalysisCache.releasesOnPressure(.warning))
+        #expect(SpeakerAnalysisCache.releasesOnPressure(.critical))
+        #expect(SpeakerAnalysisCache.releasesOnPressure([.warning, .critical]))
+        #expect(!SpeakerAnalysisCache.releasesOnPressure(.normal))
+    }
+
+    /// The prepare settings are in the key, the clustering settings are not: a forced count or a
+    /// clustering threshold must not miss, the overlap rule or the compute units must.
+    @Test func thePreparationIdentityHoldsThePrepareSettingsOnly() {
+        let stock = FluidAudioDiarizer().preparationIdentity
+        #expect(stock.contains("segmentation=") && stock.contains("embedding=") && stock.contains("computeUnits=all"))
+        #expect(FluidAudioDiarizer(clusteringThreshold: 0.7, maxSpeakers: 3).preparationIdentity == stock)
+        #expect(FluidAudioDiarizer(excludeOverlap: false).preparationIdentity != stock)
+        #expect(FluidAudioDiarizer(computeUnits: .neuralEngine).preparationIdentity != stock)
+        #expect(FluidAudioDiarizer(computeUnits: .cpuOnly).preparationIdentity != FluidAudioDiarizer(computeUnits: .neuralEngine).preparationIdentity)
+    }
+
     @Test func aFileIsKeyedByItsSizeAndDate() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("analysis-key-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -110,6 +156,7 @@ import Testing
         var cache: SpeakerAnalysisCache?
         var failFirstPrepare = false
         var closeCacheDuringPrepare = false
+        var releaseCacheDuringPrepare: SpeakerAnalysisCache?
 
         var calls: [String] { lock.withLock { log } }
         private func note(_ s: String) { lock.withLock { log.append(s) } }
@@ -136,6 +183,7 @@ import Testing
             let held = await cache?.heldKey
             lock.withLock { heldDuringPrepare.append(held) }
             if closeCacheDuringPrepare { await cache?.close() }
+            await releaseCacheDuringPrepare?.release(.recordingStarted)
             if failFirstPrepare, calls.filter({ $0.hasPrefix("prepare") }).count == 1 { throw CocoaError(.featureUnsupported) }
             progress?(1, 2); progress?(2, 2)
             return PreparedSpeakerAnalysis(payload: audio.count, sampleCount: audio.count, embeddingCount: 8)
@@ -185,9 +233,10 @@ import Testing
     }
 
     private func redetect(_ t: URL, _ source: String = "local", at count: Int, with d: any DiarizationProvider,
-                          cache: SpeakerAnalysisCache?, log: ProgressLog? = nil) async throws -> TranscriptRediarizer.Outcome {
+                          cache: SpeakerAnalysisCache?, canceller: (any MicEchoSampleCancelling)? = nil,
+                          log: ProgressLog? = nil) async throws -> TranscriptRediarizer.Outcome {
         try await TranscriptRediarizer.rediarize(transcript: t, source: source, speakerCount: count, diarizer: d,
-                                                 speakerAnalysis: cache, echoCanceller: nil,
+                                                 speakerAnalysis: cache, echoCanceller: canceller,
                                                  onProgress: log.map { log in { log.record($0) } })
     }
 
@@ -291,6 +340,105 @@ import Testing
         #expect(d.calls == ["prepare 2", "prepare 1", "cluster 1"])
         #expect(outcome.speakerCount == 1)
         #expect(await cache.heldKey != nil)
+    }
+
+    // MARK: - The echo canceller in the key (#341 review)
+
+    /// Counts its calls; passes the mic through, or throws on the calls listed.
+    final class CountingCanceller: MicEchoSampleCancelling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        private let failing: Set<Int>
+        init(failing: Set<Int> = []) { self.failing = failing }
+        var calls: Int { lock.withLock { count } }
+        func cancelEcho(microphone: [Float], reference: [Float]) throws -> (samples: [Float], framesReverted: Int) {
+            let call = lock.withLock { count += 1; return count }
+            if failing.contains(call) { throw CocoaError(.featureUnsupported) }
+            return (microphone, 0)
+        }
+    }
+    /// Another canceller: another analysis.
+    struct OtherCanceller: MicEchoSampleCancelling {
+        func cancelEcho(microphone: [Float], reference: [Float]) throws -> (samples: [Float], framesReverted: Int) { (microphone, 0) }
+    }
+
+    /// A recording as the app writes it — one stereo AAC chunk (L = mic, R = system) — whose mic was echo-cancelled.
+    private func makeEchoCancelledRecording() async throws -> (transcript: URL, cleanup: () -> Void) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("analysis-echo-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+        let system = dir.appendingPathComponent("call-0.wav"), mic = dir.appendingPathComponent("call-0_mic.wav")
+        for file in [system, mic] {
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16000)!
+            buffer.frameLength = 16000
+            for i in 0..<16000 { buffer.floatChannelData![0][i] = 0.1 * sin(Float(i) * 0.05) }
+            try AVAudioFile(forWriting: file, settings: format.settings).write(from: buffer)
+        }
+        let archive = try await AudioArchiver.archive(systemAudio: system, micAudio: mic, outputDirectory: dir, bitrateKbps: 64)
+        let transcript = dir.appendingPathComponent("t.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["audio_paths": [archive.archivePath.path], "chunk_durations": [1.0], "mic_echo_cancel": ["chunks": 1]],
+            "segments": Self.segments,
+        ]).write(to: transcript)
+        return (transcript, { try? FileManager.default.removeItem(at: dir) })
+    }
+
+    /// The kept analysis is of the cancelled mic: a second Re-detect does not cancel again.
+    @Test func aKeptAnalysisOfAnEchoCancelledMicSkipsTheCanceller() async throws {
+        let (t, cleanup) = try await makeEchoCancelledRecording(); defer { cleanup() }
+        let cache = SpeakerAnalysisCache(), d = ReusingDiarizer(), canceller = CountingCanceller()
+        _ = try await redetect(t, at: 1, with: d, cache: cache, canceller: canceller)
+        #expect(canceller.calls == 1)
+        _ = try await redetect(t, at: 2, with: d, cache: cache, canceller: canceller)
+        #expect(canceller.calls == 1)
+        #expect(d.calls.filter { $0.hasPrefix("prepare") }.count == 1)
+    }
+
+    @Test func anotherCancellerIsAnotherAnalysis() async throws {
+        let (t, cleanup) = try await makeEchoCancelledRecording(); defer { cleanup() }
+        let cache = SpeakerAnalysisCache(), d = ReusingDiarizer()
+        _ = try await redetect(t, at: 1, with: d, cache: cache, canceller: CountingCanceller())
+        _ = try await redetect(t, at: 1, with: d, cache: cache, canceller: OtherCanceller())
+        _ = try await redetect(t, at: 1, with: d, cache: cache, canceller: nil)
+        #expect(d.calls.filter { $0.hasPrefix("prepare") }.count == 3)
+    }
+
+    /// A canceller that failed this time left the raw mic in the analysis: used for this re-detect,
+    /// never kept, so the next Re-detect cancels and analyses again.
+    @Test func anAnalysisOfAMicTheCancellerFailedOnIsNotKept() async throws {
+        let (t, cleanup) = try await makeEchoCancelledRecording(); defer { cleanup() }
+        let cache = SpeakerAnalysisCache(), d = ReusingDiarizer(), canceller = CountingCanceller(failing: [1])
+        let first = try await redetect(t, at: 1, with: d, cache: cache, canceller: canceller)
+        #expect(first.speakerCount == 1)
+        #expect(await cache.heldKey == nil)
+        _ = try await redetect(t, at: 2, with: d, cache: cache, canceller: canceller)
+        #expect(canceller.calls == 2)
+        #expect(d.calls.filter { $0.hasPrefix("prepare") }.count == 2)
+        #expect(await cache.heldKey != nil)
+    }
+
+    // MARK: - Released while the dialog stays open (#341 review)
+
+    /// A recording started, or memory pressure: the analysis goes, the dialog's next Re-detect misses
+    /// and keeps the new one.
+    @Test func aReleasedAnalysisIsMadeAgainByTheNextRedetect() async throws {
+        let (t, _, cleanup) = try makeRecording(); defer { cleanup() }
+        let cache = SpeakerAnalysisCache(), d = ReusingDiarizer()
+        _ = try await redetect(t, at: 1, with: d, cache: cache)
+        await cache.release(.recordingStarted)
+        #expect(await cache.heldKey == nil)
+        _ = try await redetect(t, at: 2, with: d, cache: cache)
+        #expect(d.calls.filter { $0.hasPrefix("prepare") }.count == 2)
+        #expect(await cache.heldKey != nil)
+    }
+
+    /// A re-detect already running when the release came does not put its analysis back.
+    @Test func aReleaseDuringAnAnalysisKeepsNothing() async throws {
+        let (t, _, cleanup) = try makeRecording(); defer { cleanup() }
+        let cache = SpeakerAnalysisCache(), d = ReusingDiarizer()
+        d.releaseCacheDuringPrepare = cache
+        _ = try await redetect(t, at: 1, with: d, cache: cache)
+        #expect(await cache.heldKey == nil)
     }
 }
 

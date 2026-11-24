@@ -350,6 +350,10 @@ public enum TranscriptRediarizer {
         var analysis: PreparedSpeakerAnalysis?
         if let reuse { analysis = await reuse.cache.lookup(reuse.key) }
         let decoded: DecodedChannelAudio?
+        // Chunks whose echo cancellation failed this time and fell back to the raw mic (#341 review):
+        // the analysis of such a decode is not the one a working canceller gives, so it is used for
+        // this re-detect and not kept — a transient failure must not stick for the dialog's lifetime.
+        var echoCancelFallbacks = 0
         if let analysis {
             // The files first, as a decode would (#29): the key saw them, but say what a re-detect says.
             try audioPrecheck(layout: layout, source: source, fileExists: { FileManager.default.fileExists(atPath: $0) })
@@ -362,7 +366,8 @@ public enum TranscriptRediarizer {
             decoded = try await decodeChannelAudio(
                 layout: layout, source: source, chunkDurations: chunkDurations, chunkOffsets: chunkOffsets,
                 hasCaptureGaps: hasCaptureGaps, gapSeconds: gapSeconds, scratchDirectory: scratchDirectory,
-                echoCanceller: wasCancelled ? echoCanceller : nil, onProgress: onProgress)
+                echoCanceller: wasCancelled ? echoCanceller : nil, echoCancelFallbacks: &echoCancelFallbacks,
+                onProgress: onProgress)
         }
 
         // The user's answer is authoritative: force the count AND skip minority absorption, which
@@ -385,7 +390,14 @@ public enum TranscriptRediarizer {
                             guard total > 0 else { return }
                             onProgress?(Progress(phase: .detectingSpeakers, fraction: Double(processed) / Double(total)))
                         })
-                    await reuse.cache.store(prepared, for: reuse.key)
+                    // Kept only for a re-detect still wanted: never on FluidAudio's own cancellation order.
+                    try Task.checkCancellation()
+                    if echoCancelFallbacks == 0 {
+                        await reuse.cache.store(prepared, for: reuse.key)
+                    } else {
+                        Logger.transcription.info(
+                            "Re-detect: speaker analysis not kept — echo cancellation fell back to the raw mic on \(echoCancelFallbacks, privacy: .public) chunk(s)")
+                    }
                     analysis = prepared
                 }
                 onProgress?(Progress(phase: .regroupingSpeakers))
@@ -924,6 +936,7 @@ public enum TranscriptRediarizer {
         gapSeconds: [Double],
         scratchDirectory: URL,
         echoCanceller: (any MicEchoSampleCancelling)? = nil,
+        echoCancelFallbacks: inout Int,
         onProgress: (@Sendable (Progress) -> Void)?
     ) async throws -> DecodedChannelAudio {
         let wantsLocal = source == "local"
@@ -1025,6 +1038,7 @@ public enum TranscriptRediarizer {
                         } catch {
                             // As in the pipeline: a canceller that cannot run leaves the raw mic, never a failed re-detect.
                             Logger.transcription.error("Re-detect: mic echo cancellation failed for chunk \(position + 1, privacy: .public), diarizing its raw mic: \(ChunkProcessor.echoCancelFailureDetail(error), privacy: .private)")
+                            echoCancelFallbacks += 1
                             decodedChunk = samples
                         }
                     } else {
