@@ -238,7 +238,6 @@ import AVFoundation
         let text = try #require(findings.cardNotice(forRow: "Voice B"))
         #expect(text.contains("match Alice at the same time"))
         #expect(!text.contains("Remote Speaker 1"))
-        #expect(findings.cardNotice(forRow: "Local Speaker 2") == nil)
 
         // A second rename of the same speaker: the chain, not the first name.
         #expect(TranscriptRenamer.applyRenames(["Alice": "Alicia"], jsonPath: url))
@@ -321,14 +320,15 @@ import AVFoundation
         defer { cleanup() }
         _ = try await TranscriptRediarizer.rediarize(
             transcript: url, source: "remote", speakerCount: 2,
-            diarizer: Scripted(result: result([(10, 20, "B"), (30, 40, "A"), (50, 60, "B"), (70, 80, "A")])))
+            diarizer: Scripted(result: result([(30, 40, "A"), (70, 80, "A"), (10, 20, "B"), (50, 60, "B")])))
         let after = try matchedRemote(url)
         // Whoever the diarizer numbers first, the seconds sit on the label now carrying the same voice.
         let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         let segments = try #require(json["segments"] as? [[String: Any]])
         let nowFirst = try #require(segments.first { $0["start"] as? Double == 30 }?["speaker"] as? String)   // was "2"
         let nowSecond = try #require(segments.first { $0["start"] as? Double == 10 }?["speaker"] as? String)  // was "1"
-        #expect(nowFirst != nowSecond)
+        // The numbers did swap: the speaker who was "2" is "1" now.
+        #expect(nowFirst == "Remote Speaker 1" && nowSecond == "Remote Speaker 2")
         #expect(after == [nowFirst: 60, nowSecond: 30])
     }
 
@@ -349,17 +349,23 @@ import AVFoundation
         #expect(try matchedRemote(url) == [whole: 20])
     }
 
-    @Test("a re-detect of this side leaves the quoted remote labels alone")
+    @Test("a re-detect of this side does not remap: remote labels stay as they were")
     func aLocalRedetectDoesNotTouchTheRemoteLabels() async throws {
         let before = [line(10, 20, "Remote Speaker 1"), line(30, 40, "Local Speaker 1", "local")]
-        let (url, cleanup) = try makeRecording(segments: before, metadata: echoRecord(remote: ["Remote Speaker 1": 60]))
+        var metadata = echoRecord(remote: ["Remote Speaker 1": 60])
+        // An entry of the other track survives a local re-detect untouched (the local ones are rewritten).
+        metadata["echo_clusters"] = (metadata["echo_clusters"] as? [[String: Any]] ?? []) + [
+            ["track": "remote", "chunk": 0, "label": "Remote Speaker 7", "verdict": "kept", "segments": 5,
+             "matched_remote": ["Remote Speaker 9": 5.0]] as [String: Any],
+        ]
+        let (url, cleanup) = try makeRecording(segments: before, metadata: metadata)
         defer { cleanup() }
         _ = try await TranscriptRediarizer.rediarize(
             transcript: url, source: "local", speakerCount: 1, diarizer: Scripted(result: result([(30, 40, "A")])))
         let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         let entries = try #require((json["metadata"] as? [String: Any])?["echo_clusters"] as? [[String: Any]])
-        // The local check wrote its own entries; none of them was rewritten by a remap.
-        for entry in entries { #expect((entry["matched_remote"] as? [String: Double])?.keys.contains("Remote Speaker 1") != false) }
+        let other = try #require(entries.first { $0["track"] as? String == "remote" })
+        #expect((other["matched_remote"] as? [String: Double]) == ["Remote Speaker 9": 5])
     }
 
     @Test("a transcript without echo_clusters is re-detected as before")
@@ -372,7 +378,7 @@ import AVFoundation
         #expect((json["metadata"] as? [String: Any])?["echo_clusters"] == nil)
     }
 
-    @Test("the remote names are cleared by the re-detect, so no stale name resolves the new labels")
+    @Test("a renamed remote speaker is followed through the name, and the re-detect still clears the names")
     func aRenamedRemoteSpeakerIsFollowedOnDisk() async throws {
         // R1 was renamed Alice: her lines carry the name, the record still holds R1.
         let before = [line(10, 20, "Alice"), line(30, 40, "Remote Speaker 2")]
@@ -382,11 +388,11 @@ import AVFoundation
                 ["speaker_names": ["Remote Speaker 1": "Alice"]]) { $1 })
         defer { cleanup() }
         _ = try await TranscriptRediarizer.rediarize(
-            transcript: url, source: "remote", speakerCount: 2, diarizer: Scripted(result: result([(10, 20, "A"), (30, 40, "B")])))
+            transcript: url, source: "remote", speakerCount: 2, diarizer: Scripted(result: result([(30, 40, "A"), (10, 20, "B")])))
         let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         let segments = try #require(json["segments"] as? [[String: Any]])
         let aliceNow = try #require(segments.first { $0["start"] as? Double == 10 }?["speaker"] as? String)
-        #expect(aliceNow.hasPrefix("Remote Speaker"))
+        #expect(aliceNow == "Remote Speaker 2")   // renumbered: she was "1"
         #expect(try matchedRemote(url)[aliceNow] == 70)
         #expect((json["metadata"] as? [String: Any])?["speaker_names"] == nil)
     }

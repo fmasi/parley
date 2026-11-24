@@ -13,8 +13,11 @@ import Foundation
 /// the segments, and only `Findings.read(transcriptAt:)` touches a file.
 ///
 /// The copy:
-/// - names speaker LABELS as `echo_clusters` holds them ("Remote Speaker 1"), never the names a user
-///   gave them — those labels are what the check compared, and a rename does not rewrite them;
+/// - names the other side's speakers as a person sees them now (#270): the label `echo_clusters`
+///   holds ("Remote Speaker 1"), or the name a rename gave it, followed through `speaker_names` the
+///   way the echo voice's own row is. A rename does not rewrite the record, so it is resolved here;
+///   a re-detect of the remote channel remaps or drops the keys it renumbered
+///   (`TranscriptRediarizer.remappingMatchedRemote`);
 /// - describes a match ("looks like"), never a fact. The check sees lines on this side that repeat
 ///   the other side's words at the same moment. That is nearly always the other side through the
 ///   loudspeakers; it is also what the mirror case looks like (this side's voice coming back on the
@@ -42,7 +45,8 @@ public enum EchoNotice {
         /// The share of the label's speaking time those lines hold, 0...100 — the measure the
         /// verdict is taken on, and not the same number as `matchedLines / lines`.
         public let percent: Int
-        /// The other side's labels its matched lines repeat, most matched seconds first.
+        /// The other side's speakers its matched lines repeat, most matched seconds first: the label
+        /// the check recorded, or the name a rename gave it since (#270).
         public let remoteLabels: [String]
 
         /// The lines that match nothing on the other side: they stay unflagged under the label.
@@ -77,6 +81,8 @@ public enum EchoNotice {
                 guard let value = (value as? NSNumber)?.doubleValue, value.isFinite else { return 0 }
                 return min(max(value, 0), 1e9)
             }
+            // The rename chains, to quote the other side's speakers by what they are called now (#270).
+            let names = metadata["speaker_names"] as? [String: String] ?? [:]
             var sums: [Key: Sum] = [:]
             for case let entry as [String: Any] in metadata["echo_clusters"] as? [Any] ?? [] {
                 guard let label = entry["label"] as? String, let verdict = entry["verdict"] as? String else { continue }
@@ -86,8 +92,10 @@ public enum EchoNotice {
                 sum.matched += number(entry["matched_segments"])
                 sum.seconds += number(entry["seconds"])
                 sum.matchedSeconds += number(entry["matched_seconds"])
+                // The key is the remote label the check saw; a rename since gave that speaker a name, and
+                // two labels given one name are one person, their seconds adding up.
                 for (remote, seconds) in entry["matched_remote"] as? [String: Any] ?? [:] {
-                    sum.remote[remote, default: 0] += number(seconds)
+                    sum.remote[Findings.currentName(of: remote, in: names), default: 0] += number(seconds)
                 }
                 if verdict == EchoDeduplicator.ClusterVerdict.Verdict.echo.rawValue { sum.isEcho = true }
                 sums[key] = sum
@@ -107,7 +115,7 @@ public enum EchoNotice {
                 people[String(key.dropFirst("speaker_count_".count))] = Int(number(value))
             }
             recordedPeople = people
-            names = metadata["speaker_names"] as? [String: String] ?? [:]
+            self.names = names
         }
 
         /// From a parsed transcript (its root object).
@@ -129,9 +137,18 @@ public enum EchoNotice {
         /// the new one, so a twice-renamed speaker is a chain — followed here, and a loop in it
         /// (renamed there and back) ends it.
         private func rowLabels(of label: String) -> [String] {
+            Findings.renameChain(of: label, in: names)
+        }
+
+        private static func renameChain(of label: String, in names: [String: String]) -> [String] {
             var labels = [label]
             while let next = names[labels[labels.count - 1]], !labels.contains(next) { labels.append(next) }
             return labels
+        }
+
+        /// What a label is called now: the end of its rename chain; itself when never renamed.
+        private static func currentName(of label: String, in names: [String: String]) -> String {
+            renameChain(of: label, in: names).last ?? label
         }
 
         /// The echo voice a speaker row stands for, if it is one. `row` is the row's label: the

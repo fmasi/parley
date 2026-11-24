@@ -1654,3 +1654,9 @@ voice; never a real third party. `echo_meta` is the helper of "Echo cluster dete
 - [ ] **EL-06 Another language is untouched.** With a French or German podcast through the speakers (mic
       echo cancel off), 2 minutes: the echo lines are flagged as before (compare with E-01's numbers), and a
       line of your own in that language over it is not.
+- [ ] **EL-07 The card follows the other side's names and re-detect (#270).** On a speaker-mode recording
+      with an echo voice (E-01), rename the remote speaker ("Alice") and Save, then reopen Rename Speakers….
+      PASS: the echo voice's card says it matches "Alice", not "Remote Speaker 1". Now re-detect "The other
+      side" (any count): the card names the label that now carries Alice's voice, or says "the other
+      side" when the count split her; it never names a remote speaker who is someone else. In the JSON,
+      `echo_clusters[].matched_remote` holds only labels that exist in the segments.
