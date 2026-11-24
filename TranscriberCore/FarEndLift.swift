@@ -66,8 +66,8 @@ public struct FarEndLiftRecord: Codable, Equatable, Sendable {
 /// 30 minutes read a chunk that began on laptop speakers and went on in headphones as "no coupling", and held
 /// back the bleed lines of its first minutes under the user's name (review of #374). A window needs 30 s of
 /// the far end talking and 30 s of it silent (`EchoReduction.minimumFrames`), else it is unknown. Each line is
-/// judged by every window over it (`EchoDeduplicator.AcousticCoupling.isUncoupled`): held back only when all
-/// are measured and below the line. With windows 4x their hop, any moment before or after a single change of
+/// judged by every window over it (`EchoDeduplicator.AcousticCoupling.isUncoupled`): held back when at least one
+/// is measured and every measured one is below the line; an unmeasured window is no evidence either way. With windows 4x their hop, any moment before or after a single change of
 /// output sits in a window at least three quarters on its own side of it.
 ///
 /// The threshold the guard applies (`EchoDeduplicator.AcousticCoupling.uncoupledBelowLiftDB`, 15 dB) was
