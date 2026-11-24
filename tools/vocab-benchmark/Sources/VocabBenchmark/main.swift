@@ -116,7 +116,6 @@ struct SweepConfig: Hashable, Codable {
     /// transcribed words' own. nil = FluidAudio's default for the vocabulary size (4.5).
     let cbw: Float?
     let gate: Bool
-
 }
 
 struct Substitution: Codable {

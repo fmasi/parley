@@ -126,13 +126,14 @@ public struct OrdinaryWords: Sendable {
 ///
 /// Measured in docs/benchmarks/2026-11-24-custom-vocabulary.md: with FluidAudio's thresholds alone,
 /// no setting gave a useful recall without writing terms over ordinary words. With this rule on top
-/// an ordinary word cannot be rewritten at all, whatever the thresholds.
+/// an ordinary word cannot be rewritten at all, whatever the thresholds. No wrong replacement was
+/// measured from a similarity of 0.70 up; below it a mangled name can become another listed name.
 public struct VocabularyGate: Sendable {
     /// A term shorter than this stays out of the vocabulary: short terms ("Jira", "Wren") are the ones
     /// a mangled longer name gets mistaken for.
     public static let minimumTermLetters = 5
     /// The lowest string similarity (0...1) between what was heard and the term.
-    public static let defaultMinSimilarity = 0.6
+    public static let defaultMinSimilarity = 0.7
 
     public enum Verdict: String, Equatable, Sendable {
         case accept
