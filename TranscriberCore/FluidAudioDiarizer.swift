@@ -36,7 +36,7 @@ public enum DiarizationComputeUnits: String, Codable, Equatable, Sendable {
 /// Speaker diarization using FluidAudio's OfflineDiarizerManager.
 /// Uses pyannote segmentation + WeSpeaker embeddings + VBx clustering.
 /// Models must be pre-downloaded via preDownloadModels() during setup.
-public actor FluidAudioDiarizer: DiarizationProvider {
+public actor FluidAudioDiarizer: SpeakerAnalysisReusing {
     /// Keyed by effective forced speaker count; 0 = unforced (the hot path).
     private var managers: [Int: OfflineDiarizerManager] = [:]
 
@@ -132,6 +132,44 @@ public actor FluidAudioDiarizer: DiarizationProvider {
 
         let mgr = try await ensureLoaded(forcedSpeakerCount: numSpeakers)
         let result = try await mgr.process(audio: audio, progressCallback: progress)
+        return Self.makeResult(segments: result.segments, speakerDatabase: result.speakerDatabase, startTime: startTime)
+    }
+
+    // MARK: - The analysis kept for a re-detect (#341)
+
+    /// The settings `prepare` reads — segmentation and embedding, and where the models run — spelled
+    /// out by FluidAudio's own descriptions, so a field it adds (0.18 adds `segmentation.batchSize`)
+    /// is part of the identity without a change here. The clustering settings are not: the forced
+    /// count is exactly what differs between the passes that share an analysis.
+    public nonisolated var preparationIdentity: String {
+        let config = makeOfflineConfig()
+        return "segmentation=\(config.segmentation) embedding=\(config.embedding) computeUnits=\(computeUnits.rawValue)"
+    }
+
+    /// FluidAudio's `prepare` (segmentation + embeddings), on the manager for `speakerCountHint` —
+    /// the one the first clustering loads anyway. `prepare` reads only the segmentation and embedding
+    /// settings, which every manager here shares, so the result is the same whichever runs it.
+    public func prepare(
+        audio: [Float],
+        speakerCountHint: Int?,
+        progress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> PreparedSpeakerAnalysis {
+        let startTime = ContinuousClock.now
+        let mgr = try await ensureLoaded(forcedSpeakerCount: speakerCountHint)
+        let prepared = try await mgr.prepare(audio: audio, progressCallback: progress)
+        let elapsed = ContinuousClock.now - startTime
+        Logger.transcription.info(
+            "FluidAudio speaker analysis prepared: \(prepared.embeddingCount, privacy: .public) embeddings over \(audio.count, privacy: .public) samples in \(elapsed.components.seconds, privacy: .public)s")
+        return PreparedSpeakerAnalysis(payload: prepared, sampleCount: audio.count, embeddingCount: prepared.embeddingCount)
+    }
+
+    /// FluidAudio's `cluster` of a prepared analysis, on the manager for `numSpeakers`: what
+    /// `diarize(audio:numSpeakers:)` gives, without its model pass over the audio.
+    public func cluster(_ prepared: PreparedSpeakerAnalysis, numSpeakers: Int?) async throws -> DiarizationResult {
+        guard let analysis = prepared.payload as? PreparedDiarization else { throw ForeignSpeakerAnalysis() }
+        let startTime = ContinuousClock.now
+        let mgr = try await ensureLoaded(forcedSpeakerCount: numSpeakers)
+        let result = try mgr.cluster(analysis)
         return Self.makeResult(segments: result.segments, speakerDatabase: result.speakerDatabase, startTime: startTime)
     }
 

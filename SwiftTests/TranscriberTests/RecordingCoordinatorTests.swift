@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import os
 @testable import TranscriberCore
 
 /// Tests for the recording-lifecycle + crash-recovery orchestration extracted from MenuView
@@ -734,6 +735,45 @@ private actor Latch {
         await r.coordinator.recoverAtLaunch()
         #expect(r.appState.isRecording && r.client.startCalls.count == 1, "resumed")
         #expect(resumed.value == 1 && recordingWhenCalled.value == [true, true], "a relaunch's resume: once, recording")
+    }
+
+    /// #341 review: a rename dialog left open keeps a re-detect's speaker analysis (about 0.36 GB an hour of
+    /// audio); the transition into a recording — a user's start and a relaunch's resume — lets it go, before
+    /// the recording's chunk processing can run on top of it.
+    @Test func aRecordingStartReleasesTheKeptSpeakerAnalyses() async throws {
+        let h = try Harness()
+        h.config.update { $0.recordingDirectory = h.tmp.appendingPathComponent("rec").path }
+        defer { roundFTearDown(h) }
+        let released = OSAllocatedUnfairLock(initialState: 0), appState = h.appState
+        let recordingWhenReleased = Harness.Box<[Bool]>([])
+        h.coordinator.releaseSpeakerAnalyses = { released.withLock { $0 += 1 } }
+        h.coordinator.onRecordingStarted = { recordingWhenReleased.value.append(appState.isRecording) }
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        #expect(released.withLock { $0 } == 1 && recordingWhenReleased.value == [true], "a user's start: once")
+        await h.coordinator.stopRecording()
+        await Harness.until { h.appState.isIdle }
+        #expect(released.withLock { $0 } == 1, "a stop releases nothing more")
+
+        let r = try Harness()
+        defer { roundFTearDown(r) }
+        try writeFreshSentinel(r)
+        let resumed = OSAllocatedUnfairLock(initialState: 0)
+        r.coordinator.releaseSpeakerAnalyses = { resumed.withLock { $0 += 1 } }
+        await r.coordinator.recoverAtLaunch()
+        #expect(r.appState.isRecording && resumed.withLock { $0 } == 1, "a relaunch's resume: once")
+    }
+
+    /// A refused start (here: the recording folder is on a drive that is not there) keeps the dialog's analysis.
+    @Test func aRefusedStartKeepsTheSpeakerAnalyses() async throws {
+        let h = try Harness()
+        let link = h.tmp.appendingPathComponent("Recordings")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "/Volumes/Absent-\(UUID().uuidString)/Recordings")
+        h.config.update { $0.recordingDirectory = link.path }
+        let released = OSAllocatedUnfairLock(initialState: 0)
+        h.coordinator.releaseSpeakerAnalyses = { released.withLock { $0 += 1 } }
+        await h.coordinator.startRecording(sessionName: "Test", microphoneDeviceId: "mic-1")
+        #expect(!h.appState.isRecording)
+        #expect(released.withLock { $0 } == 0)
     }
 
     // MARK: - Alarms (§6)

@@ -35,6 +35,7 @@ struct RenameDialog: View {
     private enum RediarizePhase: Equatable {
         case decodingAudio
         case detectingSpeakers
+        case regroupingSpeakers
         case rebuildingList
     }
     @State private var rediarizePhase: RediarizePhase?
@@ -46,6 +47,10 @@ struct RenameDialog: View {
     /// On the units the user chose (`diarization_compute_units`): re-detect diarizes a whole channel in
     /// one pass, so it is where the Neural Engine's lower footprint matters most.
     @State private var diarizer = FluidAudioDiarizer(computeUnits: ConfigManager.shared.config.diarizationComputeUnits)
+    /// The speaker analysis of the channel last re-detected, for this dialog only (#341): a Re-detect
+    /// of it at another count clusters again instead of diarizing again. One channel at a time, and
+    /// closed (released) when the dialog goes.
+    @State private var speakerAnalysis = SpeakerAnalysisCache()
     /// Held so Cancel/close can abort a running re-detect. Without it the unstructured Task
     /// outlives the dialog and rewrites the transcript after the user asked it not to.
     @State private var rediarizeTask: Task<Void, Never>?
@@ -292,6 +297,7 @@ struct RenameDialog: View {
         case .none: return "Starting…"
         case .decodingAudio: return "Splitting audio…"
         case .detectingSpeakers: return "Detecting speakers…"
+        case .regroupingSpeakers: return "Regrouping voices…"
         case .rebuildingList: return "Rebuilding list…"
         }
     }
@@ -377,19 +383,23 @@ struct RenameDialog: View {
                     source: channel,
                     speakerCount: count,
                     diarizer: diarizer,
+                    speakerAnalysis: speakerAnalysis,
                     // The echo check reads the thresholds the live pipeline reads (#265 review).
                     echoTemporalThreshold: ConfigManager.shared.config.echoTemporalThreshold,
                     echoTextThreshold: ConfigManager.shared.config.echoTextThreshold,
                     echoLocalLeadMarginSeconds: ConfigManager.shared.config.resolvedEchoLocalLeadMarginSeconds,
                     // Fires from off-main work (chunk decode loop, the diarizer's own background
                     // progress callback) — hop back to the main actor per update rather than
-                    // requiring the whole signature be @MainActor, which the diarizer isn't.
-                    onProgress: { progress in
+                    // requiring the whole signature be @MainActor, which the diarizer isn't. The
+                    // diarizer reports per chunk, thousands of times on a long call: only what the
+                    // throttle admits (about ten a second, every phase change) makes the hop (#341).
+                    onProgress: RedetectProgressThrottle.gate { progress in
                         Task { @MainActor in
                             guard rediarizing == channel else { return }
                             switch progress.phase {
                             case .decodingAudio: rediarizePhase = .decodingAudio
                             case .detectingSpeakers: rediarizePhase = .detectingSpeakers
+                            case .regroupingSpeakers: rediarizePhase = .regroupingSpeakers
                             }
                             rediarizeFraction = progress.fraction
                         }
@@ -638,6 +648,10 @@ struct RenameDialog: View {
             // The last preview would otherwise linger: it is only cleaned up when the NEXT one is
             // created, and closing the dialog is the common exit.
             rediarizeTask?.cancel()
+            // The speaker analysis goes with the dialog (#341): an hour of a channel's audio and its
+            // embeddings. A re-detect the cancel has not stopped yet cannot keep one after this.
+            let analysis = speakerAnalysis
+            Task { await analysis.close() }
             stopPlayback()
             previousPreview.map { try? FileManager.default.removeItem(at: $0) }
             previousPreview = nil

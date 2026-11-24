@@ -1716,3 +1716,37 @@ lift() { python3 -c 'import json,sys;m=json.load(open(sys.argv[1]))["metadata"];
       Then name the remote speaker "Sam" and Save; correct that row to "Tom" and name another remote
       speaker "Sam" in one Save. PASS: the card never says the echo matched "Tom" when it matched the
       new "Sam"; with the history ambiguous it says "the other side".
+
+## Re-detect reuses the speaker analysis (#341) — added 2026-11-24
+
+On this Mac. Use a recording of 45 minutes or more
+with speech on "This side" (a public podcast on the remote side, never a real third party). Keep
+Activity Monitor's Memory column on Parley open, and `log stream --predicate 'subsystem ==
+"eu.fmasi.parley"' --level info | grep -i "speaker analysis\|Re-detect"` in a terminal.
+
+- [ ] **RA-01 The first Re-detect shows its progress.** Open Rename Speakers…, set "This side" to 2,
+      press Re-detect. PASS: the row reads "Splitting audio…" with a bar, then "Detecting
+      speakers…" with a bar that fills smoothly (no stalls, the dialog stays responsive: scroll it,
+      type in a name field), then "Regrouping voices…", then the rows rebuild. The log has one
+      "speaker analysis prepared" and one "speaker analysis kept for the dialog". Note the time the
+      timer showed.
+- [ ] **RA-02 The second Re-detect only regroups.** Set "This side" to 3, press Re-detect. PASS: no
+      "Splitting audio…" or "Detecting speakers…", only "Regrouping voices…"; it finishes in a few
+      seconds (note the time against RA-01's); the log says "reusing the dialog's speaker analysis".
+      Then "Other side" back to its earlier count twice in a row: the second gives the same rows as
+      the first (same rows, same samples). Not "This side" for this: a re-detect there can flag lines
+      `echo`, and the flag is one-way, so going back to 2 after 3 is not the transcript RA-01 started from.
+- [ ] **RA-03 The other channel replaces it.** Re-detect "Other side" at its count. PASS: it splits
+      and detects again (a full pass), and the log has "speaker analysis released" BEFORE that
+      pass's "prepared". Parley's memory never shows two analyses' worth (about 0.36 GB per hour of
+      audio) above what RA-01 left.
+- [ ] **RA-04 Closing releases it.** Close the dialog (Cancel or the close button). PASS: the log
+      says "speaker analysis released"; Parley's memory drops back by about the analysis' size.
+      Reopen the dialog and re-detect: a full pass again (nothing outlives the dialog).
+- [ ] **RA-06 A recording start releases it.** Re-detect "This side" once, leave the dialog open, start
+      a recording from the menu. PASS: the log says "speaker analysis released (a recording
+      started)" and Parley's memory drops by about the analysis' size; stop the recording, then a
+      Re-detect in the still-open dialog runs a full pass and works.
+- [ ] **RA-05 Cancel mid-analysis.** Start a Re-detect, press the row's Cancel during "Detecting
+      speakers…", then close the dialog. PASS: nothing rewritten, and the log ends with the
+      analysis released (or never kept), not "kept for the dialog" after the close.
