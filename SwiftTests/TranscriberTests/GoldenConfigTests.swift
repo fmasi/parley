@@ -7,8 +7,8 @@ import Testing
 /// `embeddingExcludeOverlap: false` was a FLAG, not logic — no unit test of behaviour could see
 /// it, and it collapsed every speaker into one cluster for months. This test serializes every
 /// default that shapes a transcript — the app-level Config defaults, the resolved values the
-/// runner consumes, and the complete FluidAudio diarizer config (via the SAME
-/// `makeOfflineConfig()` production calls, so the snapshot cannot drift from reality) — and
+/// runner consumes, and the complete FluidAudio diarizer and ASR configs (via the SAME
+/// `makeOfflineConfig()` / `makeAsrConfig()` production calls, so the snapshot cannot drift from reality) — and
 /// compares it against a checked-in golden file.
 ///
 /// Any change to any default — a human editing a value, or a FluidAudio bump silently moving
@@ -78,6 +78,9 @@ import Testing
 
         let sections: [(String, String)] = [
             ("app_config_defaults", renderAppConfig(config)),
+            // The ASR config the engine loads with (FluidAudioEngine.ensureLoaded): FluidAudio 0.18 moved two
+            // long-form seam defaults under Parley while only the diarizer was snapshotted (gotcha 103).
+            ("fluidaudio_asr", mirrorJSON(FluidAudioEngine.makeAsrConfig(), indent: "  ")),
             ("fluidaudio_offline_diarizer", mirrorJSON(diarizer.makeOfflineConfig(), indent: "  ")),
             ("resolved", "{\n" + resolved.map { "    \"\($0.0)\": \($0.1)" }.joined(separator: ",\n") + "\n  }"),
         ]

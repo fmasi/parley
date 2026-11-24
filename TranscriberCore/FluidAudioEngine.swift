@@ -169,6 +169,34 @@ public actor FluidAudioEngine: TranscriptionEngine {
         return segments
     }
 
+    // MARK: - ASR configuration
+
+    /// The long-form seam settings FluidAudio 0.18 moved under Parley (gotcha 103). `nil` takes FluidAudio's
+    /// default: since 0.18, a repair probe on inter-word gaps from 0.5 s (was 1.5 s) and seam word timing
+    /// realigned to the window that heard the word (new; off is the 0.17.7 behaviour). The OWNER decides after
+    /// comparing recordings on main and on 0.18: to keep 0.17.7's values, set `(1.5, false)`. 0.18's rewritten
+    /// seam merge has no switch and is not covered by this line.
+    static let seamOverrides: (gapRepairMinGapSeconds: Double?, timingRealignment: Bool?) = (nil, nil)
+
+    /// The exact `ASRConfig` this engine loads with: FluidAudio's defaults with `seamOverrides` applied. Public so
+    /// `GoldenConfigTests` snapshots the real config, and a FluidAudio bump that moves an ASR default fails there.
+    public static func makeAsrConfig() -> ASRConfig {
+        let base = ASRConfig.default
+        return ASRConfig(
+            sampleRate: base.sampleRate,
+            tdtConfig: base.tdtConfig,
+            encoderHiddenSize: base.encoderHiddenSize,
+            parallelChunkConcurrency: base.parallelChunkConcurrency,
+            streamingEnabled: base.streamingEnabled,
+            streamingThreshold: base.streamingThreshold,
+            melChunkContext: base.melChunkContextOverride,
+            dualDecodeArbitration: base.dualDecodeArbitration,
+            seamGapRepair: base.seamGapRepair,
+            seamGapRepairMinGapSeconds: seamOverrides.gapRepairMinGapSeconds ?? base.seamGapRepairMinGapSeconds,
+            seamTimingRealignment: seamOverrides.timingRealignment ?? base.seamTimingRealignment
+        )
+    }
+
     // MARK: - Lifecycle
 
     private func ensureLoaded() async throws -> AsrManager {
@@ -188,7 +216,7 @@ public actor FluidAudioEngine: TranscriptionEngine {
         Logger.transcription.info("Loading FluidAudio model (Parakeet) from cache...")
 
         let models = try await AsrModels.loadFromCache()
-        let mgr = AsrManager()
+        let mgr = AsrManager(config: Self.makeAsrConfig())
         try await mgr.loadModels(models)
 
         let loadElapsed = ContinuousClock.now - loadStart

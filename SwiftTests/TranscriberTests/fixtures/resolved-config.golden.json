@@ -19,6 +19,27 @@
     "suppress_capture_warning": false,
     "system_audio_source": "core_audio_tap"
   },
+  "fluidaudio_asr": {
+    "dualDecodeArbitration": false,
+    "encoderHiddenSize": 1024,
+    "melChunkContextOverride": null,
+    "parallelChunkConcurrency": 4,
+    "sampleRate": 16000,
+    "seamGapRepair": true,
+    "seamGapRepairMinGapSeconds": 0.5,
+    "seamTimingRealignment": true,
+    "streamingEnabled": true,
+    "streamingThreshold": 480000,
+    "tdtConfig": {
+      "blankId": 8192,
+      "boundarySearchFrames": 20,
+      "consecutiveBlankLimit": 5,
+      "durationBins": [0, 1, 2, 3, 4],
+      "includeTokenDuration": true,
+      "maxSymbolsPerStep": 10,
+      "maxTokensPerChunk": 150
+    }
+  },
   "fluidaudio_offline_diarizer": {
     "clustering": {
       "constrainedAssignment": true,
