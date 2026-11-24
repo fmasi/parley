@@ -195,8 +195,10 @@ public enum TranscriptRenamer {
     /// (original → renamed), so re-renaming an already-renamed speaker accumulates entries and can
     /// leave a stale original → intermediate key. A reader has to resolve chains:
     /// `EchoNotice.Findings` does, to find the row of a label `echo_clusters` still holds under its
-    /// original name (#244). The other reader, `TranscriptRediarizer.channelNames`, only asks
-    /// whether a channel has any name at all.
+    /// original name (#244). The map does not keep the order of the Saves, so the end of a chain is
+    /// not always the current name (a reused or given-back name): `currentLabel` says when it can
+    /// tell (#270). `TranscriptRediarizer.channelNames` only asks whether a channel has any name at
+    /// all.
     @discardableResult
     public static func applyRenames(_ mapping: [String: String], jsonPath: URL) -> Bool {
         TranscriptWrites.exclusive(jsonPath) { applyRenamesUnlocked(mapping, jsonPath: jsonPath) }
@@ -242,10 +244,70 @@ public enum TranscriptRenamer {
         }
     }
 
+    /// What a label is called now, when `speaker_names` can say so for sure; nil when it cannot (#270).
+    ///
+    /// `speaker_names` is flat and unordered: each Save merges `{label current then: new name}` into
+    /// it, so the order of the renames is lost. Following it as a chain (`label → name → name …`)
+    /// is right only while no label on the chain has been the label of two different groups of
+    /// lines. A name reused for someone else breaks that: RS1 named "Sam", then one Save correcting
+    /// RS1 to "Tom" and naming RS2 "Sam" leaves `{RS1: Sam, Sam: Tom, RS2: Sam}`, in which the chain
+    /// from RS2 ends at "Tom". The map alone cannot tell the two people apart, so the answer is nil,
+    /// never a guess (a later Save can also overwrite `Sam`'s entry, and then even the lines'
+    /// labels cannot settle it).
+    ///
+    /// The rule:
+    /// - one origin (a key nothing renames into, or a pipeline label: each is a group of lines of
+    ///   its own) leads to `label`, and no other origin leads to any label on the chain that was
+    ///   renamed onward. Otherwise two groups shared that label, and which one went where is lost.
+    ///   `label` is usually a pipeline label (its own origin); it is a name when the record was
+    ///   written after a rename (a mic re-detect quotes the remote lines as they are called);
+    /// - a label never renamed is itself;
+    /// - of the labels on the chain, exactly one is among `present` (the labels the lines carry
+    ///   now): that one. None, or more than one, is nil. A rename there and back
+    ///   (`Sam → Tom → Sam`) is one group, and the lines say which name it holds now;
+    /// - `present` nil (the lines are not known): the chain's end, nil when it loops.
+    ///
+    /// - Parameters:
+    ///   - label: the label as a record holds it (the pipeline's, or a re-detect's).
+    ///   - names: `metadata.speaker_names`.
+    ///   - present: the labels the channel's lines carry now.
+    public static func currentLabel(of label: String, names: [String: String], present: Set<String>?) -> String? {
+        var chain = [label]
+        var loops = false
+        while let next = names[chain[chain.count - 1]] {
+            if chain.contains(next) { loops = true; break }
+            chain.append(next)
+        }
+        // Never renamed: the label is what the lines were given, and nothing here says otherwise.
+        if chain.count == 1 { return label }
+        var into: [String: [String]] = [:]
+        for (from, to) in names where from != to { into[to, default: []].append(from) }
+        /// The origins whose lines can have reached `node`: the renames walked backwards.
+        func origins(of node: String) -> Set<String> {
+            var seen: Set<String> = [node], stack = [node], found: Set<String> = []
+            while let current = stack.popLast() {
+                let sources = into[current] ?? []
+                if sources.isEmpty || SpeakerNameCarryOver.isPipelineLabel(current) { found.insert(current) }
+                for source in sources where seen.insert(source).inserted { stack.append(source) }
+            }
+            return found
+        }
+        // One group of lines started the chain (the label's own, or the one a rename gave it
+        // to), and none joined it at a label that was then renamed on.
+        let start = origins(of: label)
+        guard start.count == 1 else { return nil }
+        for node in chain where names[node] != nil {
+            guard origins(of: node) == start else { return nil }
+        }
+        guard let present else { return loops ? nil : chain.last }
+        let here = chain.filter(present.contains)
+        return here.count == 1 ? here[0] : nil
+    }
+
     /// The channels a re-detect has rewritten: `metadata.rediarized_channels`, plus any channel with
     /// a `speaker_count_<channel>` — builds before that list existed stamped only the count. nil when
     /// the list is there but is not a list of channels.
-    private static func rediarizedChannels(in metadata: [String: Any]) -> Set<String>? {
+    static func rediarizedChannels(in metadata: [String: Any]) -> Set<String>? {
         let counted = metadata.keys.filter { $0.hasPrefix("speaker_count_") }.map { String($0.dropFirst("speaker_count_".count)) }
         guard let recorded = metadata[TranscriptRediarizer.rediarizedChannelsKey] else { return Set(counted) }
         return (recorded as? [String]).map { Set($0).union(counted) }

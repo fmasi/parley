@@ -1707,3 +1707,12 @@ lift() { python3 -c 'import json,sys;m=json.load(open(sys.argv[1]))["metadata"];
       `median_lag_seconds` positive (write it down: #242 measured +0.08 s).
 - [ ] **WL-03 Re-detect keeps the mirror case (#252).** On the WL-01 recording, re-detect "This side" at 1.
       PASS: your lines are still in the TXT under your name; no local `"echo"` entry in `echo_clusters`.
+- [ ] **EL-11 The card follows the other side's names and re-detect (#270).** On a speaker-mode recording
+      with an echo voice (E-01), rename the remote speaker ("Alice") and Save, then reopen Rename Speakers….
+      PASS: the echo voice's card says it matches "Alice", not "Remote Speaker 1". Now re-detect "The other
+      side" (any count): the card names the label that now carries Alice's voice, or says "the other
+      side" when the count split her; it never names a remote speaker who is someone else. In the JSON,
+      `echo_clusters[].matched_remote` holds only labels that exist in the segments.
+      Then name the remote speaker "Sam" and Save; correct that row to "Tom" and name another remote
+      speaker "Sam" in one Save. PASS: the card never says the echo matched "Tom" when it matched the
+      new "Sam"; with the history ambiguous it says "the other side".
