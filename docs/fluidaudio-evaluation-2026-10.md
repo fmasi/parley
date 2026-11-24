@@ -103,6 +103,9 @@ Notes on the existing path that the bump changes (flagged for the device test in
   and list the vocabulary used in `metadata`. Seed from the calendar event (title and attendee
   names, `CalendarService` already reads the event) plus a user glossary. Airgap: the CTC models
   download at Setup or Save only.
+- Measured 2026-11-24 ([benchmark](benchmarks/2026-11-24-custom-vocabulary.md)): not worth building
+  as described. At FluidAudio's defaults it wrote terms over ordinary words 115 times an hour; the
+  rule that stops that works as well with no CTC model.
 
 ### 3.4 Streaming and real-time (rejected, confirmed)
 
