@@ -118,6 +118,32 @@ import Testing
             "excludeOverlap=true should recover speakers that excludeOverlap=false merges (got \(correctCount) vs \(brokenCount))"
         )
     }
+
+    /// #341: a re-detect clusters the analysis it kept instead of diarizing again. That is only
+    /// right if the clusters are the ones a full pass gives, at every count — including a count other
+    /// than the one the analysis was made under (#265's wider pass makes it at N+1, then N reuses it).
+    /// Exact: same segments, times, labels, quality scores and speaker embeddings.
+    @Test(.enabled(if: DiarizationRegressionTests.canRun))
+    func clusteringAKeptAnalysisGivesTheFullPassClusters() async throws {
+        let fixture = try #require(Self.amiFixture, "AMI fixture missing — run scripts/fetch-diarization-fixtures.sh")
+        guard try await TestModels.ensureDiarization() else { return }
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: fixture)
+        let diarizer = FluidAudioDiarizer()
+
+        let prepared = try await diarizer.prepare(audio: samples, speakerCountHint: 5, progress: nil)
+        #expect(prepared.embeddingCount > 100)
+        for count in [5, 4, 3, 2] {
+            let kept = try await diarizer.cluster(prepared, numSpeakers: count)
+            let full = try await diarizer.diarize(audio: samples, numSpeakers: count, progress: nil)
+            #expect(!full.segments.isEmpty)
+            #expect(kept.segments.map(Self.row) == full.segments.map(Self.row), "count \(count)")
+            #expect(kept.speakerDatabase == full.speakerDatabase, "count \(count)")
+        }
+    }
+
+    private static func row(_ s: DiarizedSegment) -> String {
+        "\(s.start) \(s.end) \(s.speaker) \(s.qualityScore.map { String($0) } ?? "-")"
+    }
 }
 
 /// Model-free guards that DO run in CI.
