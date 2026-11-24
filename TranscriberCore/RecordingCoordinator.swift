@@ -3878,7 +3878,8 @@ public final class RecordingCoordinator {
              CaptureQualityNotice.sideStatuses(inTranscriptAt: jsonPath),
              EchoNotice.Findings.read(transcriptAt: jsonPath).completionLines,
              CaptureQualityNotice.echoNotRemovedChunkCount(inTranscriptAt: jsonPath),
-             CaptureQualityNotice.recognitionFailedChunkCount(inTranscriptAt: jsonPath))
+             CaptureQualityNotice.recognitionFailedChunkCount(inTranscriptAt: jsonPath),
+             CaptureQualityNotice.otherProblemChunkCount(inTranscriptAt: jsonPath))
         }
         let sides = read?.3 ?? nil
         let echoLines = read?.4 ?? 0
@@ -3886,7 +3887,8 @@ public final class RecordingCoordinator {
         let echoNotRemoved = max(0, read?.5 ?? 0)
         // Chunks whose speech recognition failed (#223): a failed engine is never "Transcription Complete".
         var (anomalies, problemChunks, segments, recognitionFailed) = (unreadable, unreadable, unreadable, unreadable)
-        if let read, sides != nil { (anomalies, problemChunks, segments, recognitionFailed) = (read.0, read.1, read.2, read.6) }
+        var otherProblems = unreadable
+        if let read, sides != nil { (anomalies, problemChunks, segments, recognitionFailed, otherProblems) = (read.0, read.1, read.2, read.6, read.7) }
         if anomalies > 0 {
             Logger.state.error(
                 "Completed transcript carries \(anomalies, privacy: .public) capture anomalies — surfacing to the user"
@@ -3910,7 +3912,7 @@ public final class RecordingCoordinator {
                 remoteStatus: sides?.remote, localStatus: sides?.local, echoLines: echoLines,
                 removedRecordings: removedRecordings, remoteUncertainSeconds: sides?.remoteUncertainSeconds,
                 remoteUncertainIsLowerBound: sides?.remoteUncertainIsLowerBound ?? false, echoNotRemovedChunks: echoNotRemoved,
-                recognitionFailedChunks: recognitionFailed)
+                recognitionFailedChunks: recognitionFailed, otherProblemChunks: otherProblems)
         )
         // Whether the session is still ours to finish — looked at here, after the last await, never before it (#321). The
         // phase is never set `.idle` in here: the caller does that once its recovery file is gone too, so no Start gets in

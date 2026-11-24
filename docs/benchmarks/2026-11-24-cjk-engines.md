@@ -9,7 +9,7 @@ it_it and yue_hant_hk for language ID. 290 clips, 5 to 40 s each, one language p
 **Metric:** CER on NFKC-normalised text with all punctuation, symbols and spaces removed and Chinese folded to
 Simplified (OpenCC t2s) on both sides. Corpus CER (edits / reference characters); the per-clip mean, which the
 2026-07-16 report used, is given for SpeechAnalyzer.
-**Harness:** `tools/engine-benchmark/cjk` (FluidAudio 0.17.7, the version Parley ships; WhisperKit 0.18.0), one
+**Harness:** `tools/engine-benchmark/cjk` (FluidAudio 0.17.7, the version Parley shipped when this ran; WhisperKit 0.18.0), one
 engine per process. Reproduce at the end.
 
 ## Licences first
@@ -99,7 +99,7 @@ set; small is 0.46 GB.
 - **Locale variant:** Whisper's `zh` → `zh_CN` (Mandarin; Cantonese recordings would need a user hint or a
   Cantonese-aware LID), `pt` → Parakeet (no locale needed).
 
-Part of #223 does not wait for this: since commit `ca211e9` (this branch) a chunked recording whose engine failed
+Part of #223 does not wait for this: with the #223 notice fix that came with this report, a chunked recording whose engine failed
 reads "Transcription failed — speech recognition did not work" (nothing transcribed) or "Transcription incomplete —
 speech recognition failed on N chunks", never "Transcription Complete".
 

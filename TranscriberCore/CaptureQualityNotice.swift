@@ -97,11 +97,12 @@ public enum CaptureQualityNotice {
                                       remoteStatus: String? = nil, localStatus: String? = nil, echoLines: Int = 0,
                                       removedRecordings: Int = 0, remoteUncertainSeconds: Double? = nil,
                                       remoteUncertainIsLowerBound: Bool = false, echoNotRemovedChunks: Int = 0,
-                                      recognitionFailedChunks: Int = 0) -> String {
+                                      recognitionFailedChunks: Int = 0, otherProblemChunks: Int = 0) -> String {
         let body = recordBody(fileName: fileName, anomalyCount: anomalyCount, problemChunkCount: problemChunkCount, segmentCount: segmentCount,
                               remoteStatus: remoteStatus, localStatus: localStatus, echoLines: echoLines,
                               remoteUncertainSeconds: remoteUncertainSeconds, remoteUncertainIsLowerBound: remoteUncertainIsLowerBound,
-                              echoNotRemovedChunks: echoNotRemovedChunks, recognitionFailedChunks: recognitionFailedChunks)
+                              echoNotRemovedChunks: echoNotRemovedChunks, recognitionFailedChunks: recognitionFailedChunks,
+                              otherProblemChunks: otherProblemChunks)
         guard let line = storageLimitLine(removedRecordings: removedRecordings) else { return body }
         return body + "\n" + line
     }
@@ -116,8 +117,8 @@ public enum CaptureQualityNotice {
     private static func recordBody(fileName: String, anomalyCount: Int, problemChunkCount: Int, segmentCount: Int,
                                    remoteStatus: String?, localStatus: String?, echoLines: Int, remoteUncertainSeconds: Double?,
                                    remoteUncertainIsLowerBound: Bool, echoNotRemovedChunks: Int,
-                                   recognitionFailedChunks: Int) -> String {
-        if [anomalyCount, problemChunkCount, segmentCount, recognitionFailedChunks].contains(unreadable) {
+                                   recognitionFailedChunks: Int, otherProblemChunks: Int) -> String {
+        if [anomalyCount, problemChunkCount, segmentCount, recognitionFailedChunks, otherProblemChunks].contains(unreadable) {
             return "\(fileName) — \(couldNotCheck)"
         }
         var parts: [String] = []
@@ -148,9 +149,17 @@ public enum CaptureQualityNotice {
             let noun = anomalyCount == 1 ? "anomaly" : "anomalies"
             parts.append("\(anomalyCount) capture \(noun) recorded; audio may be affected")
         }
-        // The failed chunks are among the problem chunks (`asr_failed` affects content): said again only when others have
-        // problems too.
-        if problemChunkCount > recognitionFailedChunks { parts.append(problemPhrase(problemChunkCount)) }
+        // With a failed recognition said above, the rest are the chunks with a problem OTHER than it
+        // (`otherProblemChunkCount`), counted by chunk — never inferred from the two totals (an `archive_failed` beside an
+        // `asr_failed` on one chunk is still said).
+        if recognitionFailedChunks > 0 {
+            if otherProblemChunks > 0 {
+                parts.append(otherProblemChunks == 1 ? "1 chunk had other processing problems"
+                                                     : "\(otherProblemChunks) chunks had other processing problems")
+            }
+        } else if problemChunkCount > 0 {
+            parts.append(problemPhrase(problemChunkCount))
+        }
         if echoNotRemovedChunks > 0 {
             let chunks = echoNotRemovedChunks == 1 ? "1 part" : "\(echoNotRemovedChunks) parts"
             parts.append("echo cancellation did not work on \(chunks) of the recording; echo may show")
@@ -183,6 +192,17 @@ public enum CaptureQualityNotice {
 
     private static func recognitionPhrase(_ count: Int) -> String {
         count == 1 ? "speech recognition failed on 1 chunk" : "speech recognition failed on \(count) chunks"
+    }
+
+    /// Distinct chunks with a content-affecting issue other than `asr_failed` — whether or not the chunk also failed
+    /// recognition — for the body beside the failed recognition (#223 review). 0 when absent, `unreadable` when the
+    /// transcript can't be read back. Synchronous file I/O — call off the main actor.
+    public static func otherProblemChunkCount(inTranscriptAt url: URL) -> Int {
+        guard let root = readRoot(url) else { return unreadable }
+        guard let metadata = root["metadata"] as? [String: Any],
+              let issues = metadata["processing_issues"] as? [[String: Any]]
+        else { return 0 }
+        return ChunkIssue.problemCounts(in: issues.filter { $0["code"] as? String != ChunkIssue.Code.asrFailed.rawValue }).chunks
     }
 
     /// Distinct chunks whose speech recognition failed — `asr_failed` on either side, in `metadata.processing_issues`

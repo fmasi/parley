@@ -1,6 +1,6 @@
 // swift-tools-version: 6.2
 // CJK + automatic-language benchmark (#339). Separate package so the main EngineBenchmark keeps its
-// pinned FluidAudio; this one pins the FluidAudio Parley ships (0.17.7), which carries the CJK models.
+// pinned FluidAudio; this one pins FluidAudio 0.17.7, the version benchmarked (2026-11-24), which carries the CJK models.
 import PackageDescription
 
 let package = Package(

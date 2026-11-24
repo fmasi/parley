@@ -4242,6 +4242,25 @@ private actor Latch {
         #expect(h.notified.value.last?.body == "partial.json — speech recognition failed on 1 chunk; its audio is kept")
     }
 
+    /// Review: the other problems are counted by chunk, never inferred from the totals — an `archive_failed` beside the
+    /// `asr_failed` of the same chunk is still said, and a `vad_failed` on another chunk is not "2 chunks had problems".
+    @Test func otherProblemsBesideAFailedRecognitionAreCountedByChunk() async throws {
+        let h = try Harness()
+        let url = h.tmp.appendingPathComponent("mixed.json")
+        let segments: [[String: Any]] = [["start": 0.0, "end": 1.0, "text": "x", "speaker": "S"]]
+        for (issues, other) in [([["chunk": 0, "code": "asr_failed", "track": "remote"], ["chunk": 0, "code": "archive_failed"]], 1),
+                                ([["chunk": 0, "code": "asr_failed", "track": "remote"], ["chunk": 1, "code": "vad_failed", "track": "local"]], 1)] {
+            try JSONSerialization.data(withJSONObject: [
+                "metadata": ["processing_issues": issues, "capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
+                "segments": segments,
+            ]).write(to: url)
+            h.appState.phase = .transcribing(progress: "")
+            await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
+            #expect(h.notified.value.last?.body
+                    == "mixed.json — speech recognition failed on 1 chunk; its audio is kept; \(other) chunk had other processing problems")
+        }
+    }
+
     /// #321: a caller that does not own the phase — a launch salvage while a Stop of the user's is still finishing — still
     /// gets the notice, but never the rename dialog over that Stop, and the phase stays the Stop's.
     @Test func aPresenterThatDoesNotOwnThePhaseNotifiesButNeverPresents() async throws {
