@@ -61,3 +61,51 @@ public enum DiarizerThrow {
         return false
     }
 }
+
+/// The half of a diarization that does not depend on the speaker count (#341): segmentation and the
+/// speaker embeddings, with the audio they came from. Clustering it at a count is the other half,
+/// and is cheap next to it.
+///
+/// Opaque: only the provider that made it can cluster it (FluidAudio's `PreparedDiarization` inside).
+/// It holds the channel's whole decoded audio (16 kHz mono Float, about 230 MB an hour) — the
+/// clustering re-reads short spans of it — plus the embeddings and the segmentation scores.
+public struct PreparedSpeakerAnalysis: Sendable {
+    /// The provider's own prepared value.
+    let payload: any Sendable
+    /// The samples it was made from, for the log and the memory note: 16 kHz mono.
+    public let sampleCount: Int
+    /// The speaker embeddings it holds.
+    public let embeddingCount: Int
+
+    public init(payload: any Sendable, sampleCount: Int, embeddingCount: Int) {
+        self.payload = payload
+        self.sampleCount = sampleCount
+        self.embeddingCount = embeddingCount
+    }
+}
+
+/// A diarizer that can keep the count-independent half of its work (#341): `prepare` once, then
+/// `cluster` at each count. `cluster(prepare(audio))` at a count must give what
+/// `diarize(audio:numSpeakers:)` gives at that count — the AMI golden test pins it for FluidAudio.
+public protocol SpeakerAnalysisReusing: DiarizationProvider {
+    /// Everything that shapes `prepare`'s result on this provider: the models, where they run, and the
+    /// segmentation and embedding settings. Not the clustering settings, which `prepare` never reads.
+    /// Part of the cache key, so an analysis made under other settings is never clustered.
+    var preparationIdentity: String { get }
+
+    /// Segment `audio` (16 kHz mono) and extract its speaker embeddings.
+    /// - Parameter speakerCountHint: the count the first `cluster` will ask for, so the work runs on
+    ///   the model stack that clustering loads anyway; the result does not depend on it.
+    /// - Parameter progress: `(chunksProcessed, totalChunks)`, from the provider's own threads.
+    func prepare(
+        audio: [Float],
+        speakerCountHint: Int?,
+        progress: (@Sendable (Int, Int) -> Void)?
+    ) async throws -> PreparedSpeakerAnalysis
+
+    /// Cluster a prepared analysis at `numSpeakers`, as `diarize(audio:numSpeakers:progress:)` would.
+    func cluster(_ prepared: PreparedSpeakerAnalysis, numSpeakers: Int?) async throws -> DiarizationResult
+}
+
+/// A prepared analysis handed to a provider that did not make it.
+public struct ForeignSpeakerAnalysis: Error {}

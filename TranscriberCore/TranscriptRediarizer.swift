@@ -155,6 +155,9 @@ public enum TranscriptRediarizer {
             case decodingAudio
             /// Running the diarizer over the decoded samples.
             case detectingSpeakers
+            /// Clustering a speaker analysis the dialog already holds at the new count (#341): no
+            /// decode, no model pass over the audio, and no fraction — it takes seconds.
+            case regroupingSpeakers
         }
         public let phase: Phase
         public let fraction: Double?
@@ -235,11 +238,20 @@ public enum TranscriptRediarizer {
     /// the speakers. When `metadata.mic_echo_cancel` says chunks were cancelled, each archive's mic
     /// side goes through `echoCanceller` with its system side as the reference. The archive is
     /// AAC, not the WAVs the pipeline read, so the result is close to, not identical with, the first pass.
+    ///
+    /// **A dialog's second Re-detect of a channel clusters again; it does not diarize again (#341).**
+    /// With `speakerAnalysis` and a diarizer that can split its work (`SpeakerAnalysisReusing`), the
+    /// channel's segmentation and speaker embeddings are made once and kept there; a Re-detect of the
+    /// same channel of the same audio at another count — and #265's pass with room for one more voice
+    /// — only clusters them. The clusters are those a full pass gives (the AMI golden test). Only a
+    /// chunked recording's channel is kept: a two-file transcript is streamed from disk by the
+    /// diarizer itself, and keeping it would put its whole audio in memory.
     public static func rediarize(
         transcript url: URL,
         source: String,
         speakerCount: Int,
         diarizer: any DiarizationProvider,
+        speakerAnalysis: SpeakerAnalysisCache? = nil,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         echoCanceller: (any MicEchoSampleCancelling)? = LocalVQEMicEchoCanceller.bundled(),
         echoTemporalThreshold: Double? = nil,
@@ -247,6 +259,7 @@ public enum TranscriptRediarizer {
         onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> Outcome {
         try await rediarize(transcript: url, source: source, speakerCount: speakerCount, diarizer: diarizer,
+                            speakerAnalysis: speakerAnalysis,
                             scratchDirectory: scratchDirectory, echoCanceller: echoCanceller,
                             echoTemporalThreshold: echoTemporalThreshold, echoTextThreshold: echoTextThreshold,
                             onProgress: onProgress, rawLabeling: label)
@@ -264,6 +277,7 @@ public enum TranscriptRediarizer {
         source: String,
         speakerCount: Int,
         diarizer: any DiarizationProvider,
+        speakerAnalysis: SpeakerAnalysisCache? = nil,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         echoCanceller: (any MicEchoSampleCancelling)? = nil,
         echoTemporalThreshold: Double? = nil,
@@ -313,24 +327,72 @@ public enum TranscriptRediarizer {
         // pre-#204 memory profile for this case — and, as a side effect, keeps the `AudioDecode`
         // reimplementation (see its doc comment) out of the picture entirely for single-file
         // recordings, which is most of them.
-        onProgress?(Progress(phase: .decodingAudio))
         let wasCancelled = source == "local" && micWasEchoCancelled(metadata)
         if wasCancelled && echoCanceller == nil {
             Logger.transcription.error("Re-detect: this transcript's mic was echo-cancelled, but this build has no canceller — diarizing the raw mic")
         }
-        let decoded = try await decodeChannelAudio(
-            layout: layout, source: source, chunkDurations: chunkDurations, chunkOffsets: chunkOffsets,
-            hasCaptureGaps: hasCaptureGaps, gapSeconds: gapSeconds, scratchDirectory: scratchDirectory,
-            echoCanceller: wasCancelled ? echoCanceller : nil, onProgress: onProgress)
+        // The analysis this dialog already made of this channel, when it can be kept at all (#341): a
+        // chunked recording, and a diarizer that splits its work. Looked up before any decode — a hit
+        // needs none — and a miss releases the one held for another channel or recording first.
+        let reuse: (cache: SpeakerAnalysisCache, provider: any SpeakerAnalysisReusing, key: SpeakerAnalysisCache.Key)?
+        if let speakerAnalysis, let provider = diarizer as? any SpeakerAnalysisReusing,
+           case .chunkedArchives(let chunks) = layout {
+            let key = SpeakerAnalysisCache.Key(
+                source: source, provider: provider.preparationIdentity,
+                files: chunks.map(SpeakerAnalysisCache.Key.File.current),
+                echoCanceller: (wasCancelled ? echoCanceller : nil).map { String(reflecting: type(of: $0)) },
+                chunkDurations: chunkDurations, chunkOffsets: chunkOffsets, gapSeconds: gapSeconds,
+                hasCaptureGaps: hasCaptureGaps)
+            reuse = (speakerAnalysis, provider, key)
+        } else {
+            reuse = nil
+        }
+        var analysis: PreparedSpeakerAnalysis?
+        if let reuse { analysis = await reuse.cache.lookup(reuse.key) }
+        let decoded: DecodedChannelAudio?
+        if let analysis {
+            // The files first, as a decode would (#29): the key saw them, but say what a re-detect says.
+            try audioPrecheck(layout: layout, source: source, fileExists: { FileManager.default.fileExists(atPath: $0) })
+            Logger.transcription.info(
+                "Re-detect: reusing the dialog's speaker analysis of \(source, privacy: .public) (\(analysis.embeddingCount, privacy: .public) embeddings) — clustering only")
+            onProgress?(Progress(phase: .regroupingSpeakers))
+            decoded = nil
+        } else {
+            onProgress?(Progress(phase: .decodingAudio))
+            decoded = try await decodeChannelAudio(
+                layout: layout, source: source, chunkDurations: chunkDurations, chunkOffsets: chunkOffsets,
+                hasCaptureGaps: hasCaptureGaps, gapSeconds: gapSeconds, scratchDirectory: scratchDirectory,
+                echoCanceller: wasCancelled ? echoCanceller : nil, onProgress: onProgress)
+        }
 
         // The user's answer is authoritative: force the count AND skip minority absorption, which
         // exists to second-guess a count nobody supplied.
         // Decoding the channel can be the slowest phase on a multi-chunk recording; without a
         // check here a cancel during that work goes unnoticed until a full diarize has also run.
         try Task.checkCancellation()
-        onProgress?(Progress(phase: .detectingSpeakers))
+        if analysis == nil { onProgress?(Progress(phase: .detectingSpeakers)) }
         /// One diarizer pass at `count`, its own progress reported as the part `share` of the phase.
         func diarize(_ count: Int, share: ClosedRange<Double>) async throws -> DiarizationResult {
+            if let reuse {
+                // The analysis is made once, by the first pass that needs it — the wider pass's
+                // failure handling below then covers it as it covers a full pass — and kept.
+                if analysis == nil {
+                    // A chunked channel always decodes to samples; a miss always decodes.
+                    guard case .samples(let samples)? = decoded else { throw RediarizeError.noAudioForChannel(source) }
+                    let prepared = try await reuse.provider.prepare(
+                        audio: samples, speakerCountHint: count,
+                        progress: { processed, total in
+                            guard total > 0 else { return }
+                            onProgress?(Progress(phase: .detectingSpeakers, fraction: Double(processed) / Double(total)))
+                        })
+                    await reuse.cache.store(prepared, for: reuse.key)
+                    analysis = prepared
+                }
+                onProgress?(Progress(phase: .regroupingSpeakers))
+                return try await reuse.provider.cluster(analysis!, numSpeakers: count)
+            }
+            // Without an analysis to reuse there is always a decode.
+            guard let decoded else { throw RediarizeError.noAudioForChannel(source) }
             switch decoded {
             case .samples(let samples):
                 return try await diarizer.diarize(
@@ -396,8 +458,8 @@ public enum TranscriptRediarizer {
                     "Re-diarize: with room for \(speakerCount + 1, privacy: .public) voices the mic channel holds \(found.clusterIDs.count, privacy: .public) echo voice(s) — kept apart, the stated \(speakerCount, privacy: .public) enforced on the rest")
                 raw = wider
                 echo = found
-                // No second pass: the phase is done.
-                onProgress?(Progress(phase: .detectingSpeakers, fraction: 1))
+                // No second pass: the phase is done. (Clustering a kept analysis has no fraction.)
+                if reuse == nil { onProgress?(Progress(phase: .detectingSpeakers, fraction: 1)) }
             } else {
                 if wider != nil {
                     Logger.transcription.info(
