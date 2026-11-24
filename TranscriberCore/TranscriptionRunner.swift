@@ -168,6 +168,8 @@ public final class TranscriptionRunner {
         // Which recovery segment each record is for, to place it on the timeline (#365).
         var echoRecordSegments: [Int] = []
         var echoFailures = 0
+        // Each recovery segment's far-end lift (#374), with cancellation or without it: echo dedup's headphone guard.
+        var liftRecords: [(segment: Int, lift: FarEndLiftRecord)] = []
         var echoScratch: [URL] = []
         defer { for url in echoScratch { try? FileManager.default.removeItem(at: url) } }
 
@@ -205,15 +207,18 @@ public final class TranscriptionRunner {
                 else { throw FolderNotAnswering() }
                 if micThere {
                     var micForASR = micPath
+                    var cancelled: MicEchoCancelRecord?
                     if case .on(let canceller) = micEchoCancel {
                         let cleaned = FileManager.default.temporaryDirectory
                             .appendingPathComponent("parley-mic-aec-\(UUID().uuidString).wav")
                         do {
                             let system = segmentPair.system
-                            echoRecords.append(try await ChunkProcessor.offThePool(qos: config.resolvedQos) {
+                            let record = try await ChunkProcessor.offThePool(qos: config.resolvedQos) {
                                 try canceller.cancelEcho(micURL: micPath, systemURL: system, outputURL: cleaned)
-                            })
+                            }
+                            echoRecords.append(record)
                             echoRecordSegments.append(index)
+                            cancelled = record
                             echoScratch.append(cleaned)
                             micForASR = cleaned
                         } catch {
@@ -223,6 +228,10 @@ public final class TranscriptionRunner {
                         }
                     } else if case .unavailable = micEchoCancel {
                         echoFailures += 1
+                    }
+                    if let lift = await Self.farEndLift(cancelled: cancelled, micURL: micPath, systemURL: segmentPair.system,
+                                                        qos: config.resolvedQos) {
+                        liftRecords.append((index, lift))
                     }
                     let micResult = try await transcribeStream(
                         audioPath: micForASR,
@@ -365,6 +374,11 @@ public final class TranscriptionRunner {
         let echoPerChunk = zip(echoRecordSegments, echoRecords).map { segment, record in
             EchoDeduplicator.AcousticCoupling.metadataEntry(chunk: segment, start: segmentOffsets[segment], record: record)
         }
+        // And each segment's far-end lift, measured with cancellation or without it (#374).
+        let liftPerChunk = liftRecords.map { segment, lift in
+            EchoDeduplicator.AcousticCoupling.metadataEntry(chunk: segment, start: segmentOffsets[segment], lift: lift)
+        }
+        let acousticCoupling = EchoDeduplicator.AcousticCoupling.metadataDictionary(perChunk: liftPerChunk)
         if isDualStream {
             let dedupResult = EchoDeduplicator.deduplicate(
                 segments: allSegments,
@@ -373,7 +387,8 @@ public final class TranscriptionRunner {
                 temporalThreshold: config.echoTemporalThreshold,
                 textThreshold: config.echoTextThreshold,
                 embeddingDim: embeddingDim > 0 ? embeddingDim : nil,
-                coupling: EchoDeduplicator.AcousticCoupling(transcriptMetadata: ["mic_echo_cancel": ["per_chunk": echoPerChunk]])
+                coupling: EchoDeduplicator.AcousticCoupling(
+                    transcriptMetadata: [EchoDeduplicator.AcousticCoupling.metadataKey: acousticCoupling ?? [:]])
             )
             allSegments = dedupResult.segments
             echoFlagged = dedupResult.flaggedCount
@@ -399,6 +414,7 @@ public final class TranscriptionRunner {
             echoSegmentsFlagged: echoFlagged,
             echoClusters: echoClusters,
             micEchoCancel: Self.micEchoCancelDictionary(records: echoRecords, failed: echoFailures, perChunk: echoPerChunk),
+            acousticCoupling: acousticCoupling,
             provenance: provenance,
             // No in-memory session start here (CLI / crash-recovery / single-file path), so
             // use the source audio's creation time as the recording-start stamp (#49).
@@ -752,6 +768,7 @@ public final class TranscriptionRunner {
             // namespace: the same per-chunk mapping the merger applied to the segments.
             echoClusters: isDualStream ? Self.echoClusterDictionaries(chunks: sortedChunks, speakerMapping: speakerMapping) : nil,
             micEchoCancel: Self.micEchoCancelDictionary(chunks: sortedChunks, meetingStart: sessionState.meetingStart),
+            acousticCoupling: Self.acousticCouplingDictionary(chunks: sortedChunks, meetingStart: sessionState.meetingStart),
             provenance: sessionState.provenance,
             // The wall-clock time the meeting actually began (#49).
             recordedAt: sessionState.meetingStart,
@@ -935,6 +952,31 @@ public final class TranscriptionRunner {
         return micEchoCancelDictionary(records: chunks.compactMap(\.micEchoCancel),
                                        failed: chunks.filter { $0.issues.contains { $0.code == .echoCancelFailed } }.count,
                                        perChunk: placed)
+    }
+
+    /// `metadata.acoustic_coupling` (#374): each dual-stream chunk's far-end lift at its place on the transcript's
+    /// timeline — its own measure, or for a chunk written before #374 the one echo cancellation took. nil (the
+    /// key left out) without a meeting start to place them by, or when no chunk was measured.
+    nonisolated static func acousticCouplingDictionary(chunks: [ProcessedChunk], meetingStart: Date?) -> [String: Any]? {
+        guard let meetingStart else { return nil }
+        return EchoDeduplicator.AcousticCoupling.metadataDictionary(perChunk: chunks.compactMap { chunk in
+            chunk.measuredFarEndLift.map { EchoDeduplicator.AcousticCoupling.metadataEntry(
+                chunk: chunk.index, start: chunk.startTime.timeIntervalSince(meetingStart), lift: $0) }
+        })
+    }
+
+    /// One recovery segment's far-end lift (#374): the canceller's own measure when it ran, else from levels
+    /// alone; nil without audio on both sides or when a read fails (unknown, judged as before #365).
+    nonisolated static func farEndLift(cancelled: MicEchoCancelRecord?, micURL: URL, systemURL: URL,
+                                       qos: DispatchQoS.QoSClass) async -> FarEndLiftRecord? {
+        if let cancelled { return FarEndLiftRecord(cancelled) }
+        guard ChunkProcessor.hasAudio(micURL), ChunkProcessor.hasAudio(systemURL) else { return nil }
+        do {
+            return try await ChunkProcessor.offThePool(qos: qos) { try FarEndLift.measure(micURL: micURL, systemURL: systemURL) }
+        } catch {
+            Logger.transcription.error("The far-end lift could not be measured, echo dedup treats it as unknown: \(ChunkProcessor.echoCancelFailureDetail(error), privacy: .private)")
+            return nil
+        }
     }
 
     /// The same, from the records and the failure count directly (the single-file path).

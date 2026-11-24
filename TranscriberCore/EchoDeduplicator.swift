@@ -127,11 +127,12 @@ public enum EchoDeduplicator {
     /// milliseconds) is below this resolution, so it is folded in here as 0.
     public static let echoTimingToleranceSeconds = 0.3
 
-    /// What echo cancellation measured about the acoustic path from the loudspeaker to the mic (#365):
-    /// per measured span of the segments' timeline, how far the raw mic rose above its own floor while the
-    /// far end talked (`MicEchoCancelRecord.farEndLiftDB`). Where the canceller found no coupling — a
-    /// headphone call measured 2.5 dB, a loudspeaker call 31 — there was no echo for the mic to pick up,
-    /// and a line that repeats the far end is the user repeating it.
+    /// What was measured about the acoustic path from the loudspeaker to the mic (#365, #374): per measured
+    /// span of the segments' timeline, how far the raw mic rose above its own floor while the far end talked
+    /// (`FarEndLift`, the same measure as `MicEchoCancelRecord.farEndLiftDB`). Measured on every dual-stream
+    /// chunk since #374, with echo cancellation on or off. Where it found no coupling — a headphone call
+    /// measured 2.5 dB, a loudspeaker call 31 — there was no echo for the mic to pick up, and a line that
+    /// repeats the far end is the user repeating it.
     public struct AcousticCoupling: Equatable, Sendable {
         public struct Span: Equatable, Sendable {
             public let start: Double
@@ -151,7 +152,15 @@ public enum EchoDeduplicator {
         /// remove" and "echo lines flagged one by one". Measured: about 0-3 dB on headphones, 27-32 dB on
         /// loudspeakers; the 6 dB the issue suggested would also separate those, and 15 dB holds back more
         /// lines where the measure is unsure, which is the side a wrong call should fall on.
+        ///
+        /// UNMEASURED BAND (#374): nothing between about 3 and 27 dB has been recorded. A quiet loudspeaker in a
+        /// noisy room could lift 7-15 dB: it reads as "no coupling" here and its echo lines are held back
+        /// (shown, not hidden). Measure such a call before moving this line.
         public static let uncoupledBelowLiftDB = EchoReduction.audibleEchoLiftDB
+
+        /// Where a transcript keeps the measure (#374): `metadata.acoustic_coupling.per_chunk`, one entry per
+        /// measured chunk, written whether or not echo cancellation ran.
+        public static let metadataKey = "acoustic_coupling"
 
         public let spans: [Span]
 
@@ -165,14 +174,23 @@ public enum EchoDeduplicator {
 
         /// One chunk's record, over the whole chunk whatever its timeline; unknown without a record.
         public static func chunk(_ record: MicEchoCancelRecord?) -> AcousticCoupling {
-            guard let record else { return .unknown }
-            return AcousticCoupling(spans: [Span(start: -.infinity, end: .infinity, farEndLiftDB: record.farEndLiftDB)])
+            chunk(lift: record.map(FarEndLiftRecord.init))
         }
 
-        /// The chunks' measures a transcript keeps in `metadata.mic_echo_cancel.per_chunk` (on the
-        /// transcript's timeline); unknown for a transcript written before #365 or without cancellation.
+        /// One chunk's measure (#374), over the whole chunk whatever its timeline; unknown without one.
+        public static func chunk(lift: FarEndLiftRecord?) -> AcousticCoupling {
+            guard let lift else { return .unknown }
+            return AcousticCoupling(spans: [Span(start: -.infinity, end: .infinity, farEndLiftDB: lift.farEndLiftDB)])
+        }
+
+        /// The chunks' measures a transcript keeps, on the transcript's timeline: `metadata.acoustic_coupling.per_chunk`
+        /// (#374, every measured chunk), else — a transcript written by the #365 build, which measured only with
+        /// echo cancellation — `metadata.mic_echo_cancel.per_chunk`. Unknown for a transcript that has neither:
+        /// the per-line rule then applies everywhere, as it did before #365.
         public init(transcriptMetadata metadata: [String: Any]) {
-            let entries = (metadata["mic_echo_cancel"] as? [String: Any])?["per_chunk"] as? [[String: Any]] ?? []
+            let current = (metadata[Self.metadataKey] as? [String: Any])?["per_chunk"] as? [[String: Any]]
+            let legacy = (metadata["mic_echo_cancel"] as? [String: Any])?["per_chunk"] as? [[String: Any]]
+            let entries = current ?? legacy ?? []
             self.init(spans: entries.compactMap { entry in
                 guard let start = (entry["start"] as? NSNumber)?.doubleValue,
                       let seconds = (entry["seconds"] as? NSNumber)?.doubleValue,
@@ -181,12 +199,27 @@ public enum EchoDeduplicator {
             })
         }
 
-        /// One `per_chunk` entry: where the chunk sits on the transcript's timeline and what was measured.
+        /// One `mic_echo_cancel.per_chunk` entry: where the chunk sits on the transcript's timeline and what
+        /// echo cancellation measured.
         public static func metadataEntry(chunk: Int, start: Double, record: MicEchoCancelRecord) -> [String: Any] {
-            var entry: [String: Any] = ["chunk": chunk, "start": (start * 1000).rounded() / 1000, "seconds": record.seconds]
-            if let lift = record.farEndLiftDB { entry["far_end_lift_db"] = lift }
+            var entry = metadataEntry(chunk: chunk, start: start, lift: FarEndLiftRecord(record))
             if let erle = record.erleDB { entry["erle_db"] = erle }
             return entry
+        }
+
+        /// One `acoustic_coupling.per_chunk` entry (#374): where the chunk sits on the transcript's timeline and
+        /// its lift; `far_end_lift_db` left out when there was too little far-end speech to measure.
+        public static func metadataEntry(chunk: Int, start: Double, lift: FarEndLiftRecord) -> [String: Any] {
+            var entry: [String: Any] = ["chunk": chunk, "start": (start * 1000).rounded() / 1000, "seconds": lift.seconds]
+            if let value = lift.farEndLiftDB { entry["far_end_lift_db"] = value }
+            return entry
+        }
+
+        /// `metadata.acoustic_coupling` (#374): the entries, and the line they were judged against; nil (the key
+        /// left out) when no chunk was measured.
+        public static func metadataDictionary(perChunk: [[String: Any]]) -> [String: Any]? {
+            guard !perChunk.isEmpty else { return nil }
+            return ["per_chunk": perChunk, "uncoupled_below_db": uncoupledBelowLiftDB]
         }
 
         /// Whether a line from `start` to `end` touches a span measured without coupling. A line across a
@@ -362,8 +395,8 @@ public enum EchoDeduplicator {
     ///   one release so existing callers and config files keep working.
     /// - Parameter logPrefix: put before each verdict's log line, so a check whose verdicts are not
     ///   the record (the one before minority absorption, #249) does not read like the record.
-    /// - Parameter coupling: what echo cancellation measured for these segments; `.unknown` when it did
-    ///   not run.
+    /// - Parameter coupling: the far-end lift measured for these segments (#374); `.unknown` when it was not
+    ///   measured.
     public static func deduplicate(
         segments: [LabeledSegment],
         localSpeakerDatabase: [String: [Float]],

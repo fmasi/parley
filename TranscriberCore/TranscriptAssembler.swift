@@ -38,6 +38,7 @@ public enum TranscriptAssembler {
         echoSegmentsFlagged: Int = 0,
         echoClusters: [[String: Any]]? = nil,
         micEchoCancel: [String: Any]? = nil,
+        acousticCoupling: [String: Any]? = nil,
         provenance: CaptureProvenance? = nil,
         recordedAt: Date? = nil,
         captureGaps: [CaptureGap] = [],
@@ -77,6 +78,11 @@ public enum TranscriptAssembler {
         // of the mic. nil = it never ran (the setting was off), and the key is left out.
         if let micEchoCancel {
             metadata["mic_echo_cancel"] = micEchoCancel
+        }
+        // Each dual-stream chunk's far-end lift (#374), with echo cancellation on or off: what echo dedup's
+        // headphone guard reads, and re-detect after it. nil = nothing was measured, and the key is left out.
+        if let acousticCoupling {
+            metadata[EchoDeduplicator.AcousticCoupling.metadataKey] = acousticCoupling
         }
         // Capture provenance (#95): a compact, always-present stamp of how this recording was
         // captured — engine, formats, and how many route changes / retries / recoveries occurred.
