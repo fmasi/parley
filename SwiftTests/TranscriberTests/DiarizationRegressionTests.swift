@@ -118,6 +118,56 @@ import Testing
             "excludeOverlap=true should recover speakers that excludeOverlap=false merges (got \(correctCount) vs \(brokenCount))"
         )
     }
+
+    /// #341: a re-detect clusters the analysis it kept instead of diarizing again. That is only
+    /// right if the clusters are the ones a full pass gives, at every count — including a count other
+    /// than the one the analysis was made under (#265's wider pass makes it at N+1, then N reuses it).
+    /// Exact: same segments, times, labels, quality scores and speaker embeddings.
+    @Test(.enabled(if: DiarizationRegressionTests.canRun))
+    func clusteringAKeptAnalysisGivesTheFullPassClusters() async throws {
+        let fixture = try #require(Self.amiFixture, "AMI fixture missing — run scripts/fetch-diarization-fixtures.sh")
+        guard try await TestModels.ensureDiarization() else { return }
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: fixture)
+        let diarizer = FluidAudioDiarizer()
+
+        // Under 5, clustered at 5 down to 2. Then made under a small count and clustered at larger ones,
+        // as in the dialog: a first re-detect makes it under its first pass's count, and the next
+        // re-detect, one higher, clusters at its wider pass (N+1) and at N.
+        for (hint, counts) in [(5, [5, 4, 3, 2]), (2, [4, 3])] {
+            let prepared = try await diarizer.prepare(audio: samples, speakerCountHint: hint, progress: nil)
+            #expect(prepared.embeddingCount > 100)
+            for count in counts {
+                try await Self.expectSameClusters(diarizer, prepared, samples, count, "hint \(hint), count \(count)")
+            }
+        }
+    }
+
+    /// The same on the Neural Engine (`diarization_compute_units: neural_engine`): its own analysis,
+    /// clustered as its own full pass.
+    @Test(.enabled(if: DiarizationRegressionTests.canRun))
+    func clusteringAKeptAnalysisOnTheNeuralEngineGivesItsFullPassClusters() async throws {
+        let fixture = try #require(Self.amiFixture, "AMI fixture missing — run scripts/fetch-diarization-fixtures.sh")
+        guard try await TestModels.ensureDiarization() else { return }
+        let samples = try AudioDecode.mono16kHzFloat(contentsOf: fixture)
+        let diarizer = FluidAudioDiarizer(computeUnits: .neuralEngine)
+        let prepared = try await diarizer.prepare(audio: samples, speakerCountHint: 4, progress: nil)
+        for count in [4, 3] {
+            try await Self.expectSameClusters(diarizer, prepared, samples, count, "neural engine, count \(count)")
+        }
+    }
+
+    private static func expectSameClusters(_ diarizer: FluidAudioDiarizer, _ prepared: PreparedSpeakerAnalysis,
+                                           _ samples: [Float], _ count: Int, _ label: String) async throws {
+        let kept = try await diarizer.cluster(prepared, numSpeakers: count)
+        let full = try await diarizer.diarize(audio: samples, numSpeakers: count, progress: nil)
+        #expect(!full.segments.isEmpty, "\(label)")
+        #expect(kept.segments.map(row) == full.segments.map(row), "\(label)")
+        #expect(kept.speakerDatabase == full.speakerDatabase, "\(label)")
+    }
+
+    private static func row(_ s: DiarizedSegment) -> String {
+        "\(s.start) \(s.end) \(s.speaker) \(s.qualityScore.map { String($0) } ?? "-")"
+    }
 }
 
 /// Model-free guards that DO run in CI.

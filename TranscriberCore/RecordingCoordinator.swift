@@ -237,6 +237,11 @@ public final class RecordingCoordinator {
     /// the app re-checks crash protection there, since the hand-over (an exit) cannot happen under a recording (final
     /// review A-I2).
     public var onRecordingStarted: (() -> Void)?
+    /// Run on the same transition, before `onRecordingStarted`: lets go of every rename dialog's kept
+    /// speaker analysis (#341 review), so a dialog left open from an earlier call (about 0.36 GB an
+    /// hour of its audio) never sits under this recording's chunk processing. Its next Re-detect just
+    /// runs a full pass. Injected so a test can see it called.
+    var releaseSpeakerAnalyses: @Sendable () -> Void = { SpeakerAnalysisCache.releaseAll(.recordingStarted) }
     /// Only a relaunch's resume awaits frames before the phase is `.recording`: set there before its
     /// `start()`, cleared when the capture is up. Nothing else accepts frames outside a recording (L2/L4
     /// fix round 2, item 1).
@@ -646,6 +651,7 @@ public final class RecordingCoordinator {
             recoveryInFlight = false
             stopRequestedDuringRecovery = false
             presentCarriedAlarmsAtRecordingStart()
+            releaseSpeakerAnalyses()
             onRecordingStarted?()
             if crashBeforeRecording {
                 crashBeforeRecording = false
@@ -2843,6 +2849,7 @@ public final class RecordingCoordinator {
         // `recordingStopped`, L6 fix round 1). "Recording Resumed" still waits for the first mic frames.
         appState.raiseAppAlarm(.recordingResumedWithGap, message: RecoveryMessages.resumedAfterCrash(crashedAt: gapStart, resumedAt: now))
         presentAlarms()
+        releaseSpeakerAnalyses()
         onRecordingStarted?()
         if awaitingRecoveryFrames { appState.interruptionWarning = "Recording restarted — waiting for audio…" }
         if crashBeforeRecording {
