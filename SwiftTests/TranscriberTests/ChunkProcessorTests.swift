@@ -210,11 +210,11 @@ struct ChunkProcessorTests {
         return (dir, state, result.jsonPath)
     }
 
-    /// #302: FluidAudio's `noSpeechDetected` (NSError code 5) on a stream that HAS words — a short last chunk where the
+    /// #302: FluidAudio's `noSpeechDetected` (NSError code 6 since FluidAudio 0.18, 5 before) on a stream that HAS words — a short last chunk where the
     /// other side said a few words, too little speech for one embedding — is "too little speech to attribute", not a
     /// failure. The lines stay unattributed, the issue is informational, and the transcript stays diarized.
     @Test func tooLittleSpeechOnAShortLastChunkIsNotADiarizationFailure() async throws {
-        #expect((OfflineDiarizationError.noSpeechDetected as NSError).code == 5, "the code the log shows for it")
+        #expect((OfflineDiarizationError.noSpeechDetected as NSError).code == 6, "the code the log shows for it (gotcha 88)")
         let (dir, state, transcript) = try await shortLastChunk(throwing: .noSpeechDetected)
         defer { try? FileManager.default.removeItem(at: dir) }
 

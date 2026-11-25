@@ -4230,7 +4230,8 @@ private actor Latch {
         let url = h.tmp.appendingPathComponent("done.json")
         // `problemChunkCount` counts distinct chunks with a content-affecting issue in `processing_issues`.
         try JSONSerialization.data(withJSONObject: [
-            "metadata": ["processing_issues": [["chunk": 0, "code": "asr_failed"], ["chunk": 1, "code": "asr_failed"]],
+            // Not `asr_failed`: a failed recognition is named on its own (#223, below).
+            "metadata": ["processing_issues": [["chunk": 0, "code": "diarization_failed"], ["chunk": 1, "code": "vad_failed"]],
                          "capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
             "segments": [["start": 0.0, "end": 1.0, "text": "x", "speaker": "S"]],
         ]).write(to: url)
@@ -4242,6 +4243,62 @@ private actor Latch {
         h.appState.phase = .transcribing(progress: "")
         await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
         #expect(h.notified.value.last?.title == "Transcription Complete — no speech was transcribed")
+    }
+
+    /// #223: Apple Speech on the chunked path threw `languageRequired` on every chunk; each chunk carried `asr_failed`, the
+    /// transcript had no segment, and the user read "Transcription Complete — no speech was transcribed". A failed engine
+    /// is reported as a failed transcription, never as "Complete".
+    @Test func anEngineThatFailedOnEveryChunkIsNeverTranscriptionComplete() async throws {
+        let h = try Harness()
+        let url = h.tmp.appendingPathComponent("blank.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["processing_issues": [["chunk": 0, "code": "asr_failed", "track": "remote"],
+                                               ["chunk": 0, "code": "asr_failed", "track": "local"],
+                                               ["chunk": 1, "code": "asr_failed", "track": "remote"],
+                                               ["chunk": 1, "code": "asr_failed", "track": "local"]],
+                         "capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
+            "segments": [] as [Any],
+        ]).write(to: url)
+        h.appState.phase = .transcribing(progress: "")
+        await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
+        let notice = try #require(h.notified.value.last)
+        #expect(notice.title == "Transcription failed — speech recognition did not work")
+        #expect(notice.body.contains("speech recognition failed on 2 chunks"))
+        #expect(!notice.title.contains("Complete"))
+    }
+
+    /// … and one that failed on some chunks makes it incomplete, named as such.
+    @Test func anEngineThatFailedOnSomeChunksIsTranscriptionIncomplete() async throws {
+        let h = try Harness()
+        let url = h.tmp.appendingPathComponent("partial.json")
+        try JSONSerialization.data(withJSONObject: [
+            "metadata": ["processing_issues": [["chunk": 1, "code": "asr_failed", "track": "remote"]],
+                         "capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
+            "segments": [["start": 0.0, "end": 1.0, "text": "x", "speaker": "S"]],
+        ]).write(to: url)
+        h.appState.phase = .transcribing(progress: "")
+        await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
+        #expect(h.notified.value.last?.title == "Transcription incomplete — speech recognition failed on 1 chunk")
+        #expect(h.notified.value.last?.body == "partial.json — speech recognition failed on 1 chunk; its audio is kept")
+    }
+
+    /// Review: the other problems are counted by chunk, never inferred from the totals — an `archive_failed` beside the
+    /// `asr_failed` of the same chunk is still said, and a `vad_failed` on another chunk is not "2 chunks had problems".
+    @Test func otherProblemsBesideAFailedRecognitionAreCountedByChunk() async throws {
+        let h = try Harness()
+        let url = h.tmp.appendingPathComponent("mixed.json")
+        let segments: [[String: Any]] = [["start": 0.0, "end": 1.0, "text": "x", "speaker": "S"]]
+        for (issues, other) in [([["chunk": 0, "code": "asr_failed", "track": "remote"], ["chunk": 0, "code": "archive_failed"]], 1),
+                                ([["chunk": 0, "code": "asr_failed", "track": "remote"], ["chunk": 1, "code": "vad_failed", "track": "local"]], 1)] {
+            try JSONSerialization.data(withJSONObject: [
+                "metadata": ["processing_issues": issues, "capture_provenance": ["quality_anomaly_count": 0]] as [String: Any],
+                "segments": segments,
+            ]).write(to: url)
+            h.appState.phase = .transcribing(progress: "")
+            await h.coordinator.presentCompletedTranscription(TranscriptionResult(jsonPath: url))
+            #expect(h.notified.value.last?.body
+                    == "mixed.json — speech recognition failed on 1 chunk; its audio is kept; \(other) chunk had other processing problems")
+        }
     }
 
     /// #321: a caller that does not own the phase — a launch salvage while a Stop of the user's is still finishing — still

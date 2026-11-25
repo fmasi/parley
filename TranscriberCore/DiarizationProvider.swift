@@ -53,7 +53,7 @@ extension DiarizationProvider {
 /// What a diarizer's throw means for the stream it was diarizing.
 public enum DiarizerThrow {
     /// The diarizer found too little speech to attribute the stream's words to anyone: FluidAudio's
-    /// `OfflineDiarizationError.noSpeechDetected` (NSError code 5). It throws that on empty audio, and when no 10 s window
+    /// `OfflineDiarizationError.noSpeechDetected` (NSError code 6; 5 before FluidAudio 0.18, gotcha 88). It throws that on empty audio, and when no 10 s window
     /// has a speaker active for at least 20 % of it, so no embedding is extracted (a few words in a short chunk, #302).
     /// Not a failure: the lines stay unattributed. Every other error is a failure.
     public static func isTooLittleSpeech(_ error: any Error) -> Bool {

@@ -7,8 +7,8 @@ import Testing
 /// `embeddingExcludeOverlap: false` was a FLAG, not logic — no unit test of behaviour could see
 /// it, and it collapsed every speaker into one cluster for months. This test serializes every
 /// default that shapes a transcript — the app-level Config defaults, the resolved values the
-/// runner consumes, and the complete FluidAudio diarizer config (via the SAME
-/// `makeOfflineConfig()` production calls, so the snapshot cannot drift from reality) — and
+/// runner consumes, and the complete FluidAudio diarizer and ASR configs (via the SAME
+/// `makeOfflineConfig()` / `makeAsrConfig()` production calls, so the snapshot cannot drift from reality) — and
 /// compares it against a checked-in golden file.
 ///
 /// Any change to any default — a human editing a value, or a FluidAudio bump silently moving
@@ -54,6 +54,22 @@ import Testing
         Issue.record(Comment(rawValue: message))
     }
 
+    /// The model manifest records which FluidAudio downloaded a model (`sdk_label`). The label is a
+    /// constant, so a dependency bump can leave it naming the previous version: 0.18.3 shipped
+    /// labelled "0.17.x" until this test. It must name the minor line Package.resolved pins.
+    @Test func sdkLabelNamesTheFluidAudioVersionInPackageResolved() throws {
+        let resolved = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Package.resolved")
+        let root = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: resolved)) as? [String: Any])
+        let pins = try #require(root["pins"] as? [[String: Any]])
+        let pin = try #require(pins.first { ($0["identity"] as? String) == "fluidaudio" })
+        let version = try #require((pin["state"] as? [String: Any])?["version"] as? String)
+        let parts = version.split(separator: ".")
+        try #require(parts.count == 3, "an x.y.z version, got \(version)")
+        #expect(FluidAudioEngine.sdkLabel == "FluidAudio \(parts[0]).\(parts[1]).x")
+    }
+
     // MARK: - Rendering
 
     /// The full resolved-config document. Deterministic: sorted keys, hand-rendered JSON (no
@@ -78,6 +94,9 @@ import Testing
 
         let sections: [(String, String)] = [
             ("app_config_defaults", renderAppConfig(config)),
+            // The ASR config the engine loads with (FluidAudioEngine.ensureLoaded): FluidAudio 0.18 moved two
+            // long-form seam defaults under Parley while only the diarizer was snapshotted (gotcha 103).
+            ("fluidaudio_asr", mirrorJSON(FluidAudioEngine.makeAsrConfig(), indent: "  ")),
             ("fluidaudio_offline_diarizer", mirrorJSON(diarizer.makeOfflineConfig(), indent: "  ")),
             ("resolved", "{\n" + resolved.map { "    \"\($0.0)\": \($0.1)" }.joined(separator: ",\n") + "\n  }"),
         ]
