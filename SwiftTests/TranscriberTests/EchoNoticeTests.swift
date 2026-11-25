@@ -143,13 +143,29 @@ import AVFoundation
     @Test func theRedetectHintIsForTheChannelWithAnEchoVoice() throws {
         let hint = try #require(findings(speakerMode).redetectHint(on: "local"))
         #expect(hint.contains("echo voice") && !hint.contains("echo voices"))
-        #expect(hint.contains("separate") && hint.contains("marked as echo"))
+        #expect(hint.contains("apart") && hint.contains("marked as echo"))
         #expect(findings(speakerMode).redetectHint(on: "remote") == nil)
         let two = try #require(findings(["echo_clusters": [
             entry(echo, "echo", lines: 60, matched: 50, seconds: 500, matchedSeconds: 450),
             entry("Local Speaker 3", "echo", lines: 30, matched: 25, seconds: 200, matchedSeconds: 150),
         ]]).redetectHint(on: "local"))
         #expect(two.contains("echo voices"))
+    }
+
+    /// #265: the count is the people on this side, and re-detect looks for the echo voice itself. The
+    /// hint asks for the people and no longer explains the echo voice as something to count around;
+    /// it promises nothing (a diarizer that blends the voices leaves nothing to keep apart).
+    @Test func theRedetectHintAsksForThePeopleAndPromisesNothing() throws {
+        for f in [findings(speakerMode), findings(["echo_clusters": [
+            entry(echo, "echo", lines: 60, matched: 50, seconds: 500, matchedSeconds: 450),
+            entry("Local Speaker 3", "echo", lines: 30, matched: 25, seconds: 200, matchedSeconds: 150),
+        ]])] {
+            let hint = try #require(f.redetectHint(on: "local"))
+            #expect(hint.hasPrefix("Set the number of people on this side."))
+            #expect(hint.contains("looks for"))
+            #expect(!hint.contains("not the echo"), "the user no longer counts around the echo voice: \(hint)")
+            #expect(!hint.contains("count is people only"))
+        }
     }
 
     @Test func anOutcomeWithoutEchoReadsAsItAlwaysDid() {

@@ -81,7 +81,7 @@ public final class ModelDownloadGate: Sendable {
 public enum ModelRevisionMarker {
     static let fileName = ".fluidaudio-revision"
 
-    /// Mirrors FluidAudio's internal `ModelCache.matchesRevision` (0.17.7), the source of truth, and its
+    /// Mirrors FluidAudio's internal `ModelCache.matchesRevision` (unchanged from 0.17.7 to 0.18.3), the source of truth, and its
     /// marker file name: a `main` folder without a marker predates markers and is current; a pinned
     /// revision needs an exact marker. Callers pass the repo's unmapped revision: Parley never sets
     /// `ModelRegistry.revisionOverrides`. Re-check both on every FluidAudio update.

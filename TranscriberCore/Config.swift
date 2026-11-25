@@ -166,6 +166,18 @@ public struct Config: Codable, Equatable, Sendable {
     /// DEPRECATED (#242): read and written back so existing config files keep working, and ignored.
     /// The echo decision no longer uses the voice similarity; it is recorded as evidence only.
     public var echoEmbeddingThreshold: Double?
+    /// Who is late (#252): a local cluster whose matched lines lead the remote by more than this (median,
+    /// seconds) is the original, not the echo. nil = `EchoDeduplicator.defaultLocalLeadMarginSeconds`.
+    public var echoLocalLeadMarginSeconds: Double?
+
+    /// The margin echo dedup is handed: the configured one within `EchoDeduplicator.localLeadMarginRange`,
+    /// else the default. Silent here (read per chunk); `ConfigManager.load` warns once.
+    public var resolvedEchoLocalLeadMarginSeconds: Double {
+        guard let margin = echoLocalLeadMarginSeconds, EchoDeduplicator.localLeadMarginRange.contains(margin) else {
+            return EchoDeduplicator.defaultLocalLeadMarginSeconds
+        }
+        return margin
+    }
     public var archiveBitrateKbps: Int
     public var audioArchiveLimitHours: Int
     public var chunkDurationMinutes: Int
@@ -228,6 +240,7 @@ public struct Config: Codable, Equatable, Sendable {
         echoTemporalThreshold: nil,
         echoTextThreshold: nil,
         echoEmbeddingThreshold: nil,
+        echoLocalLeadMarginSeconds: nil,
         archiveBitrateKbps: 64,
         audioArchiveLimitHours: 15,
         chunkDurationMinutes: 30,
@@ -265,6 +278,7 @@ public struct Config: Codable, Equatable, Sendable {
         echoTemporalThreshold: Double? = nil,
         echoTextThreshold: Double? = nil,
         echoEmbeddingThreshold: Double? = nil,
+        echoLocalLeadMarginSeconds: Double? = nil,
         archiveBitrateKbps: Int = 64,
         audioArchiveLimitHours: Int = 15,
         chunkDurationMinutes: Int = 30,
@@ -300,6 +314,7 @@ public struct Config: Codable, Equatable, Sendable {
         self.echoTemporalThreshold = echoTemporalThreshold
         self.echoTextThreshold = echoTextThreshold
         self.echoEmbeddingThreshold = echoEmbeddingThreshold
+        self.echoLocalLeadMarginSeconds = echoLocalLeadMarginSeconds
         self.archiveBitrateKbps = archiveBitrateKbps
         self.audioArchiveLimitHours = audioArchiveLimitHours
         self.chunkDurationMinutes = chunkDurationMinutes
@@ -337,6 +352,7 @@ public struct Config: Codable, Equatable, Sendable {
         case echoTemporalThreshold = "echo_temporal_threshold"
         case echoTextThreshold = "echo_text_threshold"
         case echoEmbeddingThreshold = "echo_embedding_threshold"
+        case echoLocalLeadMarginSeconds = "echo_local_lead_margin_seconds"
         case archiveBitrateKbps = "archive_bitrate_kbps"
         case audioArchiveLimitHours = "audio_archive_limit_hours"
         case chunkDurationMinutes = "chunk_duration_minutes"
@@ -378,6 +394,7 @@ public struct Config: Codable, Equatable, Sendable {
         echoTemporalThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTemporalThreshold)
         echoTextThreshold = try c.decodeIfPresent(Double.self, forKey: .echoTextThreshold)
         echoEmbeddingThreshold = try c.decodeIfPresent(Double.self, forKey: .echoEmbeddingThreshold)
+        echoLocalLeadMarginSeconds = try c.decodeIfPresent(Double.self, forKey: .echoLocalLeadMarginSeconds)
         archiveBitrateKbps = try c.decodeIfPresent(Int.self, forKey: .archiveBitrateKbps) ?? 64
         audioArchiveLimitHours = try c.decodeIfPresent(Int.self, forKey: .audioArchiveLimitHours) ?? 15
         chunkDurationMinutes = try c.decodeIfPresent(Int.self, forKey: .chunkDurationMinutes) ?? 30
