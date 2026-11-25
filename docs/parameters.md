@@ -106,6 +106,13 @@ Diarization is performed by `FluidAudioDiarizer` (pyannote segmentation + WeSpea
 | `speaker_count_local` / `speaker_count_remote` | int | absent | **Written into the transcript, not read from config.** Records how many people a channel actually ended up with after a manual re-detect from the rename dialog (#67) — the count PRODUCED, not the count requested, since the two can differ. It counts people: not `Unknown`, and not a cluster the echo check judged to be the other side's voice through the speakers (#243), so it can be lower than the number of labels on the channel, and 0 on a mic channel that holds only echo. Absent on transcripts that were never re-diarized. |
 | `rediarized_channels` | [string] | absent | **Written into the transcript, not read from config.** The channels (`"local"` / `"remote"`) a re-detect has rewritten, each once. Absent on transcripts that were never re-diarized. A rename reads it: flagged segments on a listed channel keep their label (the unattributed one, or an echo cluster's — #296), those on the other channels are renamed (#245). |
 
+Fixed, not configurable via `config.json` (set in `FluidAudioDiarizer.makeOfflineConfig`, snapshotted by `GoldenConfigTests`):
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `postProcessing.exclusiveSegments` | `true` | One speaker at every instant, as word attribution, echo dedup and the speaker-count merge expect. FluidAudio's own default is `false` since 0.18.2 (gotcha 103). |
+| `segmentation.batchSize` | `8` (FluidAudio: `32`) | Segmentation windows per Core ML call. Output is bit-identical to 32 (segments, labels, embeddings), so it is not a key: there is no trade-off to choose. Peak footprint of one diarization, M5 Pro, 2026-11-24: AMI ES2004a (17.5 min) GPU 1049 → 708 MB, Neural Engine 589–619 → 306 MB; 30-min file GPU 1077 → 755 MB, Neural Engine 677–679 → 362 MB. Time within noise (gotcha 104). The `diarization_compute_units` figures above were measured at 32. |
+
 ## Debugging
 
 | Key | Type | Default | Description |
