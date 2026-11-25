@@ -279,6 +279,11 @@ The alarm rows are: "The other side may not be recorded", "Your microphone isn�
   - Do: Settings → Engine → "Apple Speech — not yet usable (#223)" → Save.
   - PASS: "Not saved — this engine cannot transcribe on this Mac: …", and the engine stays FluidAudio after reopening Settings.
 
+- [ ] **D-24a A failed engine is never "Transcription Complete" (#223).**
+  - Do: quit Parley, back up `~/Library/Application Support/Parley/config.json`, set its `"engine"` to `"speech_analyzer"` (the setting an install from before 0.9.0 can still carry; Settings refuses it), relaunch, record 30 s of speech, Stop. Then put the backup back and relaunch.
+  - PASS: the notice reads "Transcription failed — speech recognition did not work", its body "<id>.json — speech recognition failed on N chunks, so nothing was transcribed; the audio is kept. Check the transcription engine in Settings". `meta` shows `asr_failed` on both tracks of every chunk, and the chunk's WAVs are still beside its `.m4a`.
+  - FAIL: "Transcription Complete — no speech was transcribed".
+
 - [ ] **D-24b Save downloads a model that is not there (pre-PR review).**
   - Do: with Parley running and idle, move the speech model aside: `mv ~/Library/Application\ Support/FluidAudio/Models/parakeet-tdt-0.6b-v3 ~/Desktop/parakeet-aside`. Settings → Transcription: under the engine, "Model will download ~500 MB when you save". Save.
   - PASS: "Saved", a progress bar runs under the engine, then "Model downloaded". Then delete `~/Desktop/parakeet-aside`.

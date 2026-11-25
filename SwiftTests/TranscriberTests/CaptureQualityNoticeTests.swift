@@ -137,6 +137,90 @@ import Foundation
         #expect(body.contains("1 capture anomaly") && body.contains("2 chunks had processing problems"))
     }
 
+    // MARK: - A speech engine that failed (#223)
+
+    /// #223: an engine that throws on every chunk (Apple Speech with no language) left `asr_failed` on each chunk and
+    /// no segment, and the notice said "Transcription Complete — no speech was transcribed": complete, and the
+    /// emptiness put down to silence. A failed engine is a failed transcription, never "Complete" and never "no speech".
+    @Test func anEngineThatFailedOnEveryChunkIsATranscriptionFailureNotNoSpeech() {
+        let title = CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 3, segmentCount: 0,
+                                                         recognitionFailedChunks: 3)
+        #expect(title == "Transcription failed — speech recognition did not work")
+        #expect(!title.contains("Complete") && !title.contains("no speech"))
+        let body = CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 3, segmentCount: 0,
+                                                       recognitionFailedChunks: 3)
+        #expect(body == "m.json — speech recognition failed on 3 chunks, so nothing was transcribed; the audio is kept. Check the transcription engine in Settings")
+        // It leads even a side that was not captured: that side's emptiness is not why nothing was transcribed.
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 2, problemChunkCount: 1, segmentCount: 0, remoteStatus: "neverDelivered",
+                                                     recognitionFailedChunks: 1) == "Transcription failed — speech recognition did not work")
+        // An unreadable transcript still leads: nothing in it can be known.
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: CaptureQualityNotice.unreadable,
+                                                     segmentCount: 0, recognitionFailedChunks: 1).hasPrefix("Transcription finished — "))
+    }
+
+    /// Recognition that failed on SOME chunks: those chunks' words are missing for sure — said as such, never folded into
+    /// "processing problems" under a "Complete" title. Below a side not or partly captured, above everything else.
+    @Test func anEngineThatFailedOnSomeChunksMakesTheTranscriptionIncomplete() {
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 1, problemChunkCount: 2, segmentCount: 40, echoLines: 5,
+                                                     remoteUncertainSeconds: 900, recognitionFailedChunks: 1)
+                == "Transcription incomplete — speech recognition failed on 1 chunk")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 2, segmentCount: 40, recognitionFailedChunks: 2)
+                == "Transcription incomplete — speech recognition failed on 2 chunks")
+        #expect(CaptureQualityNotice.completionTitle(anomalyCount: 0, problemChunkCount: 1, segmentCount: 40, localStatus: "neverDelivered",
+                                                     recognitionFailedChunks: 1) == "Transcription Complete — your microphone was not captured")
+        // The body: the failed chunks, then the chunks with a problem OTHER than the failed recognition, counted apart —
+        // never inferred from the two totals.
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 2, segmentCount: 40,
+                                                    recognitionFailedChunks: 2, otherProblemChunks: 0)
+                == "m.json — speech recognition failed on 2 chunks; their audio is kept")
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 3, segmentCount: 40,
+                                                    recognitionFailedChunks: 1, otherProblemChunks: 2)
+                == "m.json — speech recognition failed on 1 chunk; its audio is kept; 2 chunks had other processing problems")
+        // Review: `asr_failed` and `archive_failed` on the SAME chunk — one problem chunk, one failed — still says the archive.
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 1, segmentCount: 40,
+                                                    recognitionFailedChunks: 1, otherProblemChunks: 1)
+                == "m.json — speech recognition failed on 1 chunk; its audio is kept; 1 chunk had other processing problems")
+        #expect(CaptureQualityNotice.completionBody(fileName: "m.json", anomalyCount: 0, problemChunkCount: 1, segmentCount: 0,
+                                                    recognitionFailedChunks: 1, otherProblemChunks: 1)
+                .hasSuffix("Check the transcription engine in Settings; 1 chunk had other processing problems"))
+    }
+
+    /// The chunks with a content-affecting problem other than `asr_failed`, whether or not the chunk also failed
+    /// recognition (review: a count comparison lost an `archive_failed` beside an `asr_failed`).
+    @Test func otherProblemChunkCountLeavesOutOnlyTheFailedRecognition() throws {
+        let same = try writeTranscript(["metadata": ["processing_issues": [
+            ["chunk": 0, "code": "asr_failed", "track": "remote"],
+            ["chunk": 0, "code": "archive_failed"],
+        ]], "segments": [] as [Any]])
+        defer { try? FileManager.default.removeItem(at: same) }
+        #expect(CaptureQualityNotice.otherProblemChunkCount(inTranscriptAt: same) == 1)
+        let apart = try writeTranscript(["metadata": ["processing_issues": [
+            ["chunk": 0, "code": "asr_failed", "track": "remote"],
+            ["chunk": 1, "code": "vad_failed", "track": "local"],
+            ["chunk": 2, "code": "stream_empty", "track": "local"],
+        ]], "segments": [] as [Any]])
+        defer { try? FileManager.default.removeItem(at: apart) }
+        #expect(CaptureQualityNotice.otherProblemChunkCount(inTranscriptAt: apart) == 1)
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("absent-\(UUID().uuidString).json")
+        #expect(CaptureQualityNotice.otherProblemChunkCount(inTranscriptAt: missing) == CaptureQualityNotice.unreadable)
+    }
+
+    @Test func recognitionFailedChunkCountReadsDistinctChunksWithAsrFailed() throws {
+        let url = try writeTranscript(["metadata": ["processing_issues": [
+            ["chunk": 0, "code": "asr_failed", "track": "remote"],
+            ["chunk": 0, "code": "asr_failed", "track": "local"],
+            ["chunk": 2, "code": "asr_failed", "track": "local"],
+            ["chunk": 3, "code": "diarization_failed", "track": "remote"],
+        ]], "segments": [] as [Any]])
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(CaptureQualityNotice.recognitionFailedChunkCount(inTranscriptAt: url) == 2)
+        let clean = try writeTranscript(["metadata": [:] as [String: Any], "segments": [] as [Any]])
+        defer { try? FileManager.default.removeItem(at: clean) }
+        #expect(CaptureQualityNotice.recognitionFailedChunkCount(inTranscriptAt: clean) == 0)
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("absent-\(UUID().uuidString).json")
+        #expect(CaptureQualityNotice.recognitionFailedChunkCount(inTranscriptAt: missing) == CaptureQualityNotice.unreadable)
+    }
+
     @Test func problemChunkCountReadsDistinctChunksWithContentIssues() throws {
         let url = try writeTranscript(["metadata": ["processing_issues": [
             ["chunk": 0, "code": "asr_failed", "track": "remote"],
