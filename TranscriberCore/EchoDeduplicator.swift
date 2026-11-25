@@ -552,8 +552,8 @@ public enum EchoDeduplicator {
             let leadingChunks = Set(Dictionary(grouping: matched, by: chunkOf).filter { _, lines in
                 localLeads(timed: lines.compactMap { lagOf[$0] }, matched: lines.count, margin: leadMargin)
             }.keys)
-            let localLeads = !leadingChunks.isEmpty
-            let isEcho = !localLeads && share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
+            let leadsAnywhere = !leadingChunks.isEmpty
+            let isEcho = !leadsAnywhere && share >= clusterShareThreshold && seconds >= clusterMinimumSeconds
             var flagged = 0, heldUncoupled = 0, heldTiming = 0, heldLeading = 0
             for i in matched {
                 // The original, where its lines lead: a timed line there is not an echo copy, unless it itself
@@ -587,7 +587,7 @@ public enum EchoDeduplicator {
                 share: share, verdict: isEcho ? .echo : .kept,
                 bestEmbeddingSimilarity: similarities[dbKey], matchedRemote: remote,
                 medianLagSeconds: medianLag, lagPairs: lags.isEmpty ? nil : lags.count,
-                reason: localLeads ? ClusterVerdict.reasonLocalLeads : nil)
+                reason: leadsAnywhere ? ClusterVerdict.reasonLocalLeads : nil)
             clusters.append(verdict)
             // Numbers only are public; a label becomes a name once the user renames a speaker.
             Logger.transcription.info(

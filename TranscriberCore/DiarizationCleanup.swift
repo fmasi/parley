@@ -73,16 +73,16 @@ public enum DiarizationCleanup {
         minShare: Double? = defaultMinShare,
         keeping: Set<String> = []
     ) -> (DiarizationResult, absorbed: Int) {
-        guard let plan = plan(result, minShare: minShare, keeping: keeping) else { return (result, 0) }
-        let absorbed = plan.absorbed
+        guard let absorption = plan(result, minShare: minShare, keeping: keeping) else { return (result, 0) }
+        let absorbed = absorption.absorbed
 
         Logger.transcription.info(
-            "DiarizationCleanup: absorbed \(absorbed.count, privacy: .public) minority cluster(s) into the dominant speaker (each under \(Int((minShare ?? 0) * 100), privacy: .public)% of \(String(format: "%.1f", plan.total), privacy: .public)s of speech), \(keeping.intersection(plan.clusters).count, privacy: .public) cluster(s) judged echo left as they are"
+            "DiarizationCleanup: absorbed \(absorbed.count, privacy: .public) minority cluster(s) into the dominant speaker (each under \(Int((minShare ?? 0) * 100), privacy: .public)% of \(String(format: "%.1f", absorption.total), privacy: .public)s of speech), \(keeping.intersection(absorption.clusters).count, privacy: .public) cluster(s) judged echo left as they are"
         )
 
         let segments = result.segments.map { seg in
             absorbed.contains(seg.speaker)
-                ? DiarizedSegment(start: seg.start, end: seg.end, speaker: plan.dominant, qualityScore: seg.qualityScore)
+                ? DiarizedSegment(start: seg.start, end: seg.end, speaker: absorption.dominant, qualityScore: seg.qualityScore)
                 : seg
         }
         let database = result.speakerDatabase.filter { !absorbed.contains($0.key) }
