@@ -406,21 +406,22 @@ public final class ChunkProcessor {
         }
         defer { if let scratch { try? FileManager.default.removeItem(at: scratch) } }
 
-        // 1. Transcribe + diarize system audio. Mic echo cancellation (#342) runs alongside it: it
-        //    only reads the two WAVs, and writes the copy of the mic that step 2 transcribes.
+        // 1. Transcribe + diarize system audio. Mic echo cancellation (#342) and the far-end lift (#374)
+        //    run alongside it: they only read the two WAVs, and cancellation writes the copy of the mic
+        //    that step 2 transcribes.
         let (echoMic, echoReference) = (micURL, systemURL)
-        // A crash orphan's headers under-report by up to one sync interval, and cancellation reads
-        // both WAVs before `transcribeStream` would repair them: repair first, or the cleaned mic
-        // ASR reads ends early and the user's last words are lost (council, #342). Idempotent.
-        if case .off = micEchoCancel {} else {
-            _ = WavFileWriter.repairHeader(path: micURL.path)
-            _ = WavFileWriter.repairHeader(path: systemURL.path)
-        }
-        async let echoCancel = cancelMicEcho(chunkIndex: chunk.index, micURL: echoMic, systemURL: echoReference)
+        // A crash orphan's headers under-report by up to one sync interval, and cancellation and the
+        // lift read both WAVs before `transcribeStream` would repair them: repair first, or the cleaned
+        // mic ASR reads ends early and the user's last words are lost (council, #342). Idempotent; a
+        // missing file is left alone.
+        _ = WavFileWriter.repairHeader(path: micURL.path)
+        _ = WavFileWriter.repairHeader(path: systemURL.path)
+        async let echoAndLift = cancelMicEchoAndMeasureLift(chunkIndex: chunk.index, micURL: echoMic, systemURL: echoReference)
         let systemResult = await transcribeStream(
-            audioPath: systemURL, source: "remote", audioSource: .system, label: "chunk-\(chunk.index)-system"
+            audioPath: systemURL, source: "remote", audioSource: .system, label: "chunk-\(chunk.index)-system",
+            echoReference: nil
         )
-        let echo = await echoCancel
+        let (echo, farEndLift) = await echoAndLift
         defer { if let cleaned = echo.cleanedMic { try? FileManager.default.removeItem(at: cleaned) } }
 
         // 2. Transcribe mic audio (skip if file missing or empty)
@@ -434,8 +435,12 @@ public final class ChunkProcessor {
         if hasDualStream {
             // The echo-cancelled copy when there is one: ASR and diarization only. The raw mic is
             // still what is archived and what speaker samples are cut from.
+            // The system stream's lines go with it: the mic's raw clusters are judged for echo
+            // against them before minority absorption, so a small bleed cluster is not folded into
+            // the user unjudged (#249).
             micResult = await transcribeStream(
-                audioPath: echo.cleanedMic ?? micURL, source: "local", audioSource: .microphone, label: "chunk-\(chunk.index)-mic"
+                audioPath: echo.cleanedMic ?? micURL, source: "local", audioSource: .microphone, label: "chunk-\(chunk.index)-mic",
+                echoReference: systemResult.segments
             )
         } else {
             micResult = StreamResult(segments: [], speakerDatabase: [:])
@@ -466,7 +471,9 @@ public final class ChunkProcessor {
                 localSpeakerDatabase: micResult.speakerDatabase,
                 remoteSpeakerDatabase: systemResult.speakerDatabase,
                 temporalThreshold: config.echoTemporalThreshold,
-                textThreshold: config.echoTextThreshold
+                textThreshold: config.echoTextThreshold,
+                localLeadMarginSeconds: config.resolvedEchoLocalLeadMarginSeconds,
+                coupling: .chunk(lift: farEndLift)
             )
             allSegments = dedupResult.segments
             echoFlagged = dedupResult.flaggedCount
@@ -594,7 +601,8 @@ public final class ChunkProcessor {
             echoClusters: echoClusters,
             isDualStream: hasDualStream,
             issues: issues,
-            micEchoCancel: echo.record
+            micEchoCancel: echo.record,
+            farEndLift: hasDualStream ? farEndLift : nil
         )
 
         // 8. Actor-isolated append + persist; only then may the source WAVs go (C-I4). A chunk that
@@ -644,11 +652,39 @@ public final class ChunkProcessor {
         return fm.fileExists(atPath: archive.path) ? archive : nil
     }
 
-    /// Split an archived chunk (L = mic, R = system) into scratch WAVs outside the output folder.
-    /// The mic side is kept only when this chunk was dual-stream: like the session's other chunks
-    /// when it has any (so the reconciler's namespaces agree), else when the mic channel holds any
-    /// non-zero sample. nil when the archive can't be read — the chunk is then recorded with its
-    /// system stream missing, never dropped.
+    /// Echo cancellation, then the chunk's far-end lift (#374), measured per window from the raw mic's levels
+    /// whether or not cancellation ran. The canceller's whole-chunk measure stands in only when the levels
+    /// could not be read at all.
+    private nonisolated func cancelMicEchoAndMeasureLift(chunkIndex: Int, micURL: URL, systemURL: URL) async
+        -> (echo: (cleanedMic: URL?, record: MicEchoCancelRecord?, issues: [ChunkIssue]), lift: FarEndLiftRecord?) {
+        let echo = await cancelMicEcho(chunkIndex: chunkIndex, micURL: micURL, systemURL: systemURL)
+        let lift = await measureFarEndLift(chunkIndex: chunkIndex, micURL: micURL, systemURL: systemURL)
+        return (echo, lift ?? echo.record.map(FarEndLiftRecord.init))
+    }
+
+    /// The far-end lift from levels alone (#374). nil without a mic and a far end that hold frames (nothing
+    /// to measure), or when a read fails: unknown, so echo dedup judges as it did before #365.
+    private nonisolated func measureFarEndLift(chunkIndex: Int, micURL: URL, systemURL: URL) async -> FarEndLiftRecord? {
+        guard Self.hasAudioFrames(micURL), Self.hasAudioFrames(systemURL) else { return nil }
+        let started = Date()
+        do {
+            let lift = try await Self.offThePool(qos: config.resolvedQos) {
+                try FarEndLift.measure(micURL: micURL, systemURL: systemURL)
+            }
+            let elapsed = Date().timeIntervalSince(started)
+            let windows = lift.windows ?? []
+            let uncoupled = windows.filter { ($0.farEndLiftDB ?? .infinity) < EchoDeduplicator.AcousticCoupling.uncoupledBelowLiftDB }.count
+            let unmeasured = windows.filter { $0.farEndLiftDB == nil }.count
+            Logger.transcription.info(
+                "Chunk \(chunkIndex, privacy: .public): far end \(Self.decibels(lift.farEndLiftDB, unit: "dB"), privacy: .public) above the mic's floor over the chunk; \(windows.count, privacy: .public) windows: \(uncoupled, privacy: .public) uncoupled, \(unmeasured, privacy: .public) unmeasured (levels only, \(lift.seconds, format: .fixed(precision: 0), privacy: .public) s of audio in \(elapsed, format: .fixed(precision: 1), privacy: .public) s)"
+            )
+            return lift
+        } catch {
+            Logger.transcription.error("Chunk \(chunkIndex, privacy: .public): the far-end lift could not be measured, echo dedup treats it as unknown: \(Self.echoCancelFailureDetail(error), privacy: .private)")
+            return nil
+        }
+    }
+
     /// Writes the chunk's echo-cancelled mic into the scratch folder (#342). Nothing to do with the
     /// setting off, without a mic WAV, or without a system WAV to use as the reference. Any failure
     /// leaves the raw mic in use and records `echo_cancel_failed`: never a missing local transcript.
@@ -725,6 +761,11 @@ public final class ChunkProcessor {
         }
     }
 
+    /// Split an archived chunk (L = mic, R = system) into scratch WAVs outside the output folder.
+    /// The mic side is kept only when this chunk was dual-stream: like the session's other chunks
+    /// when it has any (so the reconciler's namespaces agree), else when the mic channel holds any
+    /// non-zero sample. nil when the archive can't be read — the chunk is then recorded with its
+    /// system stream missing, never dropped.
     private nonisolated func splitArchive(_ archive: URL, chunkIndex: Int, micWavLeft: Bool) async -> (directory: URL, system: URL, mic: URL?)? {
         let directory = scratchDirectory.appendingPathComponent("parley-archive-\(UUID().uuidString)")
         do {
@@ -757,17 +798,22 @@ public final class ChunkProcessor {
 
     /// Whether a WAV holds any audio at all. A capture that opened a file and never wrote a frame
     /// leaves a valid header with zero frames — readable, nominally 16 kHz, and completely empty.
-    private nonisolated static func hasAudioFrames(_ url: URL) -> Bool {
+    nonisolated static func hasAudioFrames(_ url: URL) -> Bool {
         guard let file = try? AVAudioFile(forReading: url) else { return false }
         return file.length > 0
     }
 
     /// Transcribe a single audio stream, with optional diarization + VAD.
+    ///
+    /// - Parameter echoReference: the other channel's lines, for the mic stream only: its raw
+    ///   clusters are judged for echo against them before minority absorption (#249). nil for the
+    ///   system stream.
     private nonisolated func transcribeStream(
         audioPath: URL,
         source: String,
         audioSource: AudioSourceType,
-        label: String
+        label: String,
+        echoReference: [LabeledSegment]?
     ) async -> StreamResult {
         // Recover crash-orphaned WAVs: a writer killed before finalize() leaves a
         // header that underreports the payload, so the file reads as empty/short.
@@ -839,7 +885,12 @@ public final class ChunkProcessor {
                     diarizationResult: diarizationResult,
                     speechMap: speechMap,
                     vadSpeechThreshold: config.vadSpeechThreshold ?? 0.5,
-                    minSpeakerShare: config.resolvedDiarizationMinSpeakerShare
+                    minSpeakerShare: config.resolvedDiarizationMinSpeakerShare,
+                    echoReference: echoReference.map {
+                        StreamLabeling.EchoReference(segments: $0, temporalThreshold: config.echoTemporalThreshold,
+                                                     textThreshold: config.echoTextThreshold,
+                                                     localLeadMarginSeconds: config.resolvedEchoLocalLeadMarginSeconds)
+                    }
                 )
                 labeled = result.labeled
                 speakerDatabase = result.speakerDatabase

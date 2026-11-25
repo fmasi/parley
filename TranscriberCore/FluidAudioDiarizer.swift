@@ -227,12 +227,21 @@ public actor FluidAudioDiarizer: DiarizationProvider {
     /// count pays one model load (from the local cache — no download) the first time that count
     /// is used.
     ///
-    /// At most TWO managers are kept: the unforced one (key 0, the hot path, never evicted) and the
-    /// most recent forced count. Keying without a bound let every distinct count accumulate its own
-    /// manager, each holding the full pyannote + WeSpeaker + VBx models — capped at 21 only by the
-    /// UI stepper's 1...20 range, which is not a property this actor should depend on. Re-detect is
-    /// used a couple of times per session and never concurrently, so a one-deep forced slot costs
-    /// nothing real and removes the growth entirely.
+    /// Besides the unforced one (key 0, never evicted), ONE forced count is kept (`ForcedManagerSlots`),
+    /// and it is released BEFORE another loads. Keying without a bound let every distinct count
+    /// accumulate its own manager, each holding the full pyannote + WeSpeaker + VBx models — capped at
+    /// 21 only by the UI stepper's 1...20 range, which is not a property this actor should depend on.
+    ///
+    /// One, not two, although a re-detect of the mic channel asks for N+1 voices and then, without an
+    /// echo voice, for N (#265), so a clean channel reloads both on every re-detect. Measured in a
+    /// release build (M5 Pro, GPU, 600 s of audio): a load from the local cache takes about 135 ms
+    /// (200–550 ms the first in a process), while a manager kept idle after its pass holds about
+    /// 0.9 GB — keeping the wider pass's beside the stated count's raised the peak from about 0.97 to
+    /// 1.39 GB, and what stays held while the dialog is open from about 0.47 to 1.36 GB. Releasing
+    /// before the load also keeps the peak below the earlier one-deep slot's, which released the old
+    /// manager only after the new one had loaded.
+    private var forcedSlots = ForcedManagerSlots()
+
     private func ensureLoaded(forcedSpeakerCount: Int? = nil) async throws -> OfflineDiarizerManager {
         // A non-positive count is a NO-OP by design, not an error: it means "no hint", and maps to
         // the same unforced slot as nil. Callers that consider 0 a caller bug reject it themselves —
@@ -240,6 +249,7 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         // there it also disables absorption, which makes it meaningful rather than merely absent.
         let key = forcedSpeakerCount.map { $0 > 0 ? $0 : 0 } ?? 0
         if let mgr = managers[key] {
+            if key != 0 { forcedSlots.used(key) }
             return mgr
         }
 
@@ -266,6 +276,10 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         Logger.transcription.info(
             "Diarizer clustering: threshold=\(self.clusteringThreshold.map { String($0) } ?? "default", privacy: .public) maxSpeakers=\(config.clustering.maxSpeakers.map(String.init) ?? "default", privacy: .public) forcedByUser=\(key > 0 ? String(key) : "no", privacy: .public) excludeOverlap=\(self.excludeOverlap, privacy: .public) computeUnits=\(self.computeUnits.rawValue, privacy: .public)"
         )
+        // Room first: the evicted manager's models are released before the new ones load.
+        if key != 0 {
+            for evicted in forcedSlots.makeRoom(for: key) { managers[evicted] = nil }
+        }
         let mgr = OfflineDiarizerManager(config: config)
         try await mgr.prepareModels(configuration: computeUnits.modelConfiguration)
 
@@ -273,20 +287,55 @@ public actor FluidAudioDiarizer: DiarizationProvider {
         Logger.transcription.info("FluidAudio diarization models loaded in \(elapsed.components.seconds)s")
 
         // Actors re-enter at every `await`, and `prepareModels()` above is one. Two callers that
-        // both missed the cache before it will both arrive here having loaded the full model stack;
-        // without this re-check each would then evict the other's entry below. Keep whichever
-        // landed first so concurrent callers converge on one manager instead of thrashing.
+        // both missed the cache before it will both arrive here having loaded the full model stack.
+        // Keep whichever landed first so concurrent callers converge on one manager.
         if let existing = managers[key] {
+            if key != 0 { forcedSlots.used(key) }
             return existing
         }
 
-        // Evict any previously cached FORCED count; keep key 0 (unforced) permanently. Loading the
-        // unforced manager evicts nothing — it has no reason to discard a forced one someone may be
-        // about to reuse.
+        // Key 0 (unforced) is kept permanently and evicts nothing. A forced count takes its slot; a
+        // concurrent load may have filled the slots meanwhile, so whatever the bound now drops goes.
         if key != 0 {
-            managers = managers.filter { $0.key == 0 }
+            for evicted in forcedSlots.loaded(key) { managers[evicted] = nil }
         }
         managers[key] = mgr
         return mgr
+    }
+}
+
+/// Which forced-count diarizer managers `FluidAudioDiarizer` keeps (#265 review): the `capacity` most
+/// recently used, by speaker count, room made before a load. Pure, so the bound is tested without
+/// loading a model.
+struct ForcedManagerSlots {
+    /// One: an idle manager holds about 0.9 GB after a pass, a reload costs about 135 ms.
+    static let capacity = 1
+    /// The counts held, least recently used first.
+    private(set) var held: [Int] = []
+
+    /// `count` was found held and used again.
+    mutating func used(_ count: Int) {
+        guard let i = held.firstIndex(of: count) else { return }
+        held.append(held.remove(at: i))
+    }
+
+    /// Before `count` loads: the counts to evict so that at most `capacity - 1` are held during the load.
+    mutating func makeRoom(for count: Int) -> [Int] {
+        held.removeAll { $0 == count }
+        let excess = max(0, held.count - (Self.capacity - 1))
+        let evicted = Array(held.prefix(excess))
+        held.removeFirst(excess)
+        return evicted
+    }
+
+    /// `count` finished loading and is held: the counts the bound drops (normally none).
+    @discardableResult
+    mutating func loaded(_ count: Int) -> [Int] {
+        held.removeAll { $0 == count }
+        held.append(count)
+        let excess = max(0, held.count - Self.capacity)
+        let evicted = Array(held.prefix(excess))
+        held.removeFirst(excess)
+        return evicted
     }
 }

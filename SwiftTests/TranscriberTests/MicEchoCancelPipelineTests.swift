@@ -21,6 +21,19 @@ private final class PathRecordingEngine: TranscriptionEngine, @unchecked Sendabl
     func prepare() async throws {}
 }
 
+/// Both streams say the same short phrase, the mic 0.2 s after the system: an echo copy, or the user
+/// repeating the far end, depending on what the chunk's coupling measure says (#365).
+private final class RepeatedPhraseEngine: TranscriptionEngine, @unchecked Sendable {
+    let name = "RepeatedPhrase"
+    static let phrase = "Not possible to wait now."
+    func transcribe(audioPath: URL, language: String?, audioSource: AudioSourceType) async throws -> [TranscriptSegment] {
+        let start = audioSource == .system ? 0.0 : 0.2
+        return [TranscriptSegment(start: start, end: start + 1.4, text: Self.phrase, language: "en")]
+    }
+    func isReady() -> Bool { true }
+    func prepare() async throws {}
+}
+
 /// Copies the mic to the output and reports `framesReverted`; remembers whether it ran and whether
 /// its output still existed when the mic pass read it.
 private final class CopyingCanceller: MicEchoCancelling, @unchecked Sendable {
@@ -85,7 +98,7 @@ private struct ThrowingCanceller: MicEchoCancelling {
     }
 
     /// Processes one dual-stream chunk (both WAVs written unless told otherwise) and returns it.
-    private func process(_ setup: MicEchoCancelSetup, engine: PathRecordingEngine, in dir: URL,
+    private func process(_ setup: MicEchoCancelSetup, engine: any TranscriptionEngine, in dir: URL,
                          writeSystem: Bool = true, writeMic: Bool = true) async throws -> ProcessedChunk? {
         let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
         if writeSystem { try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1) }
@@ -250,6 +263,73 @@ private struct ThrowingCanceller: MicEchoCancelling {
         #expect(stamp["chunks"] as? Int == 1)
         #expect(stamp["frames_reverted"] as? Int == 2)
         #expect(stamp["engine"] as? String == "fake")
+    }
+
+    /// #365 (a) in the live chunk path, cancellation on: the raw mic's measured coupling decides whether a
+    /// matching line outside an echo cluster can be flagged (#374: its windows, not the canceller's figure).
+    @Test func aChunkWithoutCouplingKeepsARepeatedPhraseAndOneWithCouplingFlagsIt() async throws {
+        for (hears, flagged) in [(LiftFixtures.Mic.headphones, false), (.loudspeaker, true)] {
+            let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+            try LiftFixtures.writePair(system: dir.appendingPathComponent("meeting-0.wav"),
+                                       mic: dir.appendingPathComponent("meeting-0_mic.wav"), hears: hears)
+            let lift = hears == .headphones ? 31.0 : 2.5   // the canceller's figure, contradicting the audio
+            let chunk = try #require(try await process(.on(CopyingCanceller(erleDB: 0, farEndLiftDB: lift)),
+                                                       engine: RepeatedPhraseEngine(), in: dir,
+                                                       writeSystem: false, writeMic: false))
+            let line = try #require(chunk.segments.first { $0.source == "local" })
+            #expect(line.text == RepeatedPhraseEngine.phrase)
+            #expect(line.echo == flagged, "\(hears)")
+        }
+    }
+
+    /// The transcript keeps each cancelled chunk's measure at its place on the meeting's timeline (#365).
+    @Test func finalizeWritesEachChunksMeasureAtItsPlace() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let sys = dir.appendingPathComponent("meeting-0.wav"), mic = dir.appendingPathComponent("meeting-0_mic.wav")
+        try RecoveryFixtures.writeFakeWav(at: sys, seconds: 1)
+        try RecoveryFixtures.writeFakeWav(at: mic, seconds: 1)
+        let processor = ChunkProcessor(
+            config: .default, outputDirectory: dir,
+            sessionState: SessionState(sessionId: "meeting", meetingStart: Date(timeIntervalSince1970: 0),
+                                       engine: "fluidAudio", chunkDurationMinutes: 10, chunks: []),
+            transcriber: PathRecordingEngine(), diarizer: FakeDiarizer(), scratchDirectory: dir,
+            micEchoCancel: .on(CopyingCanceller(erleDB: 0, farEndLiftDB: 2.5)))
+        await processor.processLastChunk(ChunkRotator.FinalizedChunk(
+            index: 0, systemPath: sys.path, micPath: mic.path, startTime: Date(timeIntervalSince1970: 600)))
+        let result = try await TranscriptionRunner().finalize(sessionState: await processor.getSessionState(),
+                                                              outputDirectory: dir, config: .default)
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any]
+        let stamp = try #require((json?["metadata"] as? [String: Any])?["mic_echo_cancel"] as? [String: Any])
+        let entries = try #require(stamp["per_chunk"] as? [[String: Any]])
+        #expect(entries.count == 1)
+        #expect(entries.first?["start"] as? Double == 600)
+        #expect(entries.first?["far_end_lift_db"] as? Double == 2.5)
+    }
+
+    /// The single-file path: each recovery segment's record at the segment's offset, and the dedup reads
+    /// them — the repeated phrase is kept on an uncoupled recording and flagged on a coupled one.
+    @Test func theSingleFilePathPlacesEachSegmentsMeasureAndUsesIt() async throws {
+        for (hears, lift, flagged) in [(LiftFixtures.Mic.headphones, 2.5, false), (.loudspeaker, 31.0, true)] {
+            let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+            for n in 0..<2 {
+                try LiftFixtures.writePair(system: dir.appendingPathComponent("m-\(n).wav"),
+                                           mic: dir.appendingPathComponent("m-\(n)_mic.wav"), hears: hears)
+            }
+            let runner = TranscriptionRunner()
+            runner.engineFactoryForTesting = { _ in (RepeatedPhraseEngine(), FakeDiarizer()) }
+            let result = try await runner.run(
+                systemAudio: dir.appendingPathComponent("m-0.wav"), micAudio: dir.appendingPathComponent("m-0_mic.wav"),
+                outputDirectory: dir, config: .default,
+                micEchoCancel: .on(CopyingCanceller(erleDB: 0, farEndLiftDB: lift)))
+            let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
+            let metadata = try #require(json["metadata"] as? [String: Any])
+            let entries = try #require((metadata["mic_echo_cancel"] as? [String: Any])?["per_chunk"] as? [[String: Any]])
+            #expect(entries.compactMap { $0["chunk"] as? Int } == [0, 1])
+            #expect(entries.compactMap { $0["start"] as? Double } == [0, 80])
+            let locals = (json["segments"] as? [[String: Any]] ?? []).filter { $0["source"] as? String == "local" }
+            #expect(locals.count == 2)
+            #expect(locals.allSatisfy { ($0["echo"] as? Bool ?? false) == flagged }, "lift \(lift)")
+        }
     }
 
     @Test func theSingleFilePathTranscribesTheCleanedMicAndStampsIt() async throws {

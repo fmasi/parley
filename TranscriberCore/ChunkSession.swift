@@ -266,6 +266,9 @@ public struct ProcessedChunk: Codable {
     public let issues: [ChunkIssue]
     /// What mic echo cancellation did for this chunk (#342); nil when it did not run.
     public let micEchoCancel: MicEchoCancelRecord?
+    /// The far-end lift measured on this chunk, with echo cancellation or without it (#374); nil when it was
+    /// not measured (no mic or no far end with audio, a read that failed, or a chunk written before #374).
+    public let farEndLift: FarEndLiftRecord?
 
     public init(
         index: Int,
@@ -278,7 +281,8 @@ public struct ProcessedChunk: Codable {
         echoClusters: [EchoDeduplicator.ClusterVerdict] = [],
         isDualStream: Bool = false,
         issues: [ChunkIssue] = [],
-        micEchoCancel: MicEchoCancelRecord? = nil
+        micEchoCancel: MicEchoCancelRecord? = nil,
+        farEndLift: FarEndLiftRecord? = nil
     ) {
         self.index = index
         self.startTime = startTime
@@ -291,6 +295,13 @@ public struct ProcessedChunk: Codable {
         self.isDualStream = isDualStream
         self.issues = issues
         self.micEchoCancel = micEchoCancel
+        self.farEndLift = farEndLift
+    }
+
+    /// The chunk's far-end lift for echo dedup: its own measure, else (a chunk written before #374) the one
+    /// echo cancellation took, else nil.
+    public var measuredFarEndLift: FarEndLiftRecord? {
+        farEndLift ?? micEchoCancel.map(FarEndLiftRecord.init)
     }
 
     // MARK: - Codable
@@ -307,6 +318,7 @@ public struct ProcessedChunk: Codable {
         case isDualStream = "is_dual_stream"
         case issues
         case micEchoCancel = "mic_echo_cancel"
+        case farEndLift = "far_end_lift"
     }
 
     /// The count's key before #231 ("removed" — nothing is). Read only, so a session.json written
@@ -338,6 +350,8 @@ public struct ProcessedChunk: Codable {
         issues = try c.decodeIfPresent([ChunkIssue].self, forKey: .issues) ?? []
         // Provenance, never worth a chunk: a record this build cannot read is dropped.
         micEchoCancel = (try? c.decodeIfPresent(MicEchoCancelRecord.self, forKey: .micEchoCancel)) ?? nil
+        // A measure, never worth a chunk: one this build cannot read is unknown.
+        farEndLift = (try? c.decodeIfPresent(FarEndLiftRecord.self, forKey: .farEndLift)) ?? nil
     }
 }
 

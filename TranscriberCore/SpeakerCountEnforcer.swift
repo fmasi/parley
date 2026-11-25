@@ -130,7 +130,11 @@ public enum SpeakerCountEnforcer {
     ///   is itself kept (it was judged echo as a group), or a kept label is the only attributed one,
     ///   nothing is folded: with the other side's voice on the channel and nobody else identified,
     ///   "every word here is the one speaker's" no longer holds.
-    public static func foldUnattributed(_ labeled: [LabeledSegment], statedCount: Int, keeping: Set<String> = []) -> [LabeledSegment] {
+    ///
+    /// - Parameter sparing: positions in `labeled` never folded, whatever the count: lines that repeat
+    ///   the other side at that moment, beside an echo voice kept apart (#265 review).
+    public static func foldUnattributed(_ labeled: [LabeledSegment], statedCount: Int, keeping: Set<String> = [],
+                                        sparing: Set<Int> = []) -> [LabeledSegment] {
         guard statedCount == 1, !keeping.contains(SpeakerAssignment.unknownSpeaker) else { return labeled }
         let named = labeled.map(\.speaker).filter { $0 != SpeakerAssignment.unknownSpeaker && !keeping.contains($0) }
         // No attributed speaker at all: name the channel's single speaker rather than leaving every
@@ -147,7 +151,7 @@ public enum SpeakerCountEnforcer {
         guard let target = named.first ?? (keeping.isEmpty ? "Speaker 1" : nil) else { return labeled }
         guard labeled.contains(where: { $0.speaker == SpeakerAssignment.unknownSpeaker }) else { return labeled }
         var out = labeled
-        for i in out.indices where out[i].speaker == SpeakerAssignment.unknownSpeaker {
+        for i in out.indices where out[i].speaker == SpeakerAssignment.unknownSpeaker && !sparing.contains(i) {
             out[i].speaker = target
         }
         return out

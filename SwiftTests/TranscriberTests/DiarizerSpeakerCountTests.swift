@@ -54,3 +54,48 @@ struct DiarizerSpeakerCountTests {
         #expect(FluidAudioDiarizer().makeOfflineConfig(forcedSpeakerCount: -1).clustering.maxSpeakers == base.clustering.maxSpeakers)
     }
 }
+
+/// Re-detect on the mic channel asks for N+1 voices, then N when the wider pass holds no echo voice
+/// (#265). Measured in a release build (M5 Pro, 600 s of audio): a forced-count manager kept idle
+/// after its pass holds about 0.9 GB, and keeping the wider pass's beside the stated count's raised
+/// the peak by about 0.4 GB, while a load from the local cache takes about 135 ms. So ONE forced
+/// manager is kept, and it is released BEFORE another loads: the peak is one manager, below the old
+/// slot's (which released only after the next load), and a re-detect reloads rather than holds.
+@Suite("Diarizer forced-count managers (#265 review)")
+struct ForcedManagerSlotsTests {
+
+    @Test("N+1 then N: the wider pass's manager is released before the stated count's loads")
+    func theWiderManagerGoesBeforeTheStatedOneLoads() {
+        var slots = ForcedManagerSlots()
+        #expect(slots.makeRoom(for: 2) == [])
+        slots.loaded(2)
+        #expect(slots.makeRoom(for: 1) == [2])
+        #expect(slots.held.isEmpty)
+        slots.loaded(1)
+        #expect(slots.held == [1])
+    }
+
+    @Test("the same count again is reused, not reloaded")
+    func theSameCountIsReused() {
+        var slots = ForcedManagerSlots()
+        slots.loaded(1)
+        slots.used(1)
+        #expect(slots.held == [1])
+        #expect(slots.makeRoom(for: 1) == [])
+    }
+
+    @Test("no forced manager is held while another loads, and one at most after")
+    func theBoundHolds() {
+        var slots = ForcedManagerSlots()
+        for count in [1, 2, 3, 4, 2, 5, 5, 1, 6, 7, 3] {
+            if slots.held.contains(count) {
+                slots.used(count)
+            } else {
+                _ = slots.makeRoom(for: count)
+                #expect(slots.held.isEmpty)
+                slots.loaded(count)
+            }
+            #expect(slots.held == [count])
+        }
+    }
+}

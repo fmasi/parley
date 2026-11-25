@@ -82,6 +82,25 @@ public enum TranscriptRediarizer {
         return channelNames(in: metadata, source: source)
     }
 
+    /// The keys of `speaker_names` that belong to one channel: its labels', and the names they were
+    /// given that a later rename keyed in turn (`Sam → Tom` after `Remote Speaker 1 → Sam`, #270).
+    /// A name reached from the other channel's labels as well is shared (a rename applies to every
+    /// line carrying the name, on both channels) and is not counted as this channel's.
+    static func channelRenameKeys(in names: [String: String], source: String) -> Set<String> {
+        func reached(from prefix: String) -> Set<String> {
+            var keys = Set(names.keys.filter { $0.hasPrefix(prefix) })
+            var stack = Array(keys)
+            while let key = stack.popLast() {
+                if let next = names[key], names[next] != nil, keys.insert(next).inserted { stack.append(next) }
+            }
+            return keys
+        }
+        let other = source == "local" ? "remote" : "local"
+        let theirs = reached(from: labelPrefix(for: other))
+        let prefix = labelPrefix(for: source)
+        return reached(from: prefix).filter { $0.hasPrefix(prefix) || !theirs.contains($0) }
+    }
+
     /// Clear the re-diarized channel's speaker names, stashing them under `speaker_names_previous`.
     ///
     /// Names are NOT carried across a re-detect BY KEY, and this is deliberate (#202). Speaker
@@ -105,13 +124,13 @@ public enum TranscriptRediarizer {
     /// The other channel is untouched, and a channel with no names is left exactly as it was — no
     /// empty stash key appears in a file people read.
     public static func clearingChannelNames(in metadata: [String: Any], source: String) -> [String: Any] {
-        let cleared = channelNames(in: metadata, source: source)
-        guard !cleared.isEmpty else { return metadata }
+        let names = metadata["speaker_names"] as? [String: String] ?? [:]
+        let goes = channelRenameKeys(in: names, source: source)
+        guard !goes.isEmpty else { return metadata }
+        let cleared = names.filter { goes.contains($0.key) }
 
         var metadata = metadata
-        let names = metadata["speaker_names"] as? [String: String] ?? [:]
-        let prefix = labelPrefix(for: source)
-        let kept = names.filter { !$0.key.hasPrefix(prefix) }
+        let kept = names.filter { !goes.contains($0.key) }
         if kept.isEmpty {
             metadata["speaker_names"] = nil
         } else {
@@ -122,6 +141,88 @@ public enum TranscriptRediarizer {
         previous.merge(cleared) { _, newer in newer }
         metadata[previousNamesKey] = previous
         return metadata
+    }
+
+    /// Metadata key, `true` once the keys of `echo_clusters[].matched_remote` are known to be the
+    /// remote channel's labels as its lines carry them (#270): stamped when a remote re-detect
+    /// remaps them (`remappingMatchedRemote`) and when a mic re-detect writes the record again.
+    public static let matchedRemoteCurrentKey = "echo_matched_remote_current"
+
+    /// Whether the keys of `matched_remote` can be resolved at all (#270). A remote channel
+    /// re-detected by a build that did not remap them (before #270: `rediarized_channels` holds
+    /// "remote", or an older build's `speaker_count_remote`, and no `echo_matched_remote_current`)
+    /// holds the labels of a clustering that no longer exists: "Remote Speaker 1" there is
+    /// whoever that run numbered first, which may be somebody else now. Such keys are unknown.
+    public static func matchedRemoteIsCurrent(in metadata: [String: Any]) -> Bool {
+        if metadata[matchedRemoteCurrentKey] as? Bool == true { return true }
+        guard let rediarized = TranscriptRenamer.rediarizedChannels(in: metadata) else { return false }
+        return !rediarized.contains("remote")
+    }
+
+    /// Follows the remote speakers a re-detect of the REMOTE channel renumbered, in `echo_clusters`
+    /// (#270).
+    ///
+    /// `matched_remote` is keyed by the remote labels the echo check saw. A re-detect writes the
+    /// channel's labels again — "Remote Speaker 1" can be somebody else now — so a key left as it was
+    /// makes the speaker card name a remote speaker who is not the one it matched. Each key goes to
+    /// the label that now carries that speaker's speech, by the same rule a name is kept
+    /// (`SpeakerNameCarryOver`, `Overlap`): more than half of the old label's speech went to one new
+    /// label, and no other new label took a quarter or more of it. Any other key is DROPPED, never
+    /// guessed: a stale or wrong label is a silent wrong answer, a missing one reads "the other
+    /// side". Keys that land on one new label add up.
+    ///
+    /// The key is the label the check saw, and a rename may have given that speaker a name since,
+    /// which is what the lines carried: `TranscriptRenamer.currentLabel`, with the labels that had
+    /// speech before as the lines' labels. A key whose name the renames cannot settle (a name reused
+    /// for someone else) is dropped. So is every key of a record `matchedRemoteIsCurrent` says is
+    /// stale. Call it BEFORE the channel's names are cleared; it stamps
+    /// `echo_matched_remote_current`.
+    ///
+    /// Entries are taken one at a time: one that is not an object, or has no `matched_remote`, is
+    /// left as it was; a key whose seconds are not a finite number is dropped. A record without
+    /// `echo_clusters`, or with none in it, is returned as it was.
+    ///
+    /// - Parameter overlap: the speech each label of the remote channel had before shares with the
+    ///   label it has now (`Outcome.labelOverlap`).
+    public static func remappingMatchedRemote(
+        in metadata: [String: Any], overlap: SpeakerNameCarryOver.Overlap
+    ) -> [String: Any] {
+        guard let entries = metadata["echo_clusters"] as? [Any], !entries.isEmpty else { return metadata }
+        let names = metadata["speaker_names"] as? [String: String] ?? [:]
+        let current = matchedRemoteIsCurrent(in: metadata)
+        let hadSpeech = Set(overlap.oldSpeech.filter { $0.value > 0 }.keys)
+
+        /// Where that speaker went, or nil when there is no clear answer.
+        func home(of key: String) -> String? {
+            guard current, let label = TranscriptRenamer.currentLabel(of: key, names: names, present: hadSpeech),
+                  let total = overlap.oldSpeech[label], total > 0, let perNew = overlap.seconds[label],
+                  let best = perNew.max(by: { ($0.value, $1.key) < ($1.value, $0.key) }),
+                  best.value > SpeakerNameCarryOver.most * total,
+                  !perNew.contains(where: { $0.key != best.key && $0.value >= SpeakerNameCarryOver.offerShare * total })
+            else { return nil }
+            return best.key
+        }
+
+        var dropped = 0
+        let remapped: [Any] = entries.map { element in
+            guard var entry = element as? [String: Any], let matched = entry["matched_remote"] as? [String: Any]
+            else { return element }
+            var moved: [String: Double] = [:]
+            for (key, value) in matched {
+                guard let seconds = (value as? NSNumber)?.doubleValue, seconds.isFinite, let label = home(of: key)
+                else { dropped += 1; continue }
+                moved[label, default: 0] += seconds
+            }
+            entry["matched_remote"] = moved.mapValues { ($0 * 1000).rounded() / 1000 }
+            return entry
+        }
+        if dropped > 0 {
+            Logger.transcription.info("Re-diarize: \(dropped, privacy: .public) remote label(s) in the echo record had no clear successor and were dropped")
+        }
+        var out = metadata
+        out["echo_clusters"] = remapped
+        out[matchedRemoteCurrentKey] = true
+        return out
     }
 
     // MARK: - Orchestration
@@ -218,6 +319,18 @@ public enum TranscriptRediarizer {
     /// not counted as a person. It never refuses — the count is enforced on everything else — and
     /// re-detecting a transcript that was merged that way takes the echo voice back out.
     ///
+    /// **The stated count is people (#265).** On the mic channel the diarizer is first asked for one
+    /// voice more than the people stated: a diarizer asked for the people alone blended the echo voice
+    /// into one of them, and left nothing for the check to keep apart. When that wider pass holds an
+    /// echo voice it is the one used — the echo voice kept apart, the stated count enforced on the
+    /// rest. When it holds none, the channel is diarized again at the stated count and the re-detect
+    /// is exactly what it was before: a clean channel pays a second diarizer pass, never a different
+    /// result.
+    ///
+    /// The echo check reads `echo_temporal_threshold` / `echo_text_threshold` as the live pipeline does:
+    /// the caller passes the configured values (`echoTemporalThreshold`, `echoTextThreshold`, and
+    /// `echoLocalLeadMarginSeconds` for who is late, #252; nil is `EchoDeduplicator`'s default).
+    ///
     /// **A mic channel that was echo-cancelled is cancelled again (#342).** The pipeline diarized a
     /// cleaned copy of the mic; diarizing the raw one here would find the echo voice again and move
     /// the speakers. When `metadata.mic_echo_cancel` says chunks were cancelled, each archive's mic
@@ -230,10 +343,15 @@ public enum TranscriptRediarizer {
         diarizer: any DiarizationProvider,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         echoCanceller: (any MicEchoSampleCancelling)? = LocalVQEMicEchoCanceller.bundled(),
+        echoTemporalThreshold: Double? = nil,
+        echoTextThreshold: Double? = nil,
+        echoLocalLeadMarginSeconds: Double? = nil,
         onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> Outcome {
         try await rediarize(transcript: url, source: source, speakerCount: speakerCount, diarizer: diarizer,
                             scratchDirectory: scratchDirectory, echoCanceller: echoCanceller,
+                            echoTemporalThreshold: echoTemporalThreshold, echoTextThreshold: echoTextThreshold,
+                            echoLocalLeadMarginSeconds: echoLocalLeadMarginSeconds,
                             onProgress: onProgress, rawLabeling: label)
     }
 
@@ -251,6 +369,9 @@ public enum TranscriptRediarizer {
         diarizer: any DiarizationProvider,
         scratchDirectory: URL = FileManager.default.temporaryDirectory,
         echoCanceller: (any MicEchoSampleCancelling)? = nil,
+        echoTemporalThreshold: Double? = nil,
+        echoTextThreshold: Double? = nil,
+        echoLocalLeadMarginSeconds: Double? = nil,
         onProgress: (@Sendable (Progress) -> Void)? = nil,
         rawLabeling: Labeling
     ) async throws -> Outcome {
@@ -312,20 +433,24 @@ public enum TranscriptRediarizer {
         // check here a cancel during that work goes unnoticed until a full diarize has also run.
         try Task.checkCancellation()
         onProgress?(Progress(phase: .detectingSpeakers))
-        let raw: DiarizationResult
-        switch decoded {
-        case .samples(let samples):
-            raw = try await diarizer.diarize(
-                audio: samples, numSpeakers: speakerCount,
-                progress: { processed, total in
-                    guard total > 0 else { return }
-                    onProgress?(Progress(phase: .detectingSpeakers, fraction: Double(processed) / Double(total)))
-                })
-        case .path(let audioURL):
-            // No pre-decoded buffer to share here (see the comment above) — each backend decodes
-            // its own copy, same as before #204 for this layout. No per-chunk progress fraction is
-            // available on this route either, but the coarser phase indicator still applies.
-            raw = try await diarizer.diarize(audioPath: audioURL, numSpeakers: speakerCount)
+        /// One diarizer pass at `count`, its own progress reported as the part `share` of the phase.
+        func diarize(_ count: Int, share: ClosedRange<Double>) async throws -> DiarizationResult {
+            switch decoded {
+            case .samples(let samples):
+                return try await diarizer.diarize(
+                    audio: samples, numSpeakers: count,
+                    progress: { processed, total in
+                        guard total > 0 else { return }
+                        let fraction = Double(processed) / Double(total)
+                        onProgress?(Progress(phase: .detectingSpeakers,
+                                             fraction: share.lowerBound + fraction * (share.upperBound - share.lowerBound)))
+                    })
+            case .path(let audioURL):
+                // No pre-decoded buffer to share here (see the comment above) — each backend decodes
+                // its own copy, same as before #204 for this layout. No per-chunk progress fraction is
+                // available on this route either, but the coarser phase indicator still applies.
+                return try await diarizer.diarize(audioPath: audioURL, numSpeakers: count)
+            }
         }
         // The diarizer's "forced" count is a target, not a ceiling — asking for 1 on an 82-minute
         // call still returned 2 (#201). Enforce it here, where the clusters and their embeddings
@@ -334,8 +459,65 @@ public enum TranscriptRediarizer {
         // But first, on the mic channel, find the clusters that are not a person on this side at
         // all (#243): the echo check runs on the RAW clusters, and those it judges echo are kept out
         // of the merge. Enforcing first would fold the other side's voice into the stated speaker.
+        //
+        // And the stated count is PEOPLE (#265). With the far side on loudspeakers the mic holds one
+        // voice more than that, and a diarizer asked for the people alone blends the echo voice into
+        // one of them: nothing is left for the check to keep apart, and the lines it cannot flag one
+        // by one go to that person. So the mic channel is diarized with room for one more voice
+        // first. When the check finds an echo voice there, that pass is the one used: the echo
+        // cluster is kept apart and the stated count enforced on the rest. When it finds none, the
+        // channel is diarized again at the stated count and the re-detect is the one it always was —
+        // the wider pass's extra cluster is then a fragment of somebody, and merging it by
+        // resemblance is not what the clusterer itself does at the stated count.
         let candidates = relabelCandidates(in: rawSegments, source: source)
-        var echo = source == "local" ? echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling) : nil
+        let raw: DiarizationResult
+        var echo: EchoCheck?
+        let thresholds = (temporal: echoTemporalThreshold, text: echoTextThreshold, lead: echoLocalLeadMarginSeconds)
+        // The chunks' far-end lift (#365, #374): every echo check here judges by the same per-line
+        // rules as the pipeline, the wider pass and the stated count's alike.
+        let coupling = EchoDeduplicator.AcousticCoupling(transcriptMetadata: metadata)
+        // Who is late is judged per chunk, as the pipeline judged it (#252 review).
+        let chunkStarts = Self.chunkStarts(metadata: metadata, layout: layout)
+        if source == "local" {
+            // The wider pass is a try: if it fails (not a cancel), the stated count's pass — what
+            // re-detect always ran — still can.
+            let wider: DiarizationResult?
+            do {
+                wider = try await diarize(speakerCount + 1, share: 0...0.5)
+            } catch let cancelled as CancellationError {
+                throw cancelled
+            } catch {
+                try Task.checkCancellation()
+                Logger.transcription.error(
+                    "Re-diarize: the pass with room for \(speakerCount + 1, privacy: .public) voices failed (\(error, privacy: .private)) — diarizing at the stated \(speakerCount, privacy: .public)")
+                wider = nil
+            }
+            if let wider,
+               let found = echoCheck(on: candidates, raw: wider, transcript: rawSegments, labeling: rawLabeling,
+                                     thresholds: thresholds, coupling: coupling, chunkStarts: chunkStarts),
+               !found.clusterIDs.isEmpty {
+                // An echo VOICE: a cluster of the diarizer's own. Unattributed speech judged echo as
+                // a group is no voice this pass separated.
+                Logger.transcription.info(
+                    "Re-diarize: with room for \(speakerCount + 1, privacy: .public) voices the mic channel holds \(found.clusterIDs.count, privacy: .public) echo voice(s) — kept apart, the stated \(speakerCount, privacy: .public) enforced on the rest")
+                raw = wider
+                echo = found
+                // No second pass: the phase is done.
+                onProgress?(Progress(phase: .detectingSpeakers, fraction: 1))
+            } else {
+                if wider != nil {
+                    Logger.transcription.info(
+                        "Re-diarize: no echo voice with room for \(speakerCount + 1, privacy: .public) voices — diarizing again at the stated \(speakerCount, privacy: .public)")
+                }
+                try Task.checkCancellation()
+                raw = try await diarize(speakerCount, share: 0.5...1)
+                echo = echoCheck(on: candidates, raw: raw, transcript: rawSegments, labeling: rawLabeling,
+                                     thresholds: thresholds, coupling: coupling, chunkStarts: chunkStarts)
+            }
+        } else {
+            raw = try await diarize(speakerCount, share: 0...1)
+            echo = nil
+        }
         // With the check, every candidate is labeled — a line already flagged `echo` needs its
         // cluster's new label too. Without it, only the unflagged lines, as before the check existed.
         func relabel() -> (pool: [Candidate], labeled: [LabeledSegment]) {
@@ -369,7 +551,19 @@ public enum TranscriptRediarizer {
         // could not tie to a diarization turn — but never to an echo cluster, and not at all when
         // the unattributed speech was itself judged echo.
         let echoClusterLabels = echo.map { echo in Set(pool.indices.filter(echo.isInEchoCluster).map { labeled[$0].speaker }) } ?? []
-        labeled = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: speakerCount, keeping: echoClusterLabels)
+        // With an echo voice kept apart, a line no turn covers that repeats the other side at that
+        // moment is not the one person's either (#265 review): under 3 words the per-line rule leaves
+        // it unflagged ("Right." through the speakers), so the fold would have handed it to the user.
+        // It stays unattributed. Without an echo voice the fold is what it always was.
+        let sparedFromFold: Set<Int> = echo.map { echo in
+            // Only the matches that can be an echo copy: one the per-line rules hold back as the user's own
+            // (#365: no coupling, or not shaped like a copy) folds like any unattributed line.
+            echo.clusterIDs.isEmpty ? [] : Set(pool.indices.filter {
+                echo.result.matchedLocal.contains($0) && !echo.result.heldBack.contains($0)
+            })
+        } ?? []
+        labeled = SpeakerCountEnforcer.foldUnattributed(labeled, statedCount: speakerCount, keeping: echoClusterLabels,
+                                                        sparing: sparedFromFold)
         for i in labeled.indices { labeled[i].source = source }
         SpeakerAssignment.tagWithSourcePrefix(&labeled)
 
@@ -416,6 +610,15 @@ public enum TranscriptRediarizer {
         }
         segments = mergeRelabeled(into: segments, source: source, relabeled: labeled)
         json["segments"] = segments
+        // Before and after, the same lines (#359): an echo cluster is not a person on this side, so
+        // no name can go to it.
+        let echoClusters = Set((echo?.echoLabels ?? []).compactMap { finalLabels[$0] })
+        let overlap = SpeakerNameCarryOver.Overlap(
+            old: SpeakerNameCarryOver.votingLines(in: rawSegments, source: source),
+            new: SpeakerNameCarryOver.votingLines(in: segments, source: source, excluding: echoClusters))
+        // The remote speakers the echo record quotes were renumbered (#270). Read the names it
+        // resolves through before they are cleared below.
+        if source == "remote" { metadata = remappingMatchedRemote(in: metadata, overlap: overlap) }
         // The channel's names go from the transcript — see `clearingChannelNames`. The dialog warns
         // before reaching here, and puts back in its fields the names the speech carries (#359).
         metadata = clearingChannelNames(in: metadata, source: source)
@@ -429,7 +632,6 @@ public enum TranscriptRediarizer {
         // `SpeakerAssignment.unattributedLabel(source:)` is the one definition of that label:
         // `tagWithSourcePrefix` writes it and the rename dialog's stepper leaves it out (#360).
         let visible = labeled.filter { !$0.isFlagged }
-        let echoClusters = Set((echo?.echoLabels ?? []).compactMap { finalLabels[$0] })
         let found = Set(visible.map(\.speaker)).subtracting([unattributed]).subtracting(echoClusters).count
         metadata["speaker_count_\(source)"] = found
         // Which channels a re-detect has rewritten: their labels are no longer the pipeline's.
@@ -449,6 +651,9 @@ public enum TranscriptRediarizer {
             metadata["echo_clusters"] = verdicts + echo.result.clusters.map {
                 $0.metadataDictionary(track: source, chunk: nil) { finalLabels[$0] ?? $0 }
             }
+            // Its `matched_remote` keys are the remote labels the lines carry now (#270), except on a
+            // record that also holds entries of the remote track the check did not write again.
+            if verdicts.isEmpty { metadata[matchedRemoteCurrentKey] = true }
             TranscriptAssembler.stampEchoFlagged(segments.filter { $0["echo"] as? Bool == true }.count, in: &metadata)
         }
         if let issues = metadata["processing_issues"] as? [[String: Any]] {
@@ -478,11 +683,6 @@ public enum TranscriptRediarizer {
             }
             try DurableFile.replace(url, with: out)
         }
-        // Before and after, the same lines (#359): an echo cluster is not a person on this side, so
-        // no name can go to it.
-        let overlap = SpeakerNameCarryOver.Overlap(
-            old: SpeakerNameCarryOver.votingLines(in: rawSegments, source: source),
-            new: SpeakerNameCarryOver.votingLines(in: segments, source: source, excluding: echoClusters))
         let outcome = Outcome(speakerCount: found, segmentsRelabeled: visible.count,
                               echoClusters: echo?.echoLabels.count ?? 0, echoFlagged: echo?.result.flaggedCount ?? 0,
                               labelOverlap: overlap)
@@ -557,6 +757,9 @@ public enum TranscriptRediarizer {
             // The user's answer is authoritative: absorption exists to second-guess a count nobody
             // supplied.
             minSpeakerShare: nil,
+            // Nothing is absorbed here, so there is nothing for an echo check before absorption to
+            // spare: re-detect runs its own on the raw clusters (`echoCheck`).
+            echoReference: nil,
             speakerCountIsUserStated: true)
         return (result.labeled, result.speakerDatabase)
     }
@@ -588,7 +791,9 @@ public enum TranscriptRediarizer {
     /// not be put back on the right lines, so the check stands down and the re-detect goes on
     /// without it — a relabel must never lose or misplace words.
     private static func echoCheck(
-        on candidates: [Candidate], raw: DiarizationResult, transcript: [[String: Any]], labeling: Labeling
+        on candidates: [Candidate], raw: DiarizationResult, transcript: [[String: Any]], labeling: Labeling,
+        thresholds: (temporal: Double?, text: Double?, lead: Double?), coupling: EchoDeduplicator.AcousticCoupling,
+        chunkStarts: [Double]
     ) -> EchoCheck? {
         var (local, speakerDatabase) = labeling(candidates.map(\.segment), raw)
         guard local.count == candidates.count else {
@@ -610,12 +815,39 @@ public enum TranscriptRediarizer {
         }
         // The raw clusters' embeddings are passed as evidence. The transcript holds none for the
         // other channel, so no voice similarity is recorded; it decides nothing either way.
+        // The chunks' far-end lift (#365, #374) and who is late (#252): the same per-line rules as the pipeline.
         let result = EchoDeduplicator.deduplicate(
-            segments: local + remote, localSpeakerDatabase: speakerDatabase, remoteSpeakerDatabase: [:])
+            segments: local + remote, localSpeakerDatabase: speakerDatabase, remoteSpeakerDatabase: [:],
+            temporalThreshold: thresholds.temporal, textThreshold: thresholds.text,
+            localLeadMarginSeconds: thresholds.lead, coupling: coupling, chunkStarts: chunkStarts)
         let echoLabels = Set(result.clusters.filter(\.isEcho).map(\.label))
         let clusterIDs = SpeakerAssignment.buildSpeakerMap(from: raw.segments)
             .filter { echoLabels.contains(labelPrefix(for: "local") + $0.value) }.keys
         return EchoCheck(result: result, rawLabels: local.map(\.speaker), echoLabels: echoLabels, clusterIDs: Set(clusterIDs))
+    }
+
+    /// Where each chunk after the first started on the transcript's timeline, for who is late (#252 review):
+    /// the chunks' places in `metadata.acoustic_coupling.per_chunk` (every measured chunk, #374), else — the
+    /// chunk archives not merged into one — `chunk_offsets`. None for a single file or a transcript that keeps
+    /// neither: the whole recording is then judged as one, as before. Values that are not finite and
+    /// increasing are dropped, so a damaged list only merges chunks, never splits one.
+    static func chunkStarts(metadata: [String: Any], layout: AudioLayout) -> [Double] {
+        let measured = ((metadata[EchoDeduplicator.AcousticCoupling.metadataKey] as? [String: Any])?["per_chunk"] as? [[String: Any]])?
+            .compactMap { ($0["start"] as? NSNumber)?.doubleValue }
+        var starts: [Double] = []
+        if let measured, measured.count > 1 {
+            starts = measured.sorted()
+        } else if case .chunkedArchives(let chunks) = layout, chunks.count > 1,
+                  let offsets = metadata["chunk_offsets"] as? [Double], offsets.count == chunks.count {
+            starts = offsets
+        }
+        var previous = -Double.infinity
+        let increasing = starts.filter { start in
+            guard start.isFinite, start > previous else { return false }
+            previous = start
+            return true
+        }
+        return Array(increasing.dropFirst())
     }
 
     /// The longest a single chunk can plausibly be, and the most recorded-gap time the bound will
