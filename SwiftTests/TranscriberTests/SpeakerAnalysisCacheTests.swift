@@ -208,9 +208,19 @@ import Testing
         var phases: [TranscriptRediarizer.Progress.Phase] { lock.withLock { stored.map(\.phase) } }
     }
 
-    static let segments: [[String: Any]] = (0..<8).map { i in
-        ["start": Double(i) * 2, "end": Double(i) * 2 + 1.5, "text": "line \(i) said here", "speaker": "Local Speaker 1", "source": "local"]
-    } + [["start": 0.0, "end": 1.0, "text": "far side", "speaker": "Remote Speaker 1", "source": "remote"]]
+    static let segments: [[String: Any]] = {
+        // Built in steps: CI's Swift 6.3 times out type-checking the one-expression form.
+        var lines: [[String: Any]] = []
+        for i in 0..<8 {
+            let start = Double(i) * 2
+            let line: [String: Any] = ["start": start, "end": start + 1.5, "text": "line \(i) said here",
+                                       "speaker": "Local Speaker 1", "source": "local"]
+            lines.append(line)
+        }
+        let far: [String: Any] = ["start": 0.0, "end": 1.0, "text": "far side", "speaker": "Remote Speaker 1", "source": "remote"]
+        lines.append(far)
+        return lines
+    }()
 
     /// A chunked recording (a mic-only and a system-only chunk, 1 s each), or a two-file one.
     private func makeRecording(legacy: Bool = false) throws -> (transcript: URL, files: [URL], cleanup: () -> Void) {
