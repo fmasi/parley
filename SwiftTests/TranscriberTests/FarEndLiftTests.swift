@@ -436,8 +436,8 @@ private struct LiftReportingCanceller: MicEchoCancelling {
         let files = chunkFiles(in: dir)
         try LiftFixtures.write(files.system, seconds: 600, rate: 16_000) { LiftFixtures.farEnd(at: $0) }
         try LiftFixtures.write(files.mic, seconds: 600, rate: 16_000) { LiftFixtures.mic(at: $0, speakers: { $0 < 180 }) }
-        let processor = try processor(in: dir, setup: .off, engine: TwoPhrasesEngine())
-        let chunk = try #require(await run(processor, in: dir))
+        let chunkProcessor = try processor(in: dir, setup: .off, engine: TwoPhrasesEngine())
+        let chunk = try #require(await run(chunkProcessor, in: dir))
         let lift = try #require(chunk.farEndLift)
         #expect((lift.farEndLiftDB ?? 99) < EchoDeduplicator.AcousticCoupling.uncoupledBelowLiftDB,
                 "over the whole chunk it reads as headphones")
@@ -479,9 +479,9 @@ private struct LiftReportingCanceller: MicEchoCancelling {
         let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let files = chunkFiles(in: dir)
         try LiftFixtures.writePair(system: files.system, mic: files.mic, hears: .headphones)
-        let processor = try processor(in: dir, setup: .off)
-        _ = await run(processor, in: dir, startTime: Date(timeIntervalSince1970: 600))
-        let result = try await TranscriptionRunner().finalize(sessionState: await processor.getSessionState(),
+        let chunkProcessor = try processor(in: dir, setup: .off)
+        _ = await run(chunkProcessor, in: dir, startTime: Date(timeIntervalSince1970: 600))
+        let result = try await TranscriptionRunner().finalize(sessionState: await chunkProcessor.getSessionState(),
                                                               outputDirectory: dir, config: .default)
         let json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: result.jsonPath)) as? [String: Any])
         let metadata = try #require(json["metadata"] as? [String: Any])

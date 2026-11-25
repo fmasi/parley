@@ -346,11 +346,11 @@ struct EchoLineMatchingTests {
     @Test func theContextReachesBackTheWholeEchoDelayAndHoldsFlaggedRemoteSpeech() {
         var earlier = remote(70, 76.2, "The plan is ready on Friday.")
         let source = remote(77, 82, "The second draft goes to the review board")
-        let local = local(76.8, 82.3, "on Friday. The second draft goes to the review board")
-        #expect(EchoDeduplicator.deduplicate(segments: [earlier, source, local], localSpeakerDatabase: [:],
+        let copy = local(76.8, 82.3, "on Friday. The second draft goes to the review board")
+        #expect(EchoDeduplicator.deduplicate(segments: [earlier, source, copy], localSpeakerDatabase: [:],
                                              remoteSpeakerDatabase: [:]).flaggedCount == 1)
         earlier.filtered = true
-        #expect(EchoDeduplicator.deduplicate(segments: [earlier, source, local], localSpeakerDatabase: [:],
+        #expect(EchoDeduplicator.deduplicate(segments: [earlier, source, copy], localSpeakerDatabase: [:],
                                              remoteSpeakerDatabase: [:]).flaggedCount == 1)
     }
 
